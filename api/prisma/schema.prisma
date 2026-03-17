@@ -1,0 +1,124 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+  BURSARY
+}
+
+enum WalletStatus {
+  ACTIVE
+  FROZEN
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  FEE_PAYMENT
+  REFUND
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum LedgerType {
+  CREDIT
+  DEBIT
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  email        String    @unique
+  password     String
+  firstName    String
+  lastName     String
+  matricNumber String?   @unique
+  college      String?   // Added field
+  department   String?   // Added field
+  program      String?   // Added field
+  role         Role      @default(STUDENT)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  wallet       Wallet?
+  transactions Transaction[]
+  auditLogs    AuditLog[]
+
+  @@map("users")
+}
+
+model Wallet {
+  id        Int          @id @default(autoincrement())
+  userId    Int          @unique
+  balance   Decimal      @default(0.00) @db.Decimal(15, 2)
+  currency  String       @default("NGN")
+  status    WalletStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user         User           @relation(fields: [userId], references: [id])
+  ledger       WalletLedger[]
+
+  @@map("wallets")
+}
+
+model Transaction {
+  id               Int               @id @default(autoincrement())
+  reference        String            @unique
+  userId           Int
+  amount           Decimal           @db.Decimal(15, 2)
+  type             TransactionType
+  status           TransactionStatus @default(PENDING)
+  description      String?
+  metadata         Json?             // Stores payment gateway response or bank details
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id])
+  walletLedger     WalletLedger[]
+
+  @@map("transactions")
+}
+
+model WalletLedger {
+  id            Int         @id @default(autoincrement())
+  walletId      Int
+  transactionId Int
+  type          LedgerType
+  amount        Decimal     @db.Decimal(15, 2)
+  balanceBefore Decimal     @db.Decimal(15, 2)
+  balanceAfter  Decimal     @db.Decimal(15, 2)
+  createdAt     DateTime    @default(now())
+
+  wallet        Wallet      @relation(fields: [walletId], references: [id])
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+
+  @@map("wallet_ledger")
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  action    String
+  details   Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
