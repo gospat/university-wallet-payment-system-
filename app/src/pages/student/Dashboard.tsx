@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import { Wallet, ArrowDownCircle, History, Download, CreditCard, ShieldCheck, User as UserIcon, BookOpen, GraduationCap } from 'lucide-react';
+import { Wallet, ArrowDownCircle, History, Download, CreditCard, ShieldCheck } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import Modal from '../../components/Modal';
 
@@ -220,36 +220,6 @@ const StudentDashboard: React.FC = () => {
       </nav>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        
-        {/* Student Profile Section */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8 flex flex-col md:flex-row items-center md:items-start gap-6 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-bl-full -z-10 opacity-50"></div>
-          
-          <div className="h-24 w-24 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center flex-shrink-0 border-4 border-white shadow-md">
-            <UserIcon className="h-10 w-10" />
-          </div>
-          
-          <div className="flex-1 text-center md:text-left">
-            <h1 className="text-2xl font-bold text-gray-900">{user?.firstName} {user?.lastName}</h1>
-            <p className="text-gray-500 font-medium mb-4">{user?.matricNumber || 'N/A'}</p>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg">
-                <BookOpen className="h-4 w-4 text-blue-500" />
-                <span className="truncate" title={user?.college || 'N/A'}>{user?.college || 'College of Science'}</span>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg">
-                <GraduationCap className="h-4 w-4 text-blue-500" />
-                <span className="truncate" title={user?.department || 'N/A'}>{user?.department || 'Computer Science'}</span>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg">
-                <ShieldCheck className="h-4 w-4 text-blue-500" />
-                <span className="truncate" title={user?.program || 'N/A'}>{user?.program || 'B.Sc. Computer Science'}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Wallet Card */}

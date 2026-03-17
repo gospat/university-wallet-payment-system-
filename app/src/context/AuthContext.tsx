@@ -7,9 +7,6 @@ interface User {
   lastName: string;
   role: 'STUDENT' | 'ADMIN' | 'BURSARY';
   matricNumber?: string;
-  college?: string;
-  department?: string;
-  program?: string;
 }
 
 interface AuthContextType {

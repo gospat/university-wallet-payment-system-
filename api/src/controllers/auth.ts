@@ -8,19 +8,7 @@ export const signup = catchAsync(async (req: Request, res: Response, next: NextF
   res.status(201).json({
     status: 'success',
     token,
-    data: {
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        matricNumber: user.matricNumber,
-        college: user.college,
-        department: user.department,
-        program: user.program
-      },
-    },
+    data: { user },
   });
 });
 
@@ -30,18 +18,6 @@ export const login = catchAsync(async (req: Request, res: Response, next: NextFu
   res.status(200).json({
     status: 'success',
     token,
-    data: {
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        matricNumber: user.matricNumber,
-        college: user.college,
-        department: user.department,
-        program: user.program
-      },
-    },
+    data: { user },
   });
 });

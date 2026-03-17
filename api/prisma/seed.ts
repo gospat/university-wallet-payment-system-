@@ -50,13 +50,10 @@ async function main() {
         firstName: `Student`,
         lastName: `${i}`,
         matricNumber: `2023/SCI/${1000 + i}`,
-        college: `College of Science`,
-        department: `Computer Science`,
-        program: `B.Sc. Computer Science`,
         role: Role.STUDENT,
         wallet: {
           create: {
-            balance: 50000.00, // Pre-fund with 50k
+            balance: 50000.00, // Initial balance
           },
         },
       },
@@ -95,25 +92,13 @@ async function main() {
     });
 
     // B. Pending Withdrawal Request (For Bursary to approve)
-    if (student.email === 'student2@university.edu.ng') {
+    if (student.id % 2 === 0) { // Only for some students
+      const withdrawRef = `WD_SEED_${student.id}`;
       await prisma.transaction.create({
         data: {
           userId: student.id,
-          reference: `WD_SEED_1`,
-          amount: 15000.00,
-          type: TransactionType.WITHDRAWAL,
-          status: TransactionStatus.PENDING,
-          description: 'Withdrawal Request',
-          metadata: { bank: 'First Bank', account: '3012345678' },
-        },
-      });
-      console.log(`Created Pending Withdrawal for ${student.email}`);
-    } else if (student.email === 'student4@university.edu.ng') {
-      await prisma.transaction.create({
-        data: {
-          userId: student.id,
-          reference: `WD_SEED_2`,
-          amount: 25000.00,
+          reference: withdrawRef,
+          amount: 5000.00,
           type: TransactionType.WITHDRAWAL,
           status: TransactionStatus.PENDING,
           description: 'Withdrawal Request',

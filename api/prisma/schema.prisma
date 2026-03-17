@@ -41,18 +41,15 @@ enum LedgerType {
 }
 
 model User {
-  id           Int       @id @default(autoincrement())
-  email        String    @unique
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
   password     String
   firstName    String
   lastName     String
-  matricNumber String?   @unique
-  college      String?   // Added field
-  department   String?   // Added field
-  program      String?   // Added field
-  role         Role      @default(STUDENT)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  matricNumber String?  @unique // Nullable for Admins
+  role         Role     @default(STUDENT)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   wallet       Wallet?
   transactions Transaction[]
