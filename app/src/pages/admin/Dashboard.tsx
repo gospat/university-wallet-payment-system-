@@ -1,11 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Users, DollarSign, Activity, FileText } from 'lucide-react';
+import { Users, DollarSign, Activity, FileText, Shield, Mail } from 'lucide-react';
 import api from '../../services/api';
+import Modal from '../../components/Modal';
 
 const AdminDashboard: React.FC = () => {
   const { user, logout } = useAuth();
   const [stats, setStats] = useState<any>(null);
+
+  // Modals state
+  const [showAddStudentModal, setShowAddStudentModal] = useState(false);
+  const [alertModal, setAlertModal] = useState({ isOpen: false, title: '', message: '', type: 'error' as 'error' | 'success' });
+  const [studentForm, setStudentForm] = useState({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123' });
+  const [loading, setLoading] = useState(false);
+
+  const showAlert = (title: string, message: string, type: 'error' | 'success' = 'error') => {
+    setAlertModal({ isOpen: true, title, message, type });
+  };
 
   useEffect(() => {
     fetchStats();
@@ -21,22 +32,24 @@ const AdminDashboard: React.FC = () => {
   };
 
   const handleAddStudent = async () => {
-    const email = prompt("Enter student email:");
-    const firstName = prompt("Enter first name:");
-    const lastName = prompt("Enter last name:");
-    const matricNumber = prompt("Enter matric number:");
+    const { email, firstName, lastName, matricNumber, password } = studentForm;
 
     if (!email || !firstName || !lastName || !matricNumber) {
-      alert("All fields are required.");
+      showAlert('Validation Error', 'All fields are required.');
       return;
     }
 
+    setLoading(true);
     try {
-      await api.post('/admin/students', { email, firstName, lastName, matricNumber });
-      alert('Student added successfully!');
+      await api.post('/admin/students', { email, firstName, lastName, matricNumber, password });
+      setShowAddStudentModal(false);
+      setStudentForm({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123' });
+      showAlert('Success', 'Student added successfully!', 'success');
       fetchStats(); // Refresh stats to update total student count
     } catch (err: any) {
-      alert(err.response?.data?.message || 'Failed to add student');
+      showAlert('Error', err.response?.data?.message || 'Failed to add student');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -64,6 +77,29 @@ const AdminDashboard: React.FC = () => {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
+        {/* Admin Profile Section */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8 flex flex-col md:flex-row items-center md:items-start gap-6 relative overflow-hidden">
+          <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-gray-100 rounded-full blur-2xl opacity-60"></div>
+          <div className="h-24 w-24 bg-gray-800 rounded-full flex items-center justify-center text-white text-3xl font-bold shrink-0 border-4 border-white shadow-md z-10">
+            {user?.firstName?.[0]}{user?.lastName?.[0]}
+          </div>
+          <div className="flex-1 text-center md:text-left z-10 w-full">
+            <h1 className="text-2xl font-bold text-gray-900">{user?.firstName} {user?.lastName}</h1>
+            <p className="text-gray-500 font-medium mb-4">System Administrator</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full md:w-2/3">
+              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                <Shield className="h-4 w-4 text-gray-500 shrink-0" />
+                <span className="truncate font-medium">Full Access</span>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                <Mail className="h-4 w-4 text-gray-500 shrink-0" />
+                <span className="truncate font-medium">{user?.email || 'admin@university.edu.ng'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
@@ -151,7 +187,7 @@ const AdminDashboard: React.FC = () => {
             <h3 className="text-lg font-bold text-gray-900 mb-4">Quick Management</h3>
               <div className="space-y-3">
                 <button 
-                  onClick={handleAddStudent}
+                  onClick={() => setShowAddStudentModal(true)}
                   className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg text-sm font-medium text-gray-700 transition-colors"
                 >
                   Add New Student
@@ -170,6 +206,106 @@ const AdminDashboard: React.FC = () => {
         </div>
 
       </main>
+
+      {/* Add Student Modal */}
+      <Modal
+        isOpen={showAddStudentModal}
+        onClose={() => setShowAddStudentModal(false)}
+        title="Add New Student"
+        footer={
+          <>
+            <button 
+              onClick={() => setShowAddStudentModal(false)}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={handleAddStudent}
+              disabled={loading}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold shadow-md transition-all flex items-center gap-2 disabled:opacity-50"
+            >
+              {loading ? 'Adding...' : 'Add Student'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+            <input 
+              type="email" 
+              value={studentForm.email}
+              onChange={(e) => setStudentForm({...studentForm, email: e.target.value})}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              placeholder="student@university.edu.ng"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">First Name</label>
+              <input 
+                type="text" 
+                value={studentForm.firstName}
+                onChange={(e) => setStudentForm({...studentForm, firstName: e.target.value})}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="John"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Last Name</label>
+              <input 
+                type="text" 
+                value={studentForm.lastName}
+                onChange={(e) => setStudentForm({...studentForm, lastName: e.target.value})}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="Doe"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Matric Number</label>
+            <input 
+              type="text" 
+              value={studentForm.matricNumber}
+              onChange={(e) => setStudentForm({...studentForm, matricNumber: e.target.value})}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              placeholder="2023/SCI/1000"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Default Password</label>
+            <input 
+              type="text" 
+              value={studentForm.password}
+              onChange={(e) => setStudentForm({...studentForm, password: e.target.value})}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+        </div>
+      </Modal>
+
+      {/* General Alert Modal */}
+      <Modal
+        isOpen={alertModal.isOpen}
+        onClose={() => setAlertModal({ ...alertModal, isOpen: false })}
+        title={alertModal.title}
+        footer={
+          <button 
+            onClick={() => setAlertModal({ ...alertModal, isOpen: false })}
+            className={`px-6 py-2 rounded-lg font-bold text-white shadow-md transition-all ${
+              alertModal.type === 'success' ? 'bg-green-600 hover:bg-green-700 shadow-green-200' : 'bg-red-600 hover:bg-red-700 shadow-red-200'
+            }`}
+          >
+            Acknowledge
+          </button>
+        }
+      >
+        <div className="py-4">
+          <p className="text-gray-700 text-lg">{alertModal.message}</p>
+        </div>
+      </Modal>
+
     </div>
   );
 };
