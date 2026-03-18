@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import { Wallet, ArrowDownCircle, History, Download, CreditCard, ShieldCheck } from 'lucide-react';
+import { Wallet, ArrowDownCircle, History, Download, CreditCard, ShieldCheck, BookOpen, Building2, GraduationCap } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import Modal from '../../components/Modal';
 
@@ -220,6 +220,33 @@ const StudentDashboard: React.FC = () => {
       </nav>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Student Profile Section */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8 flex flex-col md:flex-row items-center md:items-start gap-6 relative overflow-hidden">
+          <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-blue-50 rounded-full blur-2xl opacity-60"></div>
+          <div className="h-24 w-24 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 text-3xl font-bold shrink-0 border-4 border-white shadow-md z-10">
+            {user?.firstName?.[0]}{user?.lastName?.[0]}
+          </div>
+          <div className="flex-1 text-center md:text-left z-10 w-full">
+            <h1 className="text-2xl font-bold text-gray-900">{user?.firstName} {user?.lastName}</h1>
+            <p className="text-gray-500 font-medium mb-4">{user?.matricNumber || 'N/A'}</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full">
+              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                <BookOpen className="h-4 w-4 text-blue-500 shrink-0" />
+                <span className="truncate font-medium" title={user?.college || 'N/A'}>{user?.college || 'N/A'}</span>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                <Building2 className="h-4 w-4 text-blue-500 shrink-0" />
+                <span className="truncate font-medium" title={user?.department || 'N/A'}>{user?.department || 'N/A'}</span>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
+                <GraduationCap className="h-4 w-4 text-blue-500 shrink-0" />
+                <span className="truncate font-medium" title={user?.program || 'N/A'}>{user?.program || 'N/A'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Wallet Card */}

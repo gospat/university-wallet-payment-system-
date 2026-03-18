@@ -50,6 +50,9 @@ async function main() {
         firstName: `Student`,
         lastName: `${i}`,
         matricNumber: `2023/SCI/${1000 + i}`,
+        college: 'College of Science',
+        department: 'Computer Science',
+        program: 'B.Sc. Computer Science',
         role: Role.STUDENT,
         wallet: {
           create: {

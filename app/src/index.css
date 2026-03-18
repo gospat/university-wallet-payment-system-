@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-@theme {
+:root {
   --color-primary: #007bff;
   --color-secondary: #6c757d;
   --color-success: #28a745;
@@ -12,5 +12,7 @@
 
 body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  @apply bg-gray-50 text-gray-900;
+  background-color: #f9fafb;
+  color: #111827;
 }
+
