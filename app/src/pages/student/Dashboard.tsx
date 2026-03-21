@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Wallet, ArrowDownCircle, History, Download, CreditCard, ShieldCheck, BookOpen, Building2, GraduationCap } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import Modal from '../../components/Modal';
+import PortalNavbar from '../../components/PortalNavbar';
 
 interface Transaction {
   id: number;
@@ -32,6 +33,7 @@ const StudentDashboard: React.FC = () => {
   // Modal State
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [feesBreakdown, setFeesBreakdown] = useState<FeesBreakdown | null>(null);
+  const [idempotencyKey, setIdempotencyKey] = useState<string>('');
   
   // Alert Modal State
   const [alertModal, setAlertModal] = useState({ isOpen: false, title: '', message: '', type: 'error' as 'error' | 'success' });
@@ -113,6 +115,7 @@ const StudentDashboard: React.FC = () => {
       paystackFee,
       total
     });
+    setIdempotencyKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto ? (crypto as any).randomUUID() : `${Date.now()}_${Math.random().toString(16).slice(2)}`);
     setShowPaymentModal(true);
   };
 
@@ -121,8 +124,18 @@ const StudentDashboard: React.FC = () => {
     
     setLoading(true);
     try {
-      const res = await api.post('/wallet/deposit', { amount: feesBreakdown.amount, email: user?.email });
-      window.location.href = res.data.data.authorization_url;
+      const res = await api.post(
+        '/wallet/deposit',
+        { amount: feesBreakdown.amount, email: user?.email },
+        { headers: { 'Idempotency-Key': idempotencyKey } }
+      );
+      const url = res.data.data.authorization_url;
+      if (!url) {
+        setShowPaymentModal(false);
+        showAlert('Deposit Info', res.data.data.message || 'Deposit request is already processed.', 'success');
+        return;
+      }
+      window.location.href = url;
     } catch (err: any) {
       console.error(err);
       setShowPaymentModal(false);
@@ -200,24 +213,7 @@ const StudentDashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Navbar */}
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center">
-              <span className="text-xl font-bold text-blue-600">UniWallet</span>
-            </div>
-            <div className="flex items-center space-x-4">
-              <span className="text-gray-700 font-medium">Hello, {user?.firstName}</span>
-              <button 
-                onClick={logout}
-                className="text-sm text-red-600 hover:text-red-800 font-medium"
-              >
-                Logout
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
+      <PortalNavbar brand="UniWallet" userText={`Hello, ${user?.firstName || ''}`} onLogout={logout} />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Student Profile Section */}

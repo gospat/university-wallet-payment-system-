@@ -5,10 +5,24 @@ import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 
 const signToken = (id: number, role: Role) => {
-  return jwt.sign({ id, role }, process.env.JWT_SECRET || 'secret', {
+  return jwt.sign({ id, role }, process.env.JWT_SECRET as string, {
     expiresIn: '90d',
   });
 };
+
+const safeUserSelect = {
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  role: true,
+  matricNumber: true,
+  college: true,
+  department: true,
+  program: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
 export class AuthService {
   static async signup(data: any) {
@@ -32,6 +46,7 @@ export class AuthService {
           matricNumber,
           role: role || 'STUDENT',
         },
+        select: safeUserSelect,
       });
 
       // Create Wallet for the user
@@ -57,11 +72,17 @@ export class AuthService {
       throw new AppError('Please provide email and password', 400);
     }
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const userWithPassword = await prisma.user.findUnique({ where: { email } });
 
-    if (!user || !(await bcrypt.compare(password, user.password))) {
+    if (!userWithPassword || !(await bcrypt.compare(password, userWithPassword.password))) {
       throw new AppError('Incorrect email or password', 401);
     }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userWithPassword.id },
+      select: safeUserSelect,
+    });
+    if (!user) throw new AppError('User not found', 404);
 
     const token = signToken(user.id, user.role);
 

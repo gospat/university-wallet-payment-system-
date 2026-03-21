@@ -2,7 +2,7 @@ import axios from 'axios';
 import { AppError } from '../utils/AppError';
 
 export class PaystackService {
-  private static readonly SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || '';
+  private static readonly SECRET_KEY = process.env.PAYSTACK_SECRET_KEY as string;
   private static readonly BASE_URL = 'https://api.paystack.co';
 
   static async initializeTransaction(email: string, amount: number, metadata: any = {}) {
@@ -33,8 +33,9 @@ export class PaystackService {
           email,
           amount: Math.ceil(totalAmount * 100), // Convert total to kobo
           metadata: enhancedMetadata,
+          reference: metadata.reference,
           // Redirect to Frontend Dashboard to handle verification
-          callback_url: 'http://localhost:5173/student/dashboard', 
+          callback_url: process.env.PAYSTACK_CALLBACK_URL || 'http://localhost:5173/student/dashboard',
         },
         {
           headers: {
@@ -44,7 +45,7 @@ export class PaystackService {
         }
       );
 
-      return { ...response.data.data, feeBreakdown: enhancedMetadata.fees };
+      return { ...response.data.data, reference: metadata.reference, feeBreakdown: enhancedMetadata.fees };
     } catch (error: any) {
       throw new AppError(
         `Paystack Initialization Error: ${error.response?.data?.message || error.message}`,

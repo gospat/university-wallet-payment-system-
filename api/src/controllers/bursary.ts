@@ -71,6 +71,15 @@ export const approveWithdrawal = catchAsync(async (req: Request, res: Response, 
       where: { id: transaction.id },
       data: { status: TransactionStatus.SUCCESS },
     });
+
+    await tx.auditLog.create({
+      data: {
+        userId: req.user?.id,
+        action: 'WITHDRAWAL_APPROVED',
+        details: { withdrawalId: transaction.id, amount: Number(transaction.amount), studentId: transaction.userId },
+        ipAddress: req.ip,
+      },
+    });
   });
 
   res.status(200).json({
@@ -82,9 +91,25 @@ export const approveWithdrawal = catchAsync(async (req: Request, res: Response, 
 export const rejectWithdrawal = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
   const { id } = req.params;
 
-  await prisma.transaction.update({
-    where: { id: Number(id) },
-    data: { status: TransactionStatus.FAILED },
+  await prisma.$transaction(async (tx) => {
+    const transaction = await tx.transaction.findUnique({ where: { id: Number(id) } });
+    if (!transaction || transaction.type !== 'WITHDRAWAL' || transaction.status !== 'PENDING') {
+      throw new AppError('Invalid withdrawal request', 400);
+    }
+
+    await tx.transaction.update({
+      where: { id: transaction.id },
+      data: { status: TransactionStatus.FAILED },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        userId: req.user?.id,
+        action: 'WITHDRAWAL_REJECTED',
+        details: { withdrawalId: transaction.id, amount: Number(transaction.amount), studentId: transaction.userId },
+        ipAddress: req.ip,
+      },
+    });
   });
 
   res.status(200).json({

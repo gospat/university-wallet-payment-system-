@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { CheckCircle, XCircle, ShieldCheck, Mail, History } from 'lucide-react';
 import api from '../../services/api';
 import Modal from '../../components/Modal';
+import PortalNavbar from '../../components/PortalNavbar';
 
 const BursaryDashboard: React.FC = () => {
   const { user, logout } = useAuth();
@@ -71,24 +72,7 @@ const BursaryDashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Navbar */}
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center">
-              <span className="text-xl font-bold text-gray-900">Bursary Portal</span>
-            </div>
-            <div className="flex items-center space-x-4">
-              <span className="text-gray-700 font-medium">{user?.firstName}</span>
-              <button 
-                onClick={logout}
-                className="text-sm text-red-600 hover:text-red-800 font-medium"
-              >
-                Logout
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
+      <PortalNavbar brand="Bursary Portal" userText={user?.firstName || ''} onLogout={logout} />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         

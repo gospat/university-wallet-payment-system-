@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useId, useRef } from 'react';
 import { X } from 'lucide-react';
 
 interface ModalProps {
@@ -11,15 +11,44 @@ interface ModalProps {
 
 const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer }) => {
   if (!isOpen) return null;
+  const titleId = useId();
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
+  const lastActiveRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    lastActiveRef.current = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      lastActiveRef.current?.focus?.();
+    };
+  }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm transition-opacity">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md transform transition-all scale-100">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm transition-opacity"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="bg-white rounded-2xl shadow-xl w-full max-w-md transform transition-all scale-100"
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-100">
-          <h3 className="text-xl font-bold text-gray-900">{title}</h3>
+          <h3 id={titleId} className="text-xl font-bold text-gray-900">{title}</h3>
           <button 
             onClick={onClose}
+            ref={closeBtnRef}
+            aria-label="Close dialog"
             className="text-gray-400 hover:text-gray-500 hover:bg-gray-100 p-2 rounded-full transition-colors"
           >
             <X className="h-5 w-5" />

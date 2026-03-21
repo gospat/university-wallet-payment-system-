@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import { PaystackService } from './paystack';
 import { LedgerService } from './ledger';
 import { TransactionType, TransactionStatus, LedgerType } from '@prisma/client';
+import crypto from 'crypto';
 
 export class WalletService {
   static async getBalance(userId: number) {
@@ -13,33 +14,62 @@ export class WalletService {
     return wallet;
   }
 
-  static async initiateDeposit(userId: number, amount: number, email: string) {
-    if (amount < 100) throw new AppError('Minimum deposit is 100 NGN', 400);
+  static async initiateDeposit(userId: number, amount: number, email: string, idempotencyKey: string) {
+    if (!Number.isFinite(amount)) throw new AppError('Invalid amount', 400);
+    if (amount < 20000) throw new AppError('Minimum deposit is ₦20,000', 400);
+    if (amount > 5000000) throw new AppError('Maximum deposit amount per transaction is ₦5,000,000', 400);
 
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) throw new AppError('Wallet not found', 404);
 
-    const reference = `DEP_${Date.now()}_${userId}`;
+    const existing = await prisma.transaction.findFirst({
+      where: { userId, type: TransactionType.DEPOSIT, idempotencyKey } as any,
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existing?.status === TransactionStatus.SUCCESS) {
+      return { message: 'Deposit already completed', reference: existing.reference };
+    }
+
+    if (existing?.status === TransactionStatus.PENDING) {
+      const meta: any = existing.metadata || {};
+      if (meta.paystackInit?.authorization_url) {
+        return meta.paystackInit;
+      }
+    }
+
+    const reference = `DEP_${crypto.randomUUID()}_${userId}`;
     
     // Create Pending Transaction
-    await prisma.transaction.create({
+    const created = await prisma.transaction.create({
       data: {
         userId,
         reference,
+        idempotencyKey,
         amount,
         type: TransactionType.DEPOSIT,
         status: TransactionStatus.PENDING,
-      },
+      } as any,
     });
 
     // Initialize Paystack
-    const paystackData = await PaystackService.initializeTransaction(email, amount, {
+    const paystackInit = await PaystackService.initializeTransaction(email, amount, {
       userId,
       walletId: wallet.id,
       reference,
+      idempotencyKey,
     });
 
-    return paystackData;
+    await prisma.transaction.update({
+      where: { id: created.id },
+      data: {
+        metadata: {
+          paystackInit,
+        },
+      },
+    });
+
+    return paystackInit;
   }
 
   static async verifyDeposit(reference: string) {
@@ -49,7 +79,7 @@ export class WalletService {
       throw new AppError('Payment failed or not completed', 400);
     }
 
-    // Atomic Verification - Handles Idempotency implicitly by checking status inside transaction
+    // Atomic Verification - race-safe idempotency
     return await prisma.$transaction(async (tx) => {
       const transaction = await tx.transaction.findUnique({
         where: { reference },
@@ -57,8 +87,12 @@ export class WalletService {
 
       if (!transaction) throw new AppError('Transaction not found', 404);
       
-      // Idempotency check: if already success, do not credit again.
-      if (transaction.status === TransactionStatus.SUCCESS) {
+      const updated = await tx.transaction.updateMany({
+        where: { id: transaction.id, status: TransactionStatus.PENDING },
+        data: { status: TransactionStatus.SUCCESS },
+      });
+
+      if (updated.count === 0) {
         return { message: 'Transaction already processed' };
       }
 
@@ -73,20 +107,19 @@ export class WalletService {
       const fees = transaction.metadata ? (transaction.metadata as any).fees : null;
       const amountToCredit = fees ? fees.tuition : Number(transaction.amount);
 
-      await LedgerService.recordEntry(tx, {
+      const newBalance = await LedgerService.recordEntry(tx, {
         walletId: wallet.id,
         transactionId: transaction.id,
         type: LedgerType.CREDIT,
         amount: Number(amountToCredit),
       });
 
-      // Update Transaction Status
       await tx.transaction.update({
         where: { id: transaction.id },
-        data: { status: TransactionStatus.SUCCESS, metadata: paystackData },
+        data: { metadata: paystackData },
       });
 
-      return { message: 'Deposit successful', balance: Number(wallet.balance) + Number(transaction.amount) };
+      return { message: 'Deposit successful', balance: Number(newBalance) };
     });
   }
 

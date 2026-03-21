@@ -58,7 +58,7 @@ export const getDashboardStats = catchAsync(async (req: Request, res: Response, 
 });
 
 export const addStudent = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  const { email, firstName, lastName, matricNumber } = req.body;
+  const { email, firstName, lastName, matricNumber, password, college, department, program } = req.body;
 
   if (!email || !firstName || !lastName || !matricNumber) {
     return next(new AppError('Please provide all required fields', 400));
@@ -77,8 +77,8 @@ export const addStudent = catchAsync(async (req: Request, res: Response, next: N
     return next(new AppError('User with this email or matric number already exists', 400));
   }
 
-  // Default password is their matric number
-  const hashedPassword = await bcrypt.hash(matricNumber, 12);
+  const initialPassword = password || matricNumber;
+  const hashedPassword = await bcrypt.hash(initialPassword, 12);
 
   await prisma.$transaction(async (tx) => {
     const newUser = await tx.user.create({
@@ -88,6 +88,9 @@ export const addStudent = catchAsync(async (req: Request, res: Response, next: N
         lastName,
         matricNumber,
         password: hashedPassword,
+          college,
+          department,
+          program,
         role: Role.STUDENT,
       }
     });
@@ -101,9 +104,9 @@ export const addStudent = catchAsync(async (req: Request, res: Response, next: N
 
     await tx.auditLog.create({
       data: {
-        action: 'New student registration',
+        action: 'STUDENT_CREATED',
         userId: req.user!.id,
-        details: { newStudentEmail: email },
+        details: { newStudentEmail: email, matricNumber },
         ipAddress: req.ip
       }
     });

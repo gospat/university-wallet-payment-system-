@@ -13,8 +13,8 @@ export const globalErrorHandler = (
   if (process.env.NODE_ENV === 'development') {
     res.status(err.statusCode).json({
       status: err.status,
-      error: err,
       message: err.message,
+      details: err.details,
       stack: err.stack,
     });
   } else {
@@ -23,6 +23,7 @@ export const globalErrorHandler = (
       res.status(err.statusCode).json({
         status: err.status,
         message: err.message,
+        details: err.details,
       });
     } else {
       console.error('ERROR 💥', err);

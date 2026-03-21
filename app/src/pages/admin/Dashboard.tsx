@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Users, DollarSign, Activity, FileText, Shield, Mail } from 'lucide-react';
 import api from '../../services/api';
 import Modal from '../../components/Modal';
+import PortalNavbar from '../../components/PortalNavbar';
 
 const AdminDashboard: React.FC = () => {
   const { user, logout } = useAuth();
@@ -11,7 +12,7 @@ const AdminDashboard: React.FC = () => {
   // Modals state
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
   const [alertModal, setAlertModal] = useState({ isOpen: false, title: '', message: '', type: 'error' as 'error' | 'success' });
-  const [studentForm, setStudentForm] = useState({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123' });
+  const [studentForm, setStudentForm] = useState({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123', college: '', department: '', program: '' });
   const [loading, setLoading] = useState(false);
 
   const showAlert = (title: string, message: string, type: 'error' | 'success' = 'error') => {
@@ -32,7 +33,7 @@ const AdminDashboard: React.FC = () => {
   };
 
   const handleAddStudent = async () => {
-    const { email, firstName, lastName, matricNumber, password } = studentForm;
+    const { email, firstName, lastName, matricNumber, password, college, department, program } = studentForm;
 
     if (!email || !firstName || !lastName || !matricNumber) {
       showAlert('Validation Error', 'All fields are required.');
@@ -41,9 +42,9 @@ const AdminDashboard: React.FC = () => {
 
     setLoading(true);
     try {
-      await api.post('/admin/students', { email, firstName, lastName, matricNumber, password });
+      await api.post('/admin/students', { email, firstName, lastName, matricNumber, password, college, department, program });
       setShowAddStudentModal(false);
-      setStudentForm({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123' });
+      setStudentForm({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123', college: '', department: '', program: '' });
       showAlert('Success', 'Student added successfully!', 'success');
       fetchStats(); // Refresh stats to update total student count
     } catch (err: any) {
@@ -56,24 +57,7 @@ const AdminDashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Navbar */}
-      <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center">
-              <span className="text-xl font-bold text-gray-900">Admin Portal</span>
-            </div>
-            <div className="flex items-center space-x-4">
-              <span className="text-gray-700 font-medium">Admin: {user?.firstName}</span>
-              <button 
-                onClick={logout}
-                className="text-sm text-red-600 hover:text-red-800 font-medium"
-              >
-                Logout
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
+      <PortalNavbar brand="Admin Portal" userText={`Admin: ${user?.firstName || ''}`} onLogout={logout} />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
@@ -272,6 +256,38 @@ const AdminDashboard: React.FC = () => {
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               placeholder="2023/SCI/1000"
             />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">College</label>
+              <input 
+                type="text" 
+                value={studentForm.college}
+                onChange={(e) => setStudentForm({...studentForm, college: e.target.value})}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="College of Science"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Department</label>
+              <input 
+                type="text" 
+                value={studentForm.department}
+                onChange={(e) => setStudentForm({...studentForm, department: e.target.value})}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="Computer Science"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Program</label>
+              <input 
+                type="text" 
+                value={studentForm.program}
+                onChange={(e) => setStudentForm({...studentForm, program: e.target.value})}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="B.Sc. Computer Science"
+              />
+            </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Default Password</label>
