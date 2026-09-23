@@ -1,4 +1,4 @@
-import { PrismaClient, Role, TransactionType, TransactionStatus, LedgerType } from '@prisma/client';
+import { PrismaClient, Role } from '@prisma/client';
 import bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
@@ -54,62 +54,10 @@ async function main() {
         department: 'Computer Science',
         program: 'B.Sc. Computer Science',
         role: Role.STUDENT,
-        wallet: {
-          create: {
-            balance: 50000.00, // Initial balance
-          },
-        },
       },
-      include: { wallet: true },
     });
     students.push(student);
     console.log(`Created Student: ${student.email}`);
-  }
-
-  // 4. Create Transactions & Ledger Entries
-  for (const student of students) {
-    if (!student.wallet) continue;
-
-    // A. Deposit
-    const depositRef = `DEP_SEED_${student.id}`;
-    const deposit = await prisma.transaction.create({
-      data: {
-        userId: student.id,
-        reference: depositRef,
-        amount: 50000.00,
-        type: TransactionType.DEPOSIT,
-        status: TransactionStatus.SUCCESS,
-        description: 'Initial Seed Deposit',
-      },
-    });
-
-    await prisma.walletLedger.create({
-      data: {
-        walletId: student.wallet.id,
-        transactionId: deposit.id,
-        type: LedgerType.CREDIT,
-        amount: 50000.00,
-        balanceBefore: 0,
-        balanceAfter: 50000.00,
-      },
-    });
-
-    // B. Pending Withdrawal Request (For Bursary to approve)
-    if (student.id % 2 === 0) { // Only for some students
-      const withdrawRef = `WD_SEED_${student.id}`;
-      await prisma.transaction.create({
-        data: {
-          userId: student.id,
-          reference: withdrawRef,
-          amount: 5000.00,
-          type: TransactionType.WITHDRAWAL,
-          status: TransactionStatus.PENDING,
-          description: 'Withdrawal Request',
-          metadata: { bank: 'GTBank', account: '0123456789' },
-        },
-      });
-      console.log(`Created Pending Withdrawal for ${student.email}`);
-    }
   }
 
   console.log('✅ Seeding completed!');

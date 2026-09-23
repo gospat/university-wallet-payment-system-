@@ -10,14 +10,16 @@ interface ModalProps {
 }
 
 const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer }) => {
-  if (!isOpen) return null;
   const titleId = useId();
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const lastActiveRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
+    if (!isOpen) return;
     lastActiveRef.current = document.activeElement as HTMLElement | null;
-    closeBtnRef.current?.focus();
+    requestAnimationFrame(() => {
+      closeBtnRef.current?.focus();
+    });
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -25,12 +27,18 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer 
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      lastActiveRef.current?.focus?.();
+      requestAnimationFrame(() => {
+        lastActiveRef.current?.focus?.();
+      });
     };
-  }, [onClose]);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
 
   return (
     <div
+      key={isOpen ? 'open' : 'closed'}
+      role="presentation"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm transition-opacity"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();

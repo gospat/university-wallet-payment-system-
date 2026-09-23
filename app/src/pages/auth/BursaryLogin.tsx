@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Briefcase, Lock } from 'lucide-react';
 
 const BursaryLogin: React.FC = () => {
@@ -11,6 +11,7 @@ const BursaryLogin: React.FC = () => {
   const [error, setError] = useState('');
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation() as { state?: { from?: string } };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,7 +27,9 @@ const BursaryLogin: React.FC = () => {
       }
 
       login(res.data.token, res.data.data.user);
-      navigate('/bursary/dashboard');
+      const base = role === 'ADMIN' ? '/admin/dashboard' : '/bursary/dashboard';
+      const next = (location.state?.from as string | undefined) || base;
+      navigate(next, { replace: true });
       
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Authentication failed.');

@@ -1,13 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Users, DollarSign, Activity, FileText, Shield, Mail } from 'lucide-react';
-import api from '../../services/api';
+import { Users, DollarSign, Banknote, Shield, Mail, Clock } from 'lucide-react';
+import api, { navCounters, NavCounters } from '../../services/api';
 import Modal from '../../components/Modal';
-import PortalNavbar from '../../components/PortalNavbar';
+import PortalShell from '../../components/PortalShell';
+import { useLocation } from 'react-router-dom';
+import { i18n } from '../../i18n/en';
 
 const AdminDashboard: React.FC = () => {
   const { user, logout } = useAuth();
+  const location = useLocation();
   const [stats, setStats] = useState<any>(null);
+  const [navCounts, setNavCounts] = useState<NavCounters>({});
 
   // Modals state
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
@@ -15,12 +19,15 @@ const AdminDashboard: React.FC = () => {
   const [studentForm, setStudentForm] = useState({ email: '', firstName: '', lastName: '', matricNumber: '', password: 'student123', college: '', department: '', program: '' });
   const [loading, setLoading] = useState(false);
 
+  const fullName = `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim();
+
   const showAlert = (title: string, message: string, type: 'error' | 'success' = 'error') => {
     setAlertModal({ isOpen: true, title, message, type });
   };
 
   useEffect(() => {
     fetchStats();
+    navCounters().then(setNavCounts);
   }, []);
 
   const fetchStats = async () => {
@@ -55,11 +62,18 @@ const AdminDashboard: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Navbar */}
-      <PortalNavbar brand="Admin Portal" userText={`Admin: ${user?.firstName || ''}`} onLogout={logout} />
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <PortalShell
+      role="ADMIN"
+      activePath={location.pathname}
+      brand={i18n.portals.admin.dashboardBrand}
+      userText={fullName || i18n.portals.admin.dashboardGreeting('')}
+      userEmail={user?.email ?? undefined}
+      onLogout={logout}
+      userPermissions={(user?.permissions as string[]) ?? []}
+      showGlobalSearch
+      navCounters={navCounts}
+    >
+      <div className="w-full space-y-8">
         
         {/* Admin Profile Section */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8 flex flex-col md:flex-row items-center md:items-start gap-6 relative overflow-hidden">
@@ -101,8 +115,20 @@ const AdminDashboard: React.FC = () => {
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Deposits</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">₦{Number(stats?.stats?.totalDeposits || 0).toLocaleString()}</p>
+                <p className="text-sm font-medium text-gray-500">Total Bills Configured</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{stats?.stats?.totalFeesConfigured ?? stats?.stats?.totalFees ?? 0}</p>
+              </div>
+              <div className="p-3 bg-indigo-50 rounded-lg">
+                <Banknote className="h-6 w-6 text-indigo-600" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-500">Total Collected</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">₦{Number(stats?.stats?.totalCollected ?? 0).toLocaleString()}</p>
               </div>
               <div className="p-3 bg-green-50 rounded-lg">
                 <DollarSign className="h-6 w-6 text-green-600" />
@@ -113,23 +139,11 @@ const AdminDashboard: React.FC = () => {
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Active Wallets</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">{stats?.stats?.activeWallets || 0}</p>
+                <p className="text-sm font-medium text-gray-500">Outstanding Receivables</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">₦{Number(stats?.stats?.totalOutstanding ?? stats?.stats?.outstandingReceivables ?? 0).toLocaleString()}</p>
               </div>
-              <div className="p-3 bg-purple-50 rounded-lg">
-                <Activity className="h-6 w-6 text-purple-600" />
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-500">Pending Requests</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">{stats?.stats?.pendingRequests || 0}</p>
-              </div>
-              <div className="p-3 bg-orange-50 rounded-lg">
-                <FileText className="h-6 w-6 text-orange-600" />
+              <div className="p-3 bg-rose-50 rounded-lg">
+                <Clock className="h-6 w-6 text-rose-600" />
               </div>
             </div>
           </div>
@@ -177,9 +191,6 @@ const AdminDashboard: React.FC = () => {
                   Add New Student
                 </button>
                 <button className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg text-sm font-medium text-gray-700 transition-colors">
-                  Manage Wallet Rules
-                </button>
-                <button className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg text-sm font-medium text-gray-700 transition-colors">
                   View Transaction Reports
                 </button>
                 <button className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg text-sm font-medium text-gray-700 transition-colors">
@@ -188,8 +199,7 @@ const AdminDashboard: React.FC = () => {
               </div>
           </div>
         </div>
-
-      </main>
+      </div>
 
       {/* Add Student Modal */}
       <Modal
@@ -322,7 +332,7 @@ const AdminDashboard: React.FC = () => {
         </div>
       </Modal>
 
-    </div>
+    </PortalShell>
   );
 };
 

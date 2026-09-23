@@ -6,41 +6,36 @@ import bcrypt from 'bcrypt';
 import { Role } from '@prisma/client';
 
 export const getDashboardStats = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  // 1. Total Students
   const totalStudents = await prisma.user.count({
     where: { role: 'STUDENT' },
   });
 
-  // 2. Total Deposits (Sum of successful deposit transactions)
-  const totalDepositsResult = await prisma.transaction.aggregate({
+  const totalPaidResult = await prisma.transaction.aggregate({
     where: {
-      type: 'DEPOSIT',
+      type: 'FEE_PAYMENT',
       status: 'SUCCESS',
     },
     _sum: {
       amount: true,
     },
   });
-  const totalDeposits = totalDepositsResult._sum.amount || 0;
+  const totalCollected = totalPaidResult._sum.amount || 0;
 
-  // 3. Active Wallets (Count of wallets with status ACTIVE)
-  const activeWallets = await prisma.wallet.count({
-    where: { status: 'ACTIVE' },
+  const totalBills = await prisma.fee.count({
+    where: { isActive: true },
   });
 
-  // 4. Pending Requests (Count of pending withdrawals)
-  const pendingRequests = await prisma.transaction.count({
-    where: {
-      type: 'WITHDRAWAL',
-      status: 'PENDING',
-    },
+  const outstandingAgg = await prisma.invoice.aggregate({
+    _sum: { amountDue: true, amountPaid: true },
   });
+  const totalExpected = Number(outstandingAgg._sum.amountDue ?? 0);
+  const totalReceivedOnInvoices = Number(outstandingAgg._sum.amountPaid ?? 0);
+  const outstandingReceivables = Math.max(0, totalExpected - totalReceivedOnInvoices);
 
-  // 5. Recent Audit Logs
   const auditLogs = await prisma.auditLog.findMany({
     take: 5,
     orderBy: { createdAt: 'desc' },
-    include: { user: { select: { firstName: true, lastName: true } } }, // Include user details
+    include: { user: { select: { firstName: true, lastName: true } } },
   });
 
   res.status(200).json({
@@ -48,9 +43,9 @@ export const getDashboardStats = catchAsync(async (req: Request, res: Response, 
     data: {
       stats: {
         totalStudents,
-        totalDeposits,
-        activeWallets,
-        pendingRequests,
+        totalCollected,
+        totalBills,
+        outstandingReceivables,
       },
       auditLogs,
     },
@@ -92,13 +87,6 @@ export const addStudent = catchAsync(async (req: Request, res: Response, next: N
           department,
           program,
         role: Role.STUDENT,
-      }
-    });
-
-    await tx.wallet.create({
-      data: {
-        userId: newUser.id,
-        balance: 0,
       }
     });
 

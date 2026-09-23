@@ -6,7 +6,7 @@ describe('health endpoints', () => {
     const res = await request(app).get('/api/v1/health');
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('success');
-    expect(res.body.data.service).toBe('university-wallet-api');
+    expect(res.body.data.service).toBe('university-payment-api');
   });
 });
 

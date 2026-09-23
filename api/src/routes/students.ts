@@ -1,0 +1,241 @@
+// =============================================================================
+// Students routes
+//
+// Permission model (§4 ADMIN, §5 BURSARY — backend enforced per FR-B1):
+//   - GET    /students, /students/:id, /students/matric/:matric,
+//            POST   /students,
+//            PATCH  /students/:id,
+//            POST   /students/:id/status,
+//            POST   /students/:id/reset-password
+//     → ADMIN | BURSARY (read/write students; bursary CANNOT permanently
+//       delete per §5 forbidden actions — we only expose status=WITHDRAWN
+//       soft-delete via /students/:id/status).
+//
+//   - GET    /me, PATCH /me
+//     → STUDENT only (self-service: read/write own contact info only).
+//       Note: mounted under /api/v1/auth/profile too, but this file defines
+//       the canonical REST set; auth routes re-use the same handlers.
+// =============================================================================
+
+import express from 'express';
+import { protect, restrictTo } from '../middlewares/auth';
+import {
+  createStudent,
+  getMe,
+  getStudent,
+  getStudentByMatric,
+  listStudents,
+  resetStudentPassword,
+  setStudentStatus,
+  updateMe,
+  updateStudent,
+} from '../controllers/student';
+import { Role } from '@prisma/client';
+import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
+import {
+  CreateStudentSchema,
+  StudentQuerySchema,
+  StudentSelfUpdateSchema,
+  UpdateStudentSchema,
+} from '../services/student';
+import { z } from 'zod';
+import { catchAsync } from '../utils/catchAsync';
+import {
+  StudentFeesService,
+  StudentInvoiceListSchema,
+} from '../services/studentFee';
+import {
+  confirmPayload,
+  confirmPayloadValidator,
+  initiatePayment,
+  initiatePaymentValidator,
+  verifyPayment,
+  verifyPaymentValidator,
+} from '../controllers/payments';
+import { downloadFormalReceipt, listMyReceipts } from '../controllers/receipt';
+import { FeeService, FeeQuerySchema } from '../services/fee';
+import { PaymentService, InitiatePaymentSchema } from '../services/payment';
+import prisma from '../config/database';
+import { Prisma } from '@prisma/client';
+import { generateInvoiceReference } from '../utils/paystack';
+import { AppError } from '../utils/AppError';
+
+const router = express.Router();
+
+// ---------- Self-service (authenticated student, any role if STUDENT) -------
+router.use('/me', protect, restrictTo(Role.STUDENT));
+router.get('/me', getMe);
+router.patch('/me', validateBody(StudentSelfUpdateSchema), updateMe);
+
+router.get('/fees/schedule', protect, restrictTo(Role.STUDENT), catchAsync(async (req: any, res) => {
+  const data = await StudentFeesService.schedule(req.user.id);
+  res.status(200).json({ status: 'success', data });
+}));
+
+router.get('/invoices', protect, restrictTo(Role.STUDENT), validateQuery(StudentInvoiceListSchema), catchAsync(async (req: any, res) => {
+  const data = await StudentFeesService.listInvoices(req.user.id, req.query);
+  res.status(200).json({ status: 'success', data });
+}));
+
+const IdParam = z.object({ id: z.coerce.number().int().positive() });
+router.get('/invoices/:id', protect, restrictTo(Role.STUDENT), validateParams(IdParam), catchAsync(async (req: any, res) => {
+  const data = await StudentFeesService.getInvoiceDetail(req.user.id, Number(req.params.id));
+  res.status(200).json({ status: 'success', data });
+}));
+
+// ---------- Self-service payments (STUDENT only) ----------------------------
+router.get('/receipts', protect, restrictTo(Role.STUDENT), listMyReceipts);
+router.get('/receipts/:id/download', protect, restrictTo(Role.STUDENT), downloadFormalReceipt);
+router.get(
+  '/payments/confirm-payload',
+  protect,
+  restrictTo(Role.STUDENT),
+  confirmPayloadValidator,
+  confirmPayload,
+);
+router.post(
+  '/payments/initiate',
+  protect,
+  restrictTo(Role.STUDENT),
+  initiatePaymentValidator,
+  initiatePayment,
+);
+router.get(
+  '/payments/verify/:ref',
+  protect,
+  restrictTo(Role.STUDENT),
+  ...(verifyPaymentValidator as any),
+  verifyPayment,
+);
+
+// ---------- Student Fee Catalogue (Browse ALL fees admin has set) ------------
+router.get(
+  '/fees/catalogue',
+  protect,
+  restrictTo(Role.STUDENT),
+  validateQuery(FeeQuerySchema),
+  catchAsync(async (req: any, res) => {
+    const data = await FeeService.list({ ...req.query, isActive: true });
+    res.status(200).json({ status: 'success', data });
+  }),
+);
+
+// ---------- Initiate payment for a Fee (auto-create invoice if needed) ------
+const FeeIdParam = z.object({ feeId: z.coerce.number().int().positive() });
+const _FeeInitiateInnerSchema = z.object({
+  partialAmount: z.union([
+    z.number().positive(),
+    z.string().refine((s) => Number(s) > 0, { message: 'positive numeric required' }).transform((s) => Number(s)),
+  ]).optional(),
+  email: z.string().email().optional(),
+  idempotencyKey: z.string().min(1).max(128).optional(),
+}).strict();
+const FeeInitiateValidator = [validateParams(FeeIdParam), validateBody(_FeeInitiateInnerSchema)];
+
+// Helper: find-or-create unpaid invoice for (studentId, feeId). Returns invoice id/number.
+async function ensureInvoiceForFee(studentId: number, feeId: number) {
+  const fee = await prisma.fee.findFirst({
+    where: { id: feeId, isActive: true },
+    select: {
+      id: true, feeCode: true, name: true, amount: true, currency: true,
+      academicSession: true, semester: true, paymentDeadline: true,
+    },
+  });
+  if (!fee) throw new AppError('Fee not found or no longer available.', 404);
+  const reuse = await prisma.invoice.findFirst({
+    where: {
+      studentId, feeId: fee.id,
+      status: { in: ['UNPAID', 'PARTIALLY_PAID', 'PENDING'] as any },
+    },
+    select: { id: true, invoiceNumber: true, amountDue: true, amountPaid: true, status: true },
+  });
+  if (reuse) {
+    const bal = Number(reuse.amountDue) - Number(reuse.amountPaid);
+    if (bal <= 0) throw new AppError('This fee is already paid.', 409);
+    return { invoiceId: reuse.id, invoiceNumber: reuse.invoiceNumber, created: false, fee };
+  }
+  const created = await prisma.$transaction(async (tx: any) => {
+    const baseRow = await (tx as any).$queryRawUnsafe(
+      'SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE',
+    ) as Array<{ next_id: number }>;
+    let nextId = Number(baseRow?.[0]?.next_id ?? 0);
+    if (Number.isNaN(nextId) || nextId <= 0) nextId = 1;
+    const fiscalYear = fee.academicSession?.split('/')?.[0] ?? undefined;
+    const invRef = generateInvoiceReference(nextId, fiscalYear);
+    return tx.invoice.create({
+      data: {
+        invoiceNumber: invRef,
+        student: { connect: { id: studentId } },
+        fee: { connect: { id: fee.id } },
+        amountDue: new (Prisma as any).Decimal(String(fee.amount)),
+        amountPaid: new (Prisma as any).Decimal(0),
+        status: 'UNPAID',
+        session: fee.academicSession ?? 'General',
+        semester: fee.semester ?? undefined,
+        dueDate: fee.paymentDeadline ?? undefined,
+      },
+      select: { id: true, invoiceNumber: true },
+    });
+  });
+  return { invoiceId: created.id, invoiceNumber: created.invoiceNumber, created: true, fee };
+}
+
+router.post(
+  '/fees/:feeId/ensure-invoice',
+  protect,
+  restrictTo(Role.STUDENT),
+  validateParams(FeeIdParam),
+  catchAsync(async (req: any, res) => {
+    const result = await ensureInvoiceForFee(Number(req.user?.id), Number(req.params.feeId));
+    res.status(200).json({
+      status: 'success',
+      data: {
+        invoiceId: result.invoiceId,
+        invoiceNumber: result.invoiceNumber,
+        created: result.created,
+        fee: {
+          id: result.fee.id, feeCode: result.fee.feeCode, name: result.fee.name,
+          amount: Number(result.fee.amount),
+          currency: (result.fee as any).currency,
+          academicSession: result.fee.academicSession,
+          semester: result.fee.semester,
+        },
+      },
+    });
+  }),
+);
+
+router.post(
+  '/fees/:feeId/initiate',
+  protect,
+  restrictTo(Role.STUDENT),
+  ...FeeInitiateValidator,
+  catchAsync(async (req: any, res) => {
+    const studentId = Number(req.user?.id);
+    const feeId = Number(req.params.feeId);
+    const partialAmount = req.body?.partialAmount;
+    const ensured = await ensureInvoiceForFee(studentId, feeId);
+    const initInput: any = { invoiceId: ensured.invoiceId };
+    if (partialAmount !== undefined && partialAmount !== null) {
+      initInput.partialAmount = partialAmount;
+    }
+    if (typeof req.body?.email === 'string' && req.body.email.trim()) initInput.email = req.body.email.trim();
+    if (typeof req.body?.idempotencyKey === 'string' && req.body.idempotencyKey.trim()) initInput.idempotencyKey = req.body.idempotencyKey.trim();
+    const result = await PaymentService.initiatePayment(studentId, initInput, req);
+    res.status(200).json({ status: 'success', data: { ...result, invoiceId: ensured.invoiceId } });
+  }),
+);
+
+// ---------- All routes below require ADMIN | BURSARY ------------------------
+router.use(protect);
+router.use(restrictTo(Role.ADMIN, Role.BURSARY));
+
+router.get('/', validateQuery(StudentQuerySchema), listStudents);
+router.post('/', validateBody(CreateStudentSchema), createStudent);
+router.get('/:id', getStudent);
+router.patch('/:id', validateBody(UpdateStudentSchema), updateStudent);
+router.post('/:id/status', setStudentStatus);
+router.post('/:id/reset-password', resetStudentPassword);
+router.get('/matric/:matric', getStudentByMatric);
+
+export default router;
