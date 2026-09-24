@@ -61,6 +61,8 @@ export type InvoiceSummary = {
   semester: string | null;
   createdAt: string;
   transactionCount?: number;
+  origin?: 'CATALOGUE' | 'DIRECT_BILL';
+  directAssignment?: { id: number; overrideAmount?: number | string | null; overrideDeadline?: string | null; assignedAt?: string; assignedBy?: { firstName?: string; lastName?: string; email?: string } | null } | null;
 };
 
 export type InvoiceListResponse = {
@@ -160,6 +162,11 @@ export type CatalogueFee = {
   isMandatory?: boolean;
   paymentDeadline?: string | null;
   isActive?: boolean;
+  _isDirectBill?: boolean;
+  badge?: string | null;
+  assignmentId?: number | null;
+  assignedAt?: string;
+  assignedBy?: { firstName?: string; lastName?: string; email?: string } | null;
 };
 export type CatalogueQuery = {
   q?: string;

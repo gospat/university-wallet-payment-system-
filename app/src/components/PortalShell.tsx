@@ -20,6 +20,8 @@ import {
   UserCircle2,
   Search,
   X,
+  UserPlus,
+  ListFilter,
 } from 'lucide-react';
 import { i18n } from '../i18n/en';
 import { searchAdmin, AdminSearchResponse, SearchStudentRow } from '../services/searchApi';
@@ -178,6 +180,14 @@ const buildAdminNav = (role: Role, _counters?: Record<string, number>): NavGroup
       headingIcon: CreditCard,
       items: [
         { to: role === 'BURSARY' ? '/bursary/payments' : '/admin/payments', icon: CreditCard, label: 'Payments', sub: true },
+      ],
+    },
+    {
+      title: 'DIRECT BILLING',
+      headingIcon: UserPlus,
+      items: [
+        { to: role === 'BURSARY' ? '/bursary/direct-billing?tab=bill' : '/admin/direct-billing?tab=bill', icon: UserPlus, label: 'Bill a Student', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/direct-billing?tab=assigned' : '/admin/direct-billing?tab=assigned', icon: ListFilter, label: 'Direct Bills Log', sub: true, requiresPermission: role === 'BURSARY' ? 'AUDIT_LOGS_VIEW_LIMITED' : undefined },
       ],
     },
     {

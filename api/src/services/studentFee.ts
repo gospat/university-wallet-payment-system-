@@ -52,6 +52,31 @@ function computeStatusWithOverdue(row: any) {
   return row.status;
 }
 
+/**
+ * FR-4: mark invoice origin as DIRECT_BILL if an active STUDENT-target FeeAssignment
+ * exists for this (studentId, feeId) pair; else CATALOGUE.
+ */
+export function computeInvoiceOrigin(studentId: number, feeId: number, directAssignmentsByFee: Map<number, any>): 'DIRECT_BILL' | 'CATALOGUE' {
+  return directAssignmentsByFee.has(feeId) ? 'DIRECT_BILL' : 'CATALOGUE';
+}
+
+async function fetchDirectBillAssignmentsByFee(studentId: number, feeIds: Array<number | bigint>): Promise<Map<number, any>> {
+  const ids = Array.from(new Set(feeIds.map((id) => Number(id)))).filter((n) => Number.isFinite(n) && n > 0);
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.feeAssignment.findMany({
+    where: {
+      assignmentType: 'STUDENT' as any,
+      targetStudentId: studentId,
+      feeId: { in: ids },
+      isActive: true,
+    },
+    select: { id: true, feeId: true, overrideAmount: true, overrideDeadline: true, assignedAt: true, assignedBy: { select: { firstName: true, lastName: true, email: true } } },
+  });
+  const map = new Map<number, any>();
+  for (const r of rows) map.set(Number(r.feeId), r);
+  return map;
+}
+
 export class StudentFeesService {
   // §16 grouped schedule
   static async schedule(studentId: number) {
@@ -63,6 +88,8 @@ export class StudentFeesService {
       select: INVOICE_SELECT as any,
       orderBy: { session: 'asc' },
     });
+    const feeIds = invoices.map((i: any) => i.feeId).filter((n: any) => n != null);
+    const directByFee = await fetchDirectBillAssignmentsByFee(studentId, feeIds);
     // group by session
     const grouped: Record<string, any[]> = {};
     for (const row of invoices as unknown as InvoiceRow[]) {
@@ -95,6 +122,7 @@ export class StudentFeesService {
           dueDate: row.dueDate,
           semester: row.semester,
           isMandatory: row.fee?.isMandatory ?? false,
+          origin: computeInvoiceOrigin(studentId, Number(row.feeId), directByFee),
         };
       });
       const totalBilledFixed = +totalBilled.toFixed(2);
@@ -143,6 +171,8 @@ export class StudentFeesService {
       prisma.invoice.findMany({ where, select: INVOICE_SELECT as any, skip, take: pageSize, orderBy }),
       prisma.invoice.count({ where }),
     ]);
+    const feeIds = rows.map((r: any) => r.feeId).filter((n: any) => n != null);
+    const directByFee = await fetchDirectBillAssignmentsByFee(studentId, feeIds);
     const enriched = (rows as unknown as InvoiceRow[]).map((row) => {
       const amountDue = Number(row.amountDue);
       const amountPaid = Number(row.amountPaid);
@@ -159,6 +189,8 @@ export class StudentFeesService {
         semester: row.semester,
         createdAt: row.createdAt,
         transactionCount: row._count?.transactions ?? 0,
+        origin: computeInvoiceOrigin(studentId, Number(row.feeId), directByFee),
+        directAssignment: directByFee.get(Number(row.feeId)) ?? null,
       };
     });
     return { invoices: enriched, total, page, pageSize };
@@ -200,6 +232,10 @@ export class StudentFeesService {
     const amountDue = Number((row as any).amountDue);
     const amountPaid = Number((row as any).amountPaid);
     const balance = +(amountDue - amountPaid).toFixed(2);
+    const feeId = Number((row as any).feeId);
+    const directByFee = await fetchDirectBillAssignmentsByFee(studentId, [feeId]);
+    const origin = computeInvoiceOrigin(studentId, feeId, directByFee);
+    const directAssignment = directByFee.get(feeId) ?? null;
     const activeGateway = await getActiveGatewaySetting();
     const payPayload = {
       canPay: balance > 0 && (row as any).status !== 'CANCELLED' && (row as any).status !== 'REFUNDED' && (row as any).status !== 'REVERSED',
@@ -243,6 +279,8 @@ export class StudentFeesService {
         semester: (row as any).semester,
         createdAt: (row as any).createdAt,
         updatedAt: (row as any).updatedAt,
+        origin,
+        directAssignment,
       },
       transactions: mappedTransactions,
       pay: payPayload,

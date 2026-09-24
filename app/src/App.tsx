@@ -40,6 +40,7 @@ import AdminReceiptsPage from './pages/admin/Receipts';
 import BursaryPaymentsPage from './pages/bursary/Payments';
 import BursaryReceiptsPage from './pages/bursary/Receipts';
 import StudentMyReceiptsPage from './pages/student/MyReceipts';
+import { BursaryDirectBillingWrapped } from './pages/bursary/DirectBilling';
 
 const UnauthorizedPage: React.FC = () => {
   const location = useLocation();
@@ -414,6 +415,8 @@ const App: React.FC = () => {
 
             <Route path="/bursary/payments" element={<BursaryPaymentsWrapped />} />
             <Route path="/bursary/receipts" element={<BursaryReceiptsWrapped />} />
+            <Route path="/bursary/direct-billing" element={<BursaryDirectBillingWrapped />} />
+            <Route path="/bursary/direct-billing/:tab" element={<BursaryDirectBillingWrapped />} />
             <Route path="/bursary/reports/daily" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/reports/daily" title="Daily Reports" subtitle="Daily transaction summaries" />
             } />

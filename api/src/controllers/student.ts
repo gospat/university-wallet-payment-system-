@@ -16,15 +16,12 @@ import { validateBody, validateParams, validateQuery } from '../middlewares/vali
 import { z } from 'zod';
 import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
+import { reqIp, reqUa } from '../utils/http';
 
 const IdParam = z.object({ id: z.coerce.number().int().positive() });
 
 const StatusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']) });
 const PasswordResetSchema = z.object({ newPassword: z.string().min(8).max(128).optional() });
-
-const reqIp = (req: Request) =>
-  (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() || req.ip || undefined;
-const reqUa = (req: Request) => req.headers['user-agent'];
 
 // -----------------------------------------------------------------------------
 // CRUD
@@ -50,7 +47,19 @@ export const getStudentByMatric = [
     const m = String(req.params.matric || '').trim();
     if (!m) return next(new AppError('matric number required', 400));
     const user = await StudentService.getByMatric(m);
-    res.status(200).json({ status: 'success', data: { user } });
+    const preview = {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      matricNumber: user.matricNumber,
+      email: user.email,
+      college: user.college,
+      department: user.department,
+      programme: user.program,
+      level: user.level,
+      accountStatus: user.accountStatus,
+    };
+    res.status(200).json({ status: 'success', data: { student: preview } });
   }),
 ];
 

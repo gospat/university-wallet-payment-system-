@@ -9,6 +9,7 @@ import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
 import { z } from 'zod';
 import { validateBody, validateParams } from '../middlewares/validate';
+import { reqIp, reqUa } from '../utils/http';
 
 const ALLOWED_EXT = new Set(['.csv', '.xlsx', '.xls']);
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -49,9 +50,6 @@ function parseMultipartForm(req: IncomingMessage): Promise<{ fields: Fields; fil
     });
   });
 }
-
-const reqIp = (req: Request) =>
-  (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() || req.ip || undefined;
 
 export const stageFeeBulkUpload = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
@@ -104,7 +102,7 @@ export const confirmFeeBulkUpload = [
         actorId: req.user.id,
         strategy: req.body.duplicateStrategy,
         ip: reqIp(req),
-        userAgent: req.headers['user-agent'],
+        userAgent: reqUa(req),
       });
       res.status(200).json({ status: 'success', data });
     } catch (e) {

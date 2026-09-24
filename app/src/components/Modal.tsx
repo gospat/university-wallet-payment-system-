@@ -1,15 +1,25 @@
 import React, { useEffect, useId, useRef } from 'react';
 import { X } from 'lucide-react';
 
+type ModalSize = 'sm' | 'md' | 'lg' | 'xl';
+
+const SIZE_CLASSES: Record<ModalSize, string> = {
+  sm: 'max-w-sm',
+  md: 'max-w-md',
+  lg: 'max-w-2xl',
+  xl: 'max-w-4xl',
+};
+
 interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  size?: ModalSize;
 }
 
-const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer }) => {
+const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer, size = 'md' }) => {
   const titleId = useId();
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const lastActiveRef = useRef<HTMLElement | null>(null);
@@ -48,7 +58,7 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer 
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-white rounded-2xl shadow-xl w-full max-w-md transform transition-all scale-100"
+        className={`bg-white rounded-2xl shadow-xl w-full ${SIZE_CLASSES[size]} transform transition-all scale-100`}
       >
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-100">

@@ -68,6 +68,24 @@ const feeBadgeClass = (category?: string | null): string => {
   return FEE_BADGE_COLORS[upper] ?? 'bg-slate-50 text-slate-700 ring-slate-100';
 };
 
+const OriginPill: React.FC<{ origin?: 'CATALOGUE' | 'DIRECT_BILL' | null }> = ({ origin }) => {
+  if (origin === 'DIRECT_BILL') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 ring-1 ring-indigo-100">
+        ⚡ Direct Bill
+      </span>
+    );
+  }
+  if (origin === 'CATALOGUE') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider bg-gray-50 text-gray-500 ring-1 ring-gray-100">
+        Catalogue
+      </span>
+    );
+  }
+  return null;
+};
+
 // ---------------- Sub-page: Browse Catalogue (Make Payment) ----------------
 type BrowseCataloguePageProps = { onNavigateHistory?: () => void };
 const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHistory }) => {
@@ -273,16 +291,37 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
           const deadlinePassed = fee.paymentDeadline ? new Date(fee.paymentDeadline).getTime() < Date.now() : false;
           const amount = Number(fee.amount ?? 0);
           const busy = busyFeeId === fee.id;
+          const isDirect = !!fee._isDirectBill;
           return (
             <article
               key={fee.id}
-              className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md hover:border-[#0a3d91]/30 transition-all flex flex-col"
+              className={`rounded-2xl shadow-sm border overflow-hidden hover:shadow-md transition-all flex flex-col ${
+                isDirect
+                  ? 'bg-white border-indigo-200 hover:border-indigo-400/60 ring-1 ring-indigo-50'
+                  : 'bg-white border-slate-200 hover:border-[#0a3d91]/30'
+              }`}
             >
+              {isDirect && (
+                <div className="px-5 py-1.5 bg-gradient-to-r from-indigo-600 via-indigo-500 to-rose-500 text-white text-[10px] font-black uppercase tracking-[0.18em] flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5">
+                    ⚡ Assigned to you
+                  </span>
+                  <span className="opacity-80">Direct Bill</span>
+                </div>
+              )}
               <div className="px-5 py-4 border-b border-slate-100 bg-gradient-to-br from-slate-50 via-white to-white flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="font-bold text-slate-900 truncate" title={fee.name ?? ''}>{fee.name ?? '—'}</div>
                   {fee.feeCode && (
                     <div className="text-xs text-slate-500 mt-1 font-mono truncate">{fee.feeCode}</div>
+                  )}
+                  {isDirect && fee.assignedBy && (
+                    <div className="text-[11px] text-indigo-600/90 mt-1.5 font-medium">
+                      Assigned by{' '}
+                      <span className="font-semibold">
+                        {[fee.assignedBy.firstName, fee.assignedBy.lastName].filter(Boolean).join(' ').trim() || fee.assignedBy.email || 'Bursary'}
+                      </span>
+                    </div>
                   )}
                 </div>
                 <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ring-1 shrink-0 ${feeBadgeClass(categoryText)}`}>
@@ -292,8 +331,10 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
 
               <div className="px-5 py-4 space-y-2 text-sm flex-1">
                 <div className="flex items-start justify-between gap-3">
-                  <span className="text-slate-500 font-medium">Amount</span>
-                  <span className="text-slate-900 font-black tabular-nums text-base leading-6">{formatNgn(amount)}</span>
+                  <span className={`font-medium ${isDirect ? 'text-indigo-600/80' : 'text-slate-500'}`}>
+                    Amount{isDirect && <span className="ml-1 text-[10px] uppercase tracking-wider font-black">(Assigned)</span>}
+                  </span>
+                  <span className={`tabular-nums text-base leading-6 font-black ${isDirect ? 'text-indigo-700' : 'text-slate-900'}`}>{formatNgn(amount)}</span>
                 </div>
                 {fee.academicSession && (
                   <div className="flex items-center justify-between">
@@ -341,18 +382,22 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
                 )}
               </div>
 
-              <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50/60">
+              <div className={`px-5 py-3.5 border-t ${isDirect ? 'border-indigo-100 bg-indigo-50/40' : 'border-slate-100 bg-slate-50/60'}`}>
                 <button
                   disabled={busy}
                   onClick={() => goConfirm(fee)}
                   className={`inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-bold shadow-sm transition-colors ${
                     busy
                       ? 'bg-slate-300 text-slate-600 cursor-wait'
-                      : 'bg-[#0a3d91] hover:bg-[#0b46a8] text-white'
+                      : isDirect
+                        ? 'bg-gradient-to-r from-indigo-600 to-rose-600 hover:from-indigo-700 hover:to-rose-700 text-white'
+                        : 'bg-[#0a3d91] hover:bg-[#0b46a8] text-white'
                   }`}
                 >
                   {busy ? (
                     <>Preparing payment…</>
+                  ) : isDirect ? (
+                    <>⚡ PAY ASSIGNED BILL →</>
                   ) : (
                     <>PAY NOW →</>
                   )}
@@ -478,6 +523,7 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
               <tr>
                 <th className="px-5 py-3 text-left font-medium">{t.headerNumber}</th>
                 <th className="px-5 py-3 text-left font-medium">{t.headerFee}</th>
+                <th className="px-5 py-3 text-left font-medium">Origin</th>
                 <th className="px-5 py-3 text-right font-medium">{t.headerAmount}</th>
                 <th className="px-5 py-3 text-right font-medium">{t.headerPaid}</th>
                 <th className="px-5 py-3 text-right font-medium">{t.headerBalance}</th>
@@ -489,15 +535,15 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading && !resp && (
-                <tr><td colSpan={9} className="text-center text-gray-500 py-10">Loading…</td></tr>
+                <tr><td colSpan={10} className="text-center text-gray-500 py-10">Loading…</td></tr>
               )}
               {!loading && resp?.invoices.length === 0 && (
-                <tr><td colSpan={9} className="text-center text-gray-500 py-10">{t.empty}</td></tr>
+                <tr><td colSpan={10} className="text-center text-gray-500 py-10">{t.empty}</td></tr>
               )}
               {resp?.invoices.map((inv) => (
                 <tr
                   key={inv.id}
-                  className="hover:bg-gray-50 cursor-pointer"
+                  className={`hover:bg-gray-50 cursor-pointer ${inv.origin === 'DIRECT_BILL' ? 'bg-indigo-50/20' : ''}`}
                   onClick={() => { setSelectedTxn(inv); setDrawerOpen(true); }}
                 >
                   <td className="px-5 py-3 font-mono text-xs text-gray-800">{inv.invoiceNumber}</td>
@@ -505,6 +551,7 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
                     <div className="font-medium">{inv.fee?.name ?? 'Fee'}</div>
                     {inv.fee?.category?.name && <div className="text-xs text-gray-500">{inv.fee.category.name}</div>}
                   </td>
+                  <td className="px-5 py-3"><OriginPill origin={inv.origin} /></td>
                   <td className="px-5 py-3 text-right tabular-nums">{formatNgn(inv.amountDue)}</td>
                   <td className="px-5 py-3 text-right text-emerald-700 tabular-nums">{formatNgn(inv.amountPaid)}</td>
                   <td className="px-5 py-3 text-right tabular-nums">
@@ -593,11 +640,23 @@ const InvoiceDetailModal: React.FC<{
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-gray-500">{t.sessionLabel}</span><b>{invoice.session ?? '—'}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.semesterLabel}</span><b>{invoice.semester ? (semesterLabels as any)[invoice.semester] ?? invoice.semester : '—'}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.issuedLabel}</span><b>{formatDate(invoice.createdAt)}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.lastUpdated}</span><b>{formatDate(invoice.updatedAt)}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.dueLabel}</span><b>{formatDate(invoice.dueDate)}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.sessionLabel}</span><b>{invoice.session ?? '—'}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.semesterLabel}</span><b>{invoice.semester ? (semesterLabels as any)[invoice.semester] ?? invoice.semester : '—'}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.issuedLabel}</span><b>{formatDate(invoice.createdAt)}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.lastUpdated}</span><b>{formatDate(invoice.updatedAt)}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.dueLabel}</span><b>{formatDate(invoice.dueDate)}</b></div>
+                <div className="flex justify-between items-center pt-2 border-t border-gray-200">
+                  <span className="text-gray-500">Origin</span>
+                  <OriginPill origin={invoice.origin} />
+                </div>
+                {invoice.origin === 'DIRECT_BILL' && invoice.directAssignment?.assignedBy && (
+                  <div className="flex justify-between items-start gap-2">
+                    <span className="text-gray-500">Assigned by</span>
+                    <span className="text-right text-xs font-semibold text-indigo-700">
+                      {[invoice.directAssignment.assignedBy.firstName, invoice.directAssignment.assignedBy.lastName].filter(Boolean).join(' ').trim() || invoice.directAssignment.assignedBy.email || 'Bursary'}
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="bg-white border border-gray-100 rounded-lg p-4 space-y-2 text-sm">
                 <div className="flex justify-between"><span className="text-gray-500">{t.amountDueLabel}</span><b className="tabular-nums">{formatNgn(invoice.amountDue)}</b></div>
@@ -762,11 +821,23 @@ const InvoiceDetailPage: React.FC = () => {
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-gray-500">{t.sessionLabel}</span><b>{invoice.session ?? '—'}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.semesterLabel}</span><b>{invoice.semester ? (semesterLabels as any)[invoice.semester] ?? invoice.semester : '—'}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.issuedLabel}</span><b>{formatDate(invoice.createdAt)}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.lastUpdated}</span><b>{formatDate(invoice.updatedAt)}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.dueLabel}</span><b>{formatDate(invoice.dueDate)}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.sessionLabel}</span><b>{invoice.session ?? '—'}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.semesterLabel}</span><b>{invoice.semester ? (semesterLabels as any)[invoice.semester] ?? invoice.semester : '—'}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.issuedLabel}</span><b>{formatDate(invoice.createdAt)}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.lastUpdated}</span><b>{formatDate(invoice.updatedAt)}</b></div>
+                <div className="flex justify-between items-center"><span className="text-gray-500">{t.dueLabel}</span><b>{formatDate(invoice.dueDate)}</b></div>
+                <div className="flex justify-between items-center pt-2 border-t border-gray-100">
+                  <span className="text-gray-500">Origin</span>
+                  <OriginPill origin={invoice.origin} />
+                </div>
+                {invoice.origin === 'DIRECT_BILL' && invoice.directAssignment?.assignedBy && (
+                  <div className="flex justify-between items-start gap-2">
+                    <span className="text-gray-500">Assigned by</span>
+                    <span className="text-right text-xs font-semibold text-indigo-700">
+                      {[invoice.directAssignment.assignedBy.firstName, invoice.directAssignment.assignedBy.lastName].filter(Boolean).join(' ').trim() || invoice.directAssignment.assignedBy.email || 'Bursary'}
+                    </span>
+                  </div>
+                )}
                 <div className="pt-2 border-t border-gray-100">
                   <div className="flex justify-between"><span className="text-gray-500">Fee</span><b className="text-gray-800">{invoice.fee?.name ?? '—'}</b></div>
                   <div className="flex justify-between text-gray-500"><span>Category</span><span>{invoice.fee?.category?.name ?? '—'}</span></div>

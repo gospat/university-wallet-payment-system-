@@ -1,8 +1,9 @@
-import express from 'express';
+import express, { Request } from 'express';
 import { getDashboardStats, addStudent } from '../controllers/admin';
 import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { z } from 'zod';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
+import { CreateStudentSchema } from '../services/student';
 import {
   confirmStudentUpload,
   downloadErrorCsv,
@@ -20,7 +21,7 @@ import { AdminNotificationService } from '../services/adminNotification';
 import { PERMISSION_DEFS } from '../services/permissionSeed';
 import { buildBranding } from '../utils/branding';
 import bcrypt from 'bcrypt';
-import type { Request } from 'express';
+import { reqIp, reqUa } from '../utils/http';
 
 const router = express.Router();
 
@@ -29,7 +30,7 @@ router.use(restrictTo('ADMIN'));
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
-type ReqLike = Pick<Request, 'user'> & Partial<Pick<Request, 'ip'>> & { headers?: Record<string, any> };
+type ReqLike = Partial<Pick<Request, 'headers' | 'ip'>> & { user?: Request['user'] };
 
 async function writeAudit(
   req: ReqLike | undefined,
@@ -41,8 +42,8 @@ async function writeAudit(
   }
 ) {
   const userId = (req as any)?.user?.id ?? null;
-  const ipAddress = (req as any)?.ip ?? (req as any)?.headers?.['x-forwarded-for']?.split(',')[0] ?? null;
-  const userAgent = (req as any)?.headers?.['user-agent'] ?? null;
+  const ipAddress = req ? reqIp(req as any) : null;
+  const userAgent = req ? reqUa(req as any) : null;
   try {
     await prisma.auditLog.create({
       data: {
@@ -60,17 +61,7 @@ async function writeAudit(
 }
 
 router.get('/stats', getDashboardStats);
-const addStudentSchema = z.object({
-  email: z.string().email().max(254),
-  firstName: z.string().min(1).max(80),
-  lastName: z.string().min(1).max(80),
-  matricNumber: z.string().min(3).max(50),
-  password: z.string().min(8).max(128).optional(),
-  college: z.string().min(2).max(120).optional(),
-  department: z.string().min(2).max(120).optional(),
-  program: z.string().min(2).max(120).optional(),
-});
-router.post('/students', validateBody(addStudentSchema), addStudent);
+router.post('/students', validateBody(CreateStudentSchema), addStudent);
 
 router.post('/students/upload', stageStudentUpload);
 router.get('/students/upload/:id', previewStudentUpload);

@@ -156,6 +156,52 @@ export type CreateAssignmentInput = {
 };
 export type UpdateAssignmentInput = Partial<Omit<CreateAssignmentInput, 'feeId' | 'assignmentType'>>;
 
+export type MatricStudentResp = {
+  id: number;
+  matricNumber: string | null;
+  email: string;
+  firstName: string;
+  lastName: string;
+  middleName: string | null;
+  status: string;
+  academicLevel: number | null;
+  programme: string | null;
+  department: string | null;
+  academicSession: string | null;
+};
+
+export type CreateDirectStudentBillInput =
+  | {
+      matricNumber: string;
+      feeId: number;
+      overrideAmount?: number | string;
+      overrideDeadline?: string;
+      noteToStudent?: string;
+    }
+  | {
+      matricNumber: string;
+      adhocFeeName: string;
+      adhocFeeCategory?: string;
+      overrideAmount: number | string;
+      overrideDeadline?: string;
+      noteToStudent?: string;
+    };
+
+export type DirectStudentBillSuccessResp = {
+  created: boolean;
+  assignmentId: number;
+  invoiceId: number;
+  invoiceNumber: string;
+  studentId: number;
+  studentName: string;
+  matricNumber: string | null;
+  feeId: number | null;
+  feeName: string;
+  amount: number | string;
+  deadline: string | null;
+  origin: string;
+};
+
 export const feeApi = {
   // categories
   listCategories(q: CategoryQuery = {}): Promise<CategoryListResp> {
@@ -226,6 +272,40 @@ export const feeApi = {
   uploadErrorsUrl(stageId: string) {
     const token = localStorage.getItem('token') ?? '';
     return `${API_BASE_URL}/fees/bulk-upload/${stageId}/errors.csv?access_token=${encodeURIComponent(token)}`;
+  },
+
+  getStudentByMatric(matric: string): Promise<{ student: MatricStudentResp }> {
+    const safe = encodeURIComponent(matric.trim());
+    return api.get(`/students/matric/${safe}`).then((r) => unwrap(r));
+  },
+
+  createDirectStudentBill(
+    body: CreateDirectStudentBillInput,
+  ): Promise<DirectStudentBillSuccessResp> {
+    return api
+      .post('/fee-assignments/student-bill', body)
+      .then((r) => {
+        const raw: any = unwrap(r);
+        const assignment = raw.assignment;
+        const invoice = raw.invoice;
+        const fee = raw.fee;
+        const student = raw.student;
+        const nameParts = [student?.firstName, student?.middleName, student?.lastName].filter(Boolean);
+        return {
+          created: Boolean(raw.created ?? raw.invoiceCreated ?? raw.assignmentCreated),
+          assignmentId: Number(assignment?.id ?? 0),
+          invoiceId: Number(invoice?.id ?? 0),
+          invoiceNumber: String(invoice?.invoiceNumber ?? ''),
+          studentId: Number(student?.id ?? assignment?.targetStudentId ?? 0),
+          studentName: nameParts.join(' ') || student?.email || assignment?.targetStudent?.firstName + ' ' + assignment?.targetStudent?.lastName || '',
+          matricNumber: student?.matricNumber ?? assignment?.targetStudent?.matricNumber ?? null,
+          feeId: fee?.id ? Number(fee.id) : (assignment?.feeId ? Number(assignment.feeId) : null),
+          feeName: fee?.name ?? assignment?.fee?.name ?? '',
+          amount: invoice?.amountDue ?? assignment?.overrideAmount ?? fee?.amount ?? assignment?.fee?.amount ?? 0,
+          deadline: invoice?.dueDate ?? assignment?.overrideDeadline ?? fee?.paymentDeadline ?? assignment?.fee?.paymentDeadline ?? null,
+          origin: 'DIRECT_BILL',
+        };
+      });
   },
 };
 

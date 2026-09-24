@@ -221,13 +221,20 @@ router.get('/dashboard/stats', validateQuery(DashboardStatsSchema), catchAsync(a
   const basePaid: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
   const [
     todayAgg, weekAgg, monthAgg, pendingWithdrawAgg, refundsSuccessAgg,
+    invoiceDueAgg, invoicePaidAgg,
   ] = await Promise.all([
     prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: { ...basePaid, createdAt: { gte: startOfToday } } }),
     prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: { ...basePaid, createdAt: { gte: startOfWeek } } }),
     prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: { ...basePaid, createdAt: { gte: startOfMonth } } }),
     Promise.resolve({ _sum: { amount: null }, _count: { id: 0 } }),
     prisma.refund.count({ where: { status: 'PAID' as any } }),
+    prisma.invoice.aggregate({ _sum: { amountDue: true } }),
+    prisma.invoice.aggregate({ _sum: { amountPaid: true } }),
   ]);
+
+  const totalDue = Number(invoiceDueAgg._sum.amountDue ?? 0);
+  const totalPaid = Number(invoicePaidAgg._sum.amountPaid ?? 0);
+  const pendingFeeReceivables = Math.max(0, +(totalDue - totalPaid).toFixed(2));
 
   res.status(200).json({
     status: 'success',
@@ -248,6 +255,7 @@ router.get('/dashboard/stats', validateQuery(DashboardStatsSchema), catchAsync(a
         count: Number(pendingWithdrawAgg._count.id ?? 0),
         total: Number(pendingWithdrawAgg._sum.amount ?? 0),
       },
+      pendingFeeReceivables,
       successfulRefundsCount: Number(refundsSuccessAgg ?? 0),
       windows: {
         startOfToday: startOfToday.toISOString(),

@@ -103,8 +103,11 @@ const COLUMN_ALIASES: Record<string, string> = {
   faculty: 'college', 'college': 'college', 'school': 'college',
   dept: 'department', 'department': 'department',
   programme: 'program', 'program': 'program', 'courseofstudy': 'program',
+  programmeid: 'programmeId', 'programid': 'programmeId', 'programme_id': 'programmeId',
   level: 'level', 'class': 'level', 'gradelevel': 'level',
+  levelid: 'levelId', 'level_id': 'levelId',
   session: 'academicSession', 'academicsession': 'academicSession',
+  academicsessionid: 'academicSessionId', 'sessionid': 'academicSessionId', 'session_id': 'academicSessionId', 'academicsession_id': 'academicSessionId',
   studenttype: 'studentType', 'typeofstudent': 'studentType',
   entrymode: 'entryMode', 'entry_mode': 'entryMode', 'modeofentry': 'entryMode',
   admissionyear: 'admissionYear', 'set': 'admissionYear',
@@ -114,15 +117,11 @@ const COLUMN_ALIASES: Record<string, string> = {
   password: 'password', 'temporarypassword': 'password', 'defaultpassword': 'password',
 };
 
-const REQUIRED_COLUMNS: Array<keyof Pick<ReturnType<typeof normalize>, 'firstName' | 'lastName' | 'matricNumber' | 'college' | 'department' | 'program' | 'level' | 'academicSession' | 'email' | 'phoneNumber'>> = [
+type NormalizedKey = 'firstName' | 'lastName' | 'matricNumber' | 'program' | 'programmeId' | 'level' | 'levelId' | 'academicSession' | 'academicSessionId' | 'email' | 'phoneNumber';
+const REQUIRED_COLUMNS: NormalizedKey[] = [
   'firstName',
   'lastName',
   'matricNumber',
-  'college',
-  'department',
-  'program',
-  'level',
-  'academicSession',
   'email',
   'phoneNumber',
 ];
@@ -241,37 +240,54 @@ async function validateRows(rawRows: Record<string, any>[]) {
     if (typeof r.phoneNumber === 'string' && r.phoneNumber && !NG_PHONE_RE.test(r.phoneNumber)) {
       errs.push({ code: 'INVALID_PHONE', field: 'phoneNumber', message: 'invalid phone format' });
     }
-    if (r.level !== undefined && r.level !== null && r.level !== '' && (Number.isNaN(Number(r.level)) || Number(r.level) < 100 || Number(r.level) > 1000)) {
-      errs.push({ code: 'INVALID_LEVEL', field: 'level', message: 'level must be a number between 100 and 1000' });
-    }
-    for (const yearField of ['admissionYear', 'graduationYear'] as const) {
-      const v = r[yearField];
-      if (v !== undefined && v !== null && v !== '' && (Number.isNaN(Number(v)) || Number(v) < 1990 || Number(v) > 2100)) {
-        errs.push({ code: 'INVALID_YEAR', field: yearField, message: `${yearField} must be a valid year 1990-2100` });
+    // Level validation: accept numeric levels (legacy) OR a level display name like "100 Level"
+    if (r.level !== undefined && r.level !== null && r.level !== '') {
+      const asText = String(r.level).toLowerCase().replace(/\s*level\s*$/i, '').trim();
+      const n = Number(asText);
+      if (!Number.isNaN(n) && (n < 100 || n > 1000)) {
+        errs.push({ code: 'INVALID_LEVEL', field: 'level', message: 'level must be a number between 100 and 1000 (e.g. 100 or "100 Level")' });
+      } else if (Number.isNaN(n) && !asText) {
+        errs.push({ code: 'INVALID_LEVEL', field: 'level', message: 'invalid level format' });
       }
     }
+    if (r.admissionYear !== undefined && r.admissionYear !== null && r.admissionYear !== '' && (Number.isNaN(Number(r.admissionYear)) || Number(r.admissionYear) < 1990 || Number(r.admissionYear) > 2100)) {
+      errs.push({ code: 'INVALID_YEAR', field: 'admissionYear', message: `admissionYear must be a valid year 1990-2100` });
+    }
+    if (r.graduationYear !== undefined && r.graduationYear !== null && r.graduationYear !== '' && (Number.isNaN(Number(r.graduationYear)) || Number(r.graduationYear) < 1990 || Number(r.graduationYear) > 2100)) {
+      errs.push({ code: 'INVALID_YEAR', field: 'graduationYear', message: `graduationYear must be a valid year 1990-2100` });
+    }
 
-    const hasHierarchyFields =
-      (r.college !== undefined && r.college !== null && r.college !== '') ||
-      (r.department !== undefined && r.department !== null && r.department !== '') ||
-      (r.program !== undefined && r.program !== null && r.program !== '') ||
-      (r.level !== undefined && r.level !== null && r.level !== '') ||
-      (r.academicSession !== undefined && r.academicSession !== null && r.academicSession !== '');
-    if (hasHierarchyFields) {
-      const hierarchyResult = await validateHierarchy({
-        facultyName: r.college ? String(r.college) : undefined,
-        departmentName: r.department ? String(r.department) : undefined,
-        programmeName: r.program ? String(r.program) : undefined,
-        levelName: r.level !== undefined && r.level !== null && r.level !== '' ? String(r.level) : undefined,
-        sessionName: r.academicSession ? String(r.academicSession) : undefined,
-      });
-      if (!hierarchyResult.valid) {
-        for (const herr of hierarchyResult.errors) {
-          errs.push({
-            code: 'HIERARCHY_MISMATCH',
-            field: herr.field,
-            message: herr.message,
-          });
+    // New simplified bulk upload: if caller provides programmeId / levelId /
+    // academicSessionId, SKIP validateHierarchy (we'll resolve at creation
+    // time). Otherwise fall through to validateHierarchy against legacy
+    // college/department/program name strings if ANY are provided.
+    const idBasedHierarchy =
+      (r.programmeId !== undefined && r.programmeId !== null && String(r.programmeId).trim() !== '') ||
+      (r.levelId !== undefined && r.levelId !== null && String(r.levelId).trim() !== '') ||
+      (r.academicSessionId !== undefined && r.academicSessionId !== null && String(r.academicSessionId).trim() !== '');
+    if (!idBasedHierarchy) {
+      const hasHierarchyFields =
+        (r.college !== undefined && r.college !== null && r.college !== '') ||
+        (r.department !== undefined && r.department !== null && r.department !== '') ||
+        (r.program !== undefined && r.program !== null && r.program !== '') ||
+        (r.level !== undefined && r.level !== null && r.level !== '') ||
+        (r.academicSession !== undefined && r.academicSession !== null && r.academicSession !== '');
+      if (hasHierarchyFields) {
+        const hierarchyResult = await validateHierarchy({
+          facultyName: r.college ? String(r.college) : undefined,
+          departmentName: r.department ? String(r.department) : undefined,
+          programmeName: r.program ? String(r.program) : undefined,
+          levelName: r.level !== undefined && r.level !== null && r.level !== '' ? String(r.level) : undefined,
+          sessionName: r.academicSession ? String(r.academicSession) : undefined,
+        });
+        if (!hierarchyResult.valid) {
+          for (const herr of hierarchyResult.errors) {
+            errs.push({
+              code: 'HIERARCHY_MISMATCH',
+              field: herr.field,
+              message: herr.message,
+            });
+          }
         }
       }
     }

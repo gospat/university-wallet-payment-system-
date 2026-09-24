@@ -159,8 +159,8 @@ export const publicVerifyReceipt = catchAsync(async (req: Request, res: Response
   const row = await prisma.receipt.findUnique({
     where: { verificationToken: token },
     include: {
-      student: { select: { firstName: true, lastName: true, matricNumber: true } },
-      invoice: { include: { fee: { select: { name: true } } } },
+      student: { select: { id: true, firstName: true, lastName: true, matricNumber: true } },
+      invoice: { include: { fee: { select: { id: true, name: true } } } },
     },
   });
   if (!row) {
@@ -176,6 +176,28 @@ export const publicVerifyReceipt = catchAsync(async (req: Request, res: Response
       },
     });
     return;
+  }
+
+  const feeId = row.invoice?.fee?.id;
+  const studentId = row.student?.id;
+  let chargeSource: { origin: 'DIRECT_BILL' | 'CATALOGUE'; assignmentId: number | null; matricNumber: string | null } = {
+    origin: 'CATALOGUE',
+    assignmentId: null,
+    matricNumber: row.student?.matricNumber ?? null,
+  };
+  if (studentId && feeId) {
+    const asg = await prisma.feeAssignment.findFirst({
+      where: {
+        assignmentType: 'STUDENT' as any,
+        targetStudentId: studentId,
+        feeId,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+    if (asg) {
+      chargeSource = { origin: 'DIRECT_BILL', assignmentId: asg.id, matricNumber: row.student?.matricNumber ?? null };
+    }
   }
 
   const brand = {
@@ -211,7 +233,9 @@ export const publicVerifyReceipt = catchAsync(async (req: Request, res: Response
         session: (row.invoice as any).session || null,
         semester: (row.invoice as any).semester || null,
         feeName: row.invoice.fee?.name || null,
+        feeId: row.invoice.fee?.id ?? null,
       } : null,
+      chargeSource,
     },
     branding: brand,
   });

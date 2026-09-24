@@ -2,6 +2,7 @@ import puppeteer from 'puppeteer';
 import QRCode from 'qrcode';
 import { AppError } from '../utils/AppError';
 import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding } from '../utils/branding';
+import prisma from '../config/database';
 
 type ReceiptData = {
   receiptNumber: string;
@@ -84,6 +85,37 @@ function escapeHtml(str: string | number | null | undefined) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+type DirectBillInfo = { assignmentId: number; matricNumber: string | null } | null;
+
+async function lookupDirectBillForInvoice(studentId: number | undefined | null, feeId: number | undefined | null): Promise<DirectBillInfo> {
+  if (!studentId || !feeId) return null;
+  const row = await prisma.feeAssignment.findFirst({
+    where: {
+      assignmentType: 'STUDENT' as any,
+      targetStudentId: Number(studentId),
+      feeId: Number(feeId),
+      isActive: true,
+    },
+    select: {
+      id: true,
+      targetStudent: { select: { matricNumber: true } },
+    },
+  });
+  if (!row) return null;
+  return { assignmentId: row.id, matricNumber: row.targetStudent?.matricNumber ?? null };
+}
+
+function chargeSourceCss(): string {
+  return `.charge-source { margin: -18px 0 22px; padding: 10px 16px; background: #eef2ff; border-left: 3px solid #6366f1; border-radius: 4px; font-style: italic; font-size: 12.5px; color: #4338ca; letter-spacing: 0.1px; }
+.charge-source strong { font-style: normal; color: #3730a3; font-weight: 600; }`;
+}
+
+function chargeSourceHtml(info: DirectBillInfo): string {
+  if (!info) return '';
+  const matricPart = info.matricNumber ? ` — Matric: <strong>${escapeHtml(info.matricNumber)}</strong>` : '';
+  return `<div class="charge-source">Charge source: <strong>Direct Bill</strong> (Bursary assignment #${info.assignmentId})${matricPart}</div>`;
 }
 
 async function render(html: string) {
@@ -181,6 +213,7 @@ tr:nth-child(even) { background-color: #fafbfe; }
 .approved-line { flex: 1; border-bottom: 1px solid #999; height: 18px; }
 .approved-seal { height: 48px; border: 1px dashed #666; border-radius: 4px; }
 .footer { margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px; text-align: center; font-size: 10px; color: #888; }
+${chargeSourceCss()}
 </style>
 </head>
 <body>
@@ -242,6 +275,8 @@ tr:nth-child(even) { background-color: #fafbfe; }
     const statusText = transaction.receipt?.isVoided ? 'VOIDED' : 'PAID';
     const invoiceNumber = transaction.invoice?.invoiceNumber;
     const feeName = transaction.invoice?.fee?.name;
+    const directBill = await lookupDirectBillForInvoice(transaction.userId ?? student.id, transaction.invoice?.feeId);
+    const chargeSourceBlock = chargeSourceHtml(directBill);
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -294,6 +329,7 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
 .approved-row > span { flex: 0 0 140px; }
 .approved-line { flex: 1; border-bottom: 1px solid #999; height: 18px; }
 .approved-seal { height: 48px; border: 1px dashed #666; border-radius: 4px; }
+${chargeSourceCss()}
 </style>
 </head>
 <body>
@@ -337,6 +373,8 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
     </div>
   </div>
 
+  ${chargeSourceBlock}
+
   <div class="fee-breakdown">
     <table>
       <tbody>
@@ -375,6 +413,8 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
     const qrCodeImage = await QRCode.toDataURL(receipt.qrUrl, { errorCorrectionLevel: 'M' });
     const statusClass = receipt.isVoided ? 'badge-voided' : 'badge-paid';
     const statusText = receipt.isVoided ? 'VOIDED' : 'PAID';
+    const directBill = await lookupDirectBillForInvoice((receipt.student as any)?.id, receipt.invoice?.fee ? ((receipt.invoice as any).fee as any).id : (receipt.invoice as any)?.feeId);
+    const chargeSourceBlock = chargeSourceHtml(directBill);
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -426,6 +466,7 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
 .approved-row > span { flex: 0 0 140px; }
 .approved-line { flex: 1; border-bottom: 1px solid #999; height: 18px; }
 .approved-seal { height: 48px; border: 1px dashed #666; border-radius: 4px; }
+${chargeSourceCss()}
 </style>
 </head>
 <body>
@@ -468,6 +509,8 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
       <div class="group"><div class="label">Payment Method</div><div class="value">Online Payment (Paystack)${receipt.paymentMethodDetail ? ' • ' + escapeHtml(receipt.paymentMethodDetail) : ''}</div></div>
     </div>
   </div>
+
+  ${chargeSourceBlock}
 
   <div class="fee-breakdown">
     <table>

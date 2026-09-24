@@ -21,6 +21,8 @@ export const errors = {
       `Account temporarily locked due to too many failed attempts. Try again in ${minutes} minute(s).`,
     emailExists: 'Email already exists',
     matricExists: 'A student with this matriculation number already exists',
+    matricNotFound: (matric: string) =>
+      `No active student found with matriculation number "${matric}".`,
     passwordIncorrect: 'Current password is incorrect.',
     passwordSame: 'New password must differ from current password.',
     passwordTooShort: 'New password must be at least 8 characters.',
@@ -53,6 +55,10 @@ export const errors = {
     assignmentTypeRequiresFields: (t: string, fields: string[]) =>
       `Assignment type "${t}" requires all of the following fields: ${fields.join(', ')}.`,
     assignmentNotFound: 'Fee assignment not found',
+    directBillFeeOrAdhoc: 'Provide exactly one of feeId (existing fee) or adhocFeeName + overrideAmount (new ad-hoc charge).',
+    directBillAdhocName: 'Ad-hoc charge name is required (max 160 characters).',
+    directBillAdhocAmount: 'Ad-hoc amount must be a positive number (max NGN 99,999,999.99).',
+    directBillMatric: 'matricNumber is required and cannot be blank.',
   },
   upload: {
     fileRequired: 'Please upload a CSV or XLSX file',
@@ -106,6 +112,11 @@ export const errors = {
   server: {
     generic: 'An unexpected error occurred.',
     notFound: 'The requested resource was not found.',
+  },
+  students: {
+    invalidProgrammeId: 'The selected Programme does not exist. Please choose a Programme from the dropdown list under Academic Structure → Programmes.',
+    invalidLevelId: 'The selected Level does not exist. Please choose a Level from the dropdown list or add it under Academic Structure → Levels.',
+    invalidSessionId: 'The selected Academic Session does not exist. Please choose a Session from the dropdown list or add it under Academic Structure → Sessions.',
   },
 } as const;
 

@@ -7,6 +7,17 @@ import api, { navCounters, NavCounters } from '../../services/api';
 import type { AxiosRequestConfig } from 'axios';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { Copy, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap } from 'lucide-react';
+
+type ProgrammeOption = {
+  id: number;
+  name: string;
+  code?: string | null;
+  departmentName?: string | null;
+  collegeName?: string | null;
+};
+type LevelOption = { id: number; level: number; programmeId?: number | null };
+type SessionOption = { id: number; name: string; isActive?: boolean };
 
 type StudentRow = {
   id: number;
@@ -43,8 +54,21 @@ type AlertState = {
 };
 
 const STUDENT_TYPES = ['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER'] as const;
-const ENTRY_MODES = ['UTME', 'DIRECT_ENTRY', 'TRANSFER', 'OTHER'] as const;
 const STATUSES = ['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN'] as const;
+
+function generateStrongPassword(length = 14): string {
+  const uppers = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lowers = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const syms = '!@#$%^&*';
+  const all = uppers + lowers + digits + syms;
+  let out = uppers[Math.floor(Math.random() * uppers.length)];
+  out += lowers[Math.floor(Math.random() * lowers.length)];
+  out += digits[Math.floor(Math.random() * digits.length)];
+  out += syms[Math.floor(Math.random() * syms.length)];
+  for (let i = 4; i < length; i++) out += all[Math.floor(Math.random() * all.length)];
+  return out.split('').sort(() => Math.random() - 0.5).join('');
+}
 
 type StudentInputState = {
   email: string;
@@ -53,30 +77,19 @@ type StudentInputState = {
   lastName: string;
   password: string;
   matricNumber: string;
-  admissionNumber: string;
-  jambNumber: string;
-  college: string;
-  department: string;
-  program: string;
-  level: string;
-  academicSession: string;
+  programmeId: string;
+  levelId: string;
+  academicSessionId: string;
   studentType: string;
-  entryMode: string;
-  admissionYear: string;
-  graduationYear: string;
   phoneNumber: string;
-  address: string;
   accountStatus: string;
 };
 
 const emptyInput = (): StudentInputState => ({
   email: '', firstName: '', middleName: '', lastName: '',
-  password: 'student123',
-  matricNumber: '', admissionNumber: '', jambNumber: '',
-  college: '', department: '', program: '', level: '', academicSession: '',
-  studentType: 'UNDERGRADUATE', entryMode: 'UTME',
-  admissionYear: '', graduationYear: '', phoneNumber: '', address: '',
-  accountStatus: 'ACTIVE',
+  password: generateStrongPassword(),
+  matricNumber: '', programmeId: '', levelId: '', academicSessionId: '',
+  studentType: 'UNDERGRADUATE', phoneNumber: '', accountStatus: 'ACTIVE',
 });
 
 const StatusPill: React.FC<{ status: string }> = ({ status }) => {
@@ -104,8 +117,68 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   void goBack;
   void dashboardTo;
 
+  // Hierarchy dropdown options (Programmes / Levels / Sessions) — populated
+  // once on mount. If the user hasn't set up Programme/Level/Session yet
+  // (clean slate Option B), we show helpful empty-state callouts.
+  const [programmeOptions, setProgrammeOptions] = useState<ProgrammeOption[]>([]);
+  const [levelOptions, setLevelOptions] = useState<LevelOption[]>([]);
+  const [sessionOptions, setSessionOptions] = useState<SessionOption[]>([]);
+  const [hierarchyLoading, setHierarchyLoading] = useState(true);
+  const [hierarchyErr, setHierarchyErr] = useState<string | null>(null);
+
   useEffect(() => {
     navCounters().then(setNavCounts);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setHierarchyLoading(true);
+      setHierarchyErr(null);
+      try {
+        const [progs, levels, sess] = await Promise.all([
+          api.get<any>('/academic/programmes?limit=500').then((r) => {
+            const d = r.data?.data?.items ?? r.data?.data;
+            if (!Array.isArray(d)) return [];
+            return d.map((x: any): ProgrammeOption => ({
+              id: Number(x.id),
+              name: String(x.name ?? ''),
+              code: x.code ?? null,
+              departmentName: String(x.department?.name ?? ''),
+              collegeName: String(x.department?.faculty?.name ?? ''),
+            }));
+          }),
+          api.get<any>('/academic/levels?limit=500').then((r) => {
+            const d = r.data?.data?.items ?? r.data?.data;
+            if (!Array.isArray(d)) return [];
+            return d.map((x: any): LevelOption => ({
+              id: Number(x.id),
+              level: Number(x.level),
+              programmeId: x.programmeId ?? null,
+            }));
+          }),
+          api.get<any>('/academic/sessions?limit=200').then((r) => {
+            const d = r.data?.data?.items ?? r.data?.data;
+            if (!Array.isArray(d)) return [];
+            return d.map((x: any): SessionOption => ({
+              id: Number(x.id),
+              name: String(x.name ?? ''),
+              isActive: x.isActive,
+            }));
+          }),
+        ]);
+        if (cancelled) return;
+        setProgrammeOptions(progs);
+        setLevelOptions(levels);
+        setSessionOptions(sess);
+      } catch (e: any) {
+        if (!cancelled) setHierarchyErr(e?.message ?? 'Failed to load');
+      } finally {
+        if (!cancelled) setHierarchyLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -206,13 +279,12 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     setEditorState({
       email: s.email, firstName: s.firstName, middleName: s.middleName ?? '', lastName: s.lastName,
       password: '',
-      matricNumber: s.matricNumber ?? '', admissionNumber: s.admissionNumber ?? '', jambNumber: s.jambNumber ?? '',
-      college: s.college ?? '', department: s.department ?? '', program: s.program ?? '',
-      level: s.level ? String(s.level) : '', academicSession: s.academicSession ?? '',
-      studentType: s.studentType ?? 'UNDERGRADUATE', entryMode: s.entryMode ?? 'UTME',
-      admissionYear: s.admissionYear ? String(s.admissionYear) : '',
-      graduationYear: s.graduationYear ? String(s.graduationYear) : '',
-      phoneNumber: s.phoneNumber ?? '', address: s.address ?? '',
+      matricNumber: s.matricNumber ?? '',
+      programmeId: '',
+      levelId: '',
+      academicSessionId: '',
+      studentType: s.studentType ?? 'UNDERGRADUATE',
+      phoneNumber: s.phoneNumber ?? '',
       accountStatus: s.accountStatus,
     });
     setEditorOpen('edit');
@@ -220,7 +292,27 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
 
   const patchEditor = (patch: Partial<StudentInputState>) => setEditorState((s) => ({ ...s, ...patch }));
 
+  const [editorValidityCheck, setEditorValidityCheck] = useState(0);
+  const selectedProgramme = programmeOptions.find((p) => String(p.id) === editorState.programmeId) ?? null;
+
+  const requiredChecksCreate = (): Array<{ field: string; ok: boolean }> => {
+    const v = editorState;
+    return [
+      { field: 'First Name', ok: !!v.firstName.trim() },
+      { field: 'Last Name', ok: !!v.lastName.trim() },
+      { field: 'Email', ok: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.email) },
+      { field: 'Matric Number', ok: !!v.matricNumber.trim() },
+      { field: 'Programme', ok: !!v.programmeId },
+      { field: 'Level', ok: !!v.levelId },
+      { field: 'Academic Session', ok: !!v.academicSessionId },
+      { field: 'Temporary Password', ok: editorOpen === 'edit' ? true : (v.password.length >= 8) },
+    ];
+  };
+  const formReadyCreate = requiredChecksCreate().every((c) => c.ok);
+
   const submitEditor = async () => {
+    setEditorValidityCheck((x) => x + 1);
+    if (editorOpen === 'create' && !formReadyCreate) return;
     setEditorSubmitting(true);
     try {
       const payload: Record<string, any> = {};
@@ -228,9 +320,9 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         const v = editorState[k];
         if (v === '' || v === undefined || v === null) return;
         if (k === 'password' && editorOpen === 'edit') return;
-        if (k === 'level' || k === 'admissionYear' || k === 'graduationYear') {
+        if (k === 'programmeId' || k === 'levelId' || k === 'academicSessionId') {
           const n = Number(v);
-          if (!Number.isNaN(n)) payload[k] = n;
+          if (!Number.isNaN(n) && n > 0) payload[k] = n;
         } else {
           payload[k] = v;
         }
@@ -373,15 +465,69 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     }
   };
 
-  // ---- UI helper: text input --------------------------------------------
-  const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-    <div>
-      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-      {children}
+  // ---- UI helpers: val / password visibility -----------------------------
+  const [showPassword, setShowPassword] = useState(false);
+  const [copiedPw, setCopiedPw] = useState(false);
+  const copyPw = async () => {
+    try {
+      await navigator.clipboard.writeText(editorState.password);
+      setCopiedPw(true);
+      setTimeout(() => setCopiedPw(false), 1500);
+    } catch (_) {}
+  };
+  const rerollPw = () => patchEditor({ password: generateStrongPassword() });
+
+  type Validity = 'idle' | 'ok' | 'warn' | 'err';
+  const borderFor = (validity: Validity): string => {
+    switch (validity) {
+      case 'ok': return 'border-green-400 focus:ring-green-500 focus:border-green-500';
+      case 'warn': return 'border-amber-400 focus:ring-amber-500 focus:border-amber-500';
+      case 'err': return 'border-red-400 focus:ring-red-500 focus:border-red-500';
+      default: return 'border-gray-300 focus:ring-blue-500 focus:border-blue-500';
+    }
+  };
+  const Field: React.FC<{
+    label: string;
+    hint?: string;
+    required?: boolean;
+    validity?: Validity;
+    children: React.ReactNode;
+  }> = ({ label, hint, required, validity = 'idle', children }) => {
+    const state = (editorValidityCheck > 0 || validity === 'ok') ? validity : 'idle';
+    return (
+      <div className="space-y-1">
+        <label className="flex items-center gap-1 text-[13px] font-semibold text-gray-800">
+          {label}
+          {required && <span className="text-red-500 leading-none">*</span>}
+          {state === 'ok' && <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />}
+          {state === 'warn' && <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />}
+          {state === 'err' && <XCircle className="w-3.5 h-3.5 text-red-600" />}
+        </label>
+        {children}
+        {hint && state !== 'err' && <p className="text-[11px] text-gray-500 leading-tight">{hint}</p>}
+      </div>
+    );
+  };
+  const baseInputCls = 'w-full px-3 py-2 rounded-lg border text-sm bg-white transition';
+  // String variant kept for legacy uses (filters table, bulk wizard) that don't pass validity.
+  // Use `validInput(validity)` inside the Add/Edit Student modal for colored borders.
+  const validInput = (validity?: Validity) => `${baseInputCls} ${borderFor(validity ?? 'idle')}`;
+  const inputCls: string = validInput();
+
+  const sectionHead = (title: string, icon: React.ReactNode, subtitle?: string) => (
+    <div className="flex items-start gap-3 pb-2 mb-3 border-b border-gray-100">
+      <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center shrink-0">{icon}</div>
+      <div>
+        <h3 className="text-sm font-bold text-gray-900">{title}</h3>
+        {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
+      </div>
     </div>
   );
-  const inputCls =
-    'w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm';
+
+  // ---- Validity helpers per field (for Create mode). Edit mode = permissive.
+  const emailOK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editorState.email);
+  const emailValidity: Validity = !editorState.email ? (editorValidityCheck > 0 ? 'err' : 'idle') : emailOK ? 'ok' : 'warn';
+  const textReq = (s: string) => !s ? (editorValidityCheck > 0 ? 'err' : 'idle') : 'ok' as Validity;
 
   // ---- pagination --------------------------------------------------------
   const totalPages = Math.max(1, data ? Math.ceil(data.total / Math.max(1, Number(query.pageSize) || 25)) : 1);
@@ -623,94 +769,198 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       {/* Create / Edit */}
       <Modal
         isOpen={editorOpen !== null}
-        onClose={() => { setEditorOpen(null); setEditingId(null); setSearchParams({}); }}
+        size="lg"
+        onClose={() => { setEditorOpen(null); setEditingId(null); setSearchParams({}); setEditorValidityCheck(0); setShowPassword(false); }}
         title={editorOpen === 'create' ? students.createTitle : students.editTitle}
         footer={
-          <>
-            <button
-              onClick={() => setEditorOpen(null)}
-              className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
-            >
-              {students.cancelButton}
-            </button>
-            <button
-              onClick={submitEditor}
-              disabled={editorSubmitting}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold disabled:opacity-50 inline-flex items-center gap-2"
-            >
-              {editorSubmitting ? students.submitting : (editorOpen === 'create' ? students.createSubmit : students.editSubmit)}
-            </button>
-          </>
+          <div className="flex w-full flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            {editorOpen === 'create' && (
+              <div className="flex flex-wrap gap-1.5 items-center">
+                {requiredChecksCreate().map((c) => (
+                  <span key={c.field} className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] border ${c.ok ? 'bg-green-50 text-green-700 border-green-200' : editorValidityCheck > 0 ? 'bg-red-50 text-red-700 border-red-200' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
+                    {c.ok ? <CheckCircle2 className="w-3 h-3" /> : editorValidityCheck > 0 ? <XCircle className="w-3 h-3" /> : null}
+                    {c.field}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end items-center gap-3 ml-auto">
+              <button
+                onClick={() => { setEditorOpen(null); setEditingId(null); setSearchParams({}); setEditorValidityCheck(0); setShowPassword(false); }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium text-sm"
+              >
+                {students.cancelButton}
+              </button>
+              <button
+                onClick={submitEditor}
+                disabled={editorSubmitting || (editorOpen === 'create' && editorValidityCheck > 0 && !formReadyCreate)}
+                className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-6 py-2 rounded-lg font-bold inline-flex items-center gap-2 text-sm"
+              >
+                {editorSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                {editorSubmitting ? students.submitting : (editorOpen === 'create' ? students.createSubmit : students.editSubmit)}
+              </button>
+            </div>
+          </div>
         }
       >
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[65vh] overflow-y-auto pr-1">
-          <Field label={students.fieldEmail}>
-            <input type="email" className={inputCls} value={editorState.email} onChange={(e) => patchEditor({ email: e.target.value })} />
-          </Field>
-          <Field label={students.fieldPassword}>
-            <input type="text" className={inputCls} value={editorState.password} onChange={(e) => patchEditor({ password: e.target.value })} readOnly={editorOpen === 'edit'} />
-          </Field>
-          <Field label={students.fieldFirstName}>
-            <input className={inputCls} value={editorState.firstName} onChange={(e) => patchEditor({ firstName: e.target.value })} />
-          </Field>
-          <Field label={students.fieldLastName}>
-            <input className={inputCls} value={editorState.lastName} onChange={(e) => patchEditor({ lastName: e.target.value })} />
-          </Field>
-          <Field label={students.fieldMiddleName}>
-            <input className={inputCls} value={editorState.middleName} onChange={(e) => patchEditor({ middleName: e.target.value })} />
-          </Field>
-          <Field label={students.fieldMatricNumber}>
-            <input className={inputCls} value={editorState.matricNumber} onChange={(e) => patchEditor({ matricNumber: e.target.value })} />
-          </Field>
-          <Field label={students.fieldAdmissionNumber}>
-            <input className={inputCls} value={editorState.admissionNumber} onChange={(e) => patchEditor({ admissionNumber: e.target.value })} />
-          </Field>
-          <Field label={students.fieldJambNumber}>
-            <input className={inputCls} value={editorState.jambNumber} onChange={(e) => patchEditor({ jambNumber: e.target.value })} />
-          </Field>
-          <Field label={students.fieldCollege}>
-            <input className={inputCls} value={editorState.college} onChange={(e) => patchEditor({ college: e.target.value })} />
-          </Field>
-          <Field label={students.fieldDepartment}>
-            <input className={inputCls} value={editorState.department} onChange={(e) => patchEditor({ department: e.target.value })} />
-          </Field>
-          <Field label={students.fieldProgram}>
-            <input className={inputCls} value={editorState.program} onChange={(e) => patchEditor({ program: e.target.value })} />
-          </Field>
-          <Field label={students.fieldLevel}>
-            <input inputMode="numeric" className={inputCls} placeholder="e.g. 100" value={editorState.level} onChange={(e) => patchEditor({ level: e.target.value })} />
-          </Field>
-          <Field label={students.fieldAcademicSession}>
-            <input className={inputCls} placeholder="2024/2025" value={editorState.academicSession} onChange={(e) => patchEditor({ academicSession: e.target.value })} />
-          </Field>
-          <Field label={students.fieldStudentType}>
-            <select className={inputCls} value={editorState.studentType} onChange={(e) => patchEditor({ studentType: e.target.value })}>
-              {STUDENT_TYPES.map((s) => <option key={s} value={s}>{studentTypeLabel(s)}</option>)}
-            </select>
-          </Field>
-          <Field label={students.fieldEntryMode}>
-            <select className={inputCls} value={editorState.entryMode} onChange={(e) => patchEditor({ entryMode: e.target.value })}>
-              {ENTRY_MODES.map((s) => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
-            </select>
-          </Field>
-          <Field label={students.fieldAccountStatus}>
-            <select className={inputCls} value={editorState.accountStatus} onChange={(e) => patchEditor({ accountStatus: e.target.value })}>
-              {STATUSES.map((s) => <option key={s} value={s}>{(statusLabels as any)[s]}</option>)}
-            </select>
-          </Field>
-          <Field label={students.fieldAdmissionYear}>
-            <input inputMode="numeric" className={inputCls} placeholder="e.g. 2024" value={editorState.admissionYear} onChange={(e) => patchEditor({ admissionYear: e.target.value })} />
-          </Field>
-          <Field label={students.fieldGraduationYear}>
-            <input inputMode="numeric" className={inputCls} placeholder="e.g. 2028" value={editorState.graduationYear} onChange={(e) => patchEditor({ graduationYear: e.target.value })} />
-          </Field>
-          <Field label={students.fieldPhoneNumber}>
-            <input className={inputCls} placeholder="08012345678" value={editorState.phoneNumber} onChange={(e) => patchEditor({ phoneNumber: e.target.value })} />
-          </Field>
-          <div className="sm:col-span-2">
-            <Field label={students.fieldAddress}>
-              <textarea rows={2} className={inputCls} value={editorState.address} onChange={(e) => patchEditor({ address: e.target.value })} />
+        <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-1">
+          {/* SECTION 1: PERSONAL */}
+          {sectionHead('Personal Information', <span className="text-lg">👤</span>, editorOpen === 'create' ? 'Core identifying details for the new student.' : 'Update student personal details.')}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label={students.fieldFirstName} required validity={textReq(editorState.firstName)}>
+              <input autoComplete="off" className={validInput(textReq(editorState.firstName))} value={editorState.firstName} onChange={(e) => patchEditor({ firstName: e.target.value })} placeholder="e.g. Adebayo" />
             </Field>
+            <Field label={students.fieldLastName} required validity={textReq(editorState.lastName)}>
+              <input autoComplete="off" className={validInput(textReq(editorState.lastName))} value={editorState.lastName} onChange={(e) => patchEditor({ lastName: e.target.value })} placeholder="e.g. Okafor" />
+            </Field>
+            <div className="sm:col-span-2">
+              <Field label={students.fieldMiddleName} hint="Optional — will be omitted from receipts if blank.">
+                <input autoComplete="off" className={validInput()} value={editorState.middleName} onChange={(e) => patchEditor({ middleName: e.target.value })} placeholder="e.g. Chinedu (optional)" />
+              </Field>
+            </div>
+            <Field label={students.fieldEmail} required validity={emailValidity}>
+              <input type="email" autoComplete="off" className={validInput(emailValidity)} value={editorState.email} onChange={(e) => patchEditor({ email: e.target.value })} placeholder="student.name@university.edu.ng" />
+            </Field>
+            <Field label={students.fieldPhoneNumber} hint="Optional. Used for SMS notifications if configured.">
+              <input autoComplete="off" inputMode="tel" className={validInput()} value={editorState.phoneNumber} onChange={(e) => patchEditor({ phoneNumber: e.target.value })} placeholder="0801 234 5678" />
+            </Field>
+            <div className="sm:col-span-2">
+              <Field label={students.fieldMatricNumber} required validity={textReq(editorState.matricNumber)} hint="Unique identifier. Used later by Bursary/Admin to issue DIRECT BILLS to this student.">
+                <input autoComplete="off" className={`${validInput(textReq(editorState.matricNumber))} font-mono tracking-wide`} value={editorState.matricNumber} onChange={(e) => patchEditor({ matricNumber: e.target.value })} placeholder="e.g. 2025/ENG/0001" />
+              </Field>
+            </div>
+          </div>
+
+          {/* SECTION 2: ACADEMIC PLACEMENT */}
+          {sectionHead('Academic Placement', <GraduationCap className="w-4 h-4" />, editorOpen === 'create' ? 'Pick Programme — College & Department are auto-filled for you.' : 'Programme changes auto cascade to Department & College.')}
+          {hierarchyLoading ? (
+            <div className="flex items-center gap-2 text-sm text-gray-500 px-3 py-4 bg-gray-50 rounded-lg">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading programmes, levels and sessions…
+            </div>
+          ) : hierarchyErr ? (
+            <div className="flex items-start gap-2 text-sm text-red-700 px-3 py-4 bg-red-50 border border-red-200 rounded-lg">
+              <XCircle className="w-4 h-4 mt-0.5" />
+              <div>
+                Couldn't load the academic setup. Make sure your session is valid or refresh the page.
+                <div className="text-xs text-red-600 mt-1">{hierarchyErr}</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              {programmeOptions.length === 0 && (
+                <div className="text-xs bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 mb-4 flex gap-2">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <div>
+                    <div className="font-semibold">No programmes set up yet.</div>
+                    <div className="mt-0.5">Go to <span className="font-medium">ACADEMIC STRUCTURE → Programmes</span> to define at least one Programme (with a parent Department & Faculty). Then return here.</div>
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="sm:col-span-2">
+                  <Field label="Programme" required validity={textReq(editorState.programmeId)} hint="Once selected, Department and College are auto-inferred for you.">
+                    <select className={validInput(textReq(editorState.programmeId))} value={editorState.programmeId} onChange={(e) => patchEditor({ programmeId: e.target.value })}>
+                      <option value="">— Select a Programme —</option>
+                      {programmeOptions.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.name}{p.code ? ` (${p.code})` : ''}{p.departmentName && p.collegeName ? ` — ${p.departmentName}, ${p.collegeName}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+
+                {selectedProgramme && (selectedProgramme.departmentName || selectedProgramme.collegeName) && (
+                  <div className="sm:col-span-2 -mt-1 mb-1 grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-blue-50/60 border border-blue-100 rounded-lg">
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-600">College (auto)</div>
+                      <div className="text-sm text-gray-800 mt-0.5">{selectedProgramme.collegeName || '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-600">Department (auto)</div>
+                      <div className="text-sm text-gray-800 mt-0.5">{selectedProgramme.departmentName || '—'}</div>
+                    </div>
+                  </div>
+                )}
+
+                <Field label={students.fieldLevel} required validity={textReq(editorState.levelId)}>
+                  <select className={validInput(textReq(editorState.levelId))} value={editorState.levelId} onChange={(e) => patchEditor({ levelId: e.target.value })}>
+                    <option value="">— Select Level —</option>
+                    {levelOptions.length > 0 ? levelOptions.map((l) => (
+                      <option key={l.id} value={String(l.id)}>{l.level} Level</option>
+                    )) : [100, 200, 300, 400, 500, 600].map((n) => (
+                      <option key={n} value="" disabled>{n} Level (add in Academic Structure first)</option>
+                    ))}
+                  </select>
+                </Field>
+
+                <Field label={students.fieldAcademicSession} required validity={textReq(editorState.academicSessionId)}>
+                  <select className={validInput(textReq(editorState.academicSessionId))} value={editorState.academicSessionId} onChange={(e) => patchEditor({ academicSessionId: e.target.value })}>
+                    <option value="">— Select Session —</option>
+                    {sessionOptions.map((s) => (
+                      <option key={s.id} value={String(s.id)}>{s.name}{s.isActive === false ? ' (inactive)' : ''}</option>
+                    ))}
+                  </select>
+                </Field>
+
+                <Field label={students.fieldStudentType}>
+                  <select className={validInput()} value={editorState.studentType} onChange={(e) => patchEditor({ studentType: e.target.value })}>
+                    {STUDENT_TYPES.map((s) => <option key={s} value={s}>{studentTypeLabel(s)}</option>)}
+                  </select>
+                </Field>
+
+                {editorOpen === 'edit' && (
+                  <Field label={students.fieldAccountStatus}>
+                    <select className={validInput()} value={editorState.accountStatus} onChange={(e) => patchEditor({ accountStatus: e.target.value })}>
+                      {STATUSES.map((s) => <option key={s} value={s}>{(statusLabels as any)[s]}</option>)}
+                    </select>
+                  </Field>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* SECTION 3: ACCESS */}
+          {sectionHead('Student Login Access', <span className="text-lg">🔐</span>, editorOpen === 'create' ? 'Strong temporary password is auto-generated for you. Share it securely.' : 'Leave the password field blank to keep the existing one.')}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="sm:col-span-2">
+              <Field
+                label={students.fieldPassword}
+                required={editorOpen === 'create'}
+                validity={editorOpen === 'edit' ? 'idle' : (editorState.password.length >= 8 ? 'ok' : (editorValidityCheck > 0 ? 'err' : 'idle'))}
+                hint={editorOpen === 'create' ? 'At least 8 characters. Copy this password and share it with the student in person or via secure email.' : 'Leave blank to keep their current password.'}
+              >
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    readOnly={editorOpen === 'edit' && !editorState.password}
+                    className={`${validInput(editorOpen === 'edit' ? 'idle' : (editorState.password.length >= 8 ? 'ok' : (editorValidityCheck > 0 ? 'err' : 'idle')))} font-mono tracking-wider pr-[120px]`}
+                    value={editorOpen === 'edit' && !editorState.password ? '•••••••• (unchanged)' : editorState.password}
+                    onChange={(e) => patchEditor({ password: e.target.value })}
+                  />
+                  <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 pr-1">
+                    {editorOpen === 'create' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={copyPw}
+                          title="Copy password"
+                          className={`w-8 h-8 rounded-md text-xs inline-flex items-center justify-center hover:bg-gray-100 ${copiedPw ? 'text-green-700' : 'text-gray-600'}`}
+                        >
+                          {copiedPw ? <CheckCircle2 className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                        <button type="button" onClick={rerollPw} title="Generate new password" className="w-8 h-8 rounded-md text-gray-600 hover:bg-gray-100 inline-flex items-center justify-center">
+                          <RefreshCw className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
+                    <button type="button" onClick={() => setShowPassword((s) => !s)} title={showPassword ? 'Hide password' : 'Show password'} className="w-8 h-8 rounded-md text-gray-600 hover:bg-gray-100 inline-flex items-center justify-center">
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </Field>
+            </div>
           </div>
         </div>
       </Modal>

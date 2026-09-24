@@ -18,23 +18,27 @@ router.use(restrictTo('BURSARY', 'ADMIN'));
 
 const GatewayEnum = z.enum([PaymentGateway.PAYSTACK, PaymentGateway.ALATPAY]);
 
+const ChargeSourceEnum = z.enum(['ALL', 'CATALOGUE', 'DIRECT_BILL']).default('ALL');
+
 const SummaryQuery = z.object({
   dateFrom: z.coerce.date(),
   dateTo: z.coerce.date(),
   feeId: z.union([z.coerce.number().int().positive(), z.null()]).optional(),
   gateway: GatewayEnum.optional(),
+  chargeSource: ChargeSourceEnum.optional(),
 });
 
 router.get(
   '/summary',
   validateQuery(SummaryQuery),
   catchAsync(async (req: any, res) => {
-    const { dateFrom, dateTo, feeId, gateway } = req.query as any;
+    const { dateFrom, dateTo, feeId, gateway, chargeSource } = req.query as any;
     const { summary } = await ReconciliationService.runCompare({
       dateFrom: new Date(dateFrom),
       dateTo: new Date(dateTo),
       feeId: feeId !== undefined && feeId !== null ? Number(feeId) : undefined,
       gateway: gateway ?? undefined,
+      chargeSource: chargeSource ?? 'ALL',
     });
     res.status(200).json({ status: 'success', data: { summary } });
   }),
@@ -58,6 +62,7 @@ const ItemsQuery = z.object({
     .optional(),
   feeId: z.union([z.coerce.number().int().positive(), z.null()]).optional(),
   gateway: GatewayEnum.optional(),
+  chargeSource: ChargeSourceEnum.optional(),
 });
 
 router.get(
@@ -73,6 +78,7 @@ router.get(
       dateTo: new Date(q.dateTo),
       feeId: q.feeId !== undefined && q.feeId !== null ? Number(q.feeId) : undefined,
       gateway: q.gateway ?? undefined,
+      chargeSource: q.chargeSource ?? 'ALL',
     });
     let filtered = items;
     if (q.classification) {
@@ -96,6 +102,7 @@ router.get(
         filters: {
           classification: q.classification ?? null,
           gateway: q.gateway ?? null,
+          chargeSource: q.chargeSource ?? 'ALL',
           dateFrom: q.dateFrom,
           dateTo: q.dateTo,
         },
@@ -111,6 +118,7 @@ const ReportQuery = z.object({
   format: z.enum(['csv', 'json']).default('json').optional(),
   feeId: z.union([z.coerce.number().int().positive(), z.null()]).optional(),
   gateway: GatewayEnum.optional(),
+  chargeSource: ChargeSourceEnum.optional(),
 });
 
 router.get(
@@ -125,6 +133,7 @@ router.get(
       dateTo: new Date(q.dateTo),
       feeId: q.feeId !== undefined && q.feeId !== null ? Number(q.feeId) : undefined,
       gateway: q.gateway ?? undefined,
+      chargeSource: q.chargeSource ?? 'ALL',
     });
     if (format === 'csv') {
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');

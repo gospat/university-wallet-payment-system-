@@ -9,6 +9,7 @@ import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import PortalShell from '../../components/PortalShell';
 import Modal from '../../components/Modal';
 import ConfirmAction from '../../components/ConfirmAction';
+import DirectBillForm from '../../components/fees/DirectBillForm';
 import { useAuth } from '../../context/AuthContext';
 import { navCounters, NavCounters } from '../../services/api';
 import {
@@ -27,7 +28,10 @@ import feeApi, {
   type FeeOut,
   type FeeAssignmentOut,
   type GenerateResp,
+  type DirectStudentBillSuccessResp,
+  type MatricStudentResp,
 } from '../../services/adminFees';
+import MatricStudentInput from '../../components/fees/MatricStudentInput';
 
 type AlertState = { isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info'; };
 
@@ -255,8 +259,81 @@ const CategoryModal: React.FC<{
   );
 };
 
-// ---------------- Assignment wizard ----------------
+// ---------------- Assignment wizard types ----------------
 type AssignmentWizardState = { step: 1 | 2 | 3 | 4 | 5; } & Partial<CreateAssignmentInput>;
+
+// ---------------- Wizard student target: matric input (primary) + numeric studentId fallback ----------------
+const StudentTargetField: React.FC<{
+  state: AssignmentWizardState;
+  set: (patch: Partial<CreateAssignmentInput>) => void;
+  label: string;
+}> = ({ state, set, label }) => {
+  const [matric, setMatric] = useState<string>(
+    state.targetStudentId != null ? '' : '',
+  );
+  const [useNumeric, setUseNumeric] = useState<boolean>(
+    state.targetStudentId != null,
+  );
+  useEffect(() => {
+    /* sync: if numeric studentId appears externally, fall back to numeric UI */
+    if (state.targetStudentId != null && !useNumeric && matric === '') {
+      setUseNumeric(true);
+    }
+  }, [state.targetStudentId, useNumeric, matric]);
+
+  if (useNumeric) {
+    return (
+      <div className="space-y-2">
+        <Field label={label}>
+          <input
+            type="number"
+            className="w-full rounded-md border border-gray-300 px-3 py-2"
+            value={(state.targetStudentId as any) ?? ''}
+            onChange={(e) =>
+              set({ targetStudentId: e.target.value ? Number(e.target.value) : undefined })
+            }
+            placeholder="Internal numeric student ID (e.g. 3)"
+          />
+        </Field>
+        <button
+          type="button"
+          onClick={() => setUseNumeric(false)}
+          className="text-[11px] text-blue-700 hover:text-blue-900 underline underline-offset-2"
+        >
+          Switch to matric-number search instead
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <MatricStudentInput
+        value={matric}
+        onChange={(v) => {
+          setMatric(v);
+          if (v === '') set({ targetStudentId: undefined });
+        }}
+        onResolved={(s: MatricStudentResp | null, errMsg: string | null) => {
+          if (s) set({ targetStudentId: Number(s.id) });
+          else if (errMsg) set({ targetStudentId: undefined });
+        }}
+        label={label}
+        placeholder="Enter a matric number, then press Enter or blur the field"
+        autoResolveOnMount={false}
+      />
+      <button
+        type="button"
+        onClick={() => setUseNumeric(true)}
+        className="text-[11px] text-gray-500 hover:text-gray-800 underline underline-offset-2"
+      >
+        Switch to numeric student ID input
+      </button>
+    </div>
+  );
+};
+
+// ---------------- Assignment wizard modal ----------------
 
 const AssignmentWizardModal: React.FC<{
   open: boolean; fees: FeeOut[]; initial?: FeeAssignmentOut; onClose: () => void; onSubmit: (body: CreateAssignmentInput, force: boolean, generateNow: boolean) => Promise<GenerateResp | null | undefined> | void; submitting?: boolean;
@@ -376,7 +453,11 @@ const AssignmentWizardModal: React.FC<{
           {type.field === 'targetLevel' ? (
             <Field label={type.labelFn()}><input type="number" min={100} step={100} className="w-full rounded-md border border-gray-300 px-3 py-2" value={(state.targetLevel as any) ?? ''} onChange={(e) => set({ targetLevel: e.target.value ? Number(e.target.value) : undefined })} /></Field>
           ) : type.field === 'targetStudentId' ? (
-            <Field label={type.labelFn()}><input type="number" className="w-full rounded-md border border-gray-300 px-3 py-2" value={(state.targetStudentId as any) ?? ''} onChange={(e) => set({ targetStudentId: e.target.value ? Number(e.target.value) : undefined })} placeholder="Student ID (number)" /></Field>
+            <StudentTargetField
+              state={state}
+              set={set}
+              label={type.labelFn()}
+            />
           ) : type.field === 'targetStudentType' ? (
             <Field label={type.labelFn()}>
               <select className="w-full rounded-md border border-gray-300 px-3 py-2" value={state.targetStudentType ?? ''} onChange={(e) => set({ targetStudentType: e.target.value || undefined })}>
@@ -710,6 +791,7 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   const [catSubmitting, setCatSubmitting] = useState(false);
   const [assignModal, setAssignModal] = useState<{ open: boolean; initial?: FeeAssignmentOut; }>({ open: false });
   const [assignSubmitting, setAssignSubmitting] = useState(false);
+  const [directBillModalOpen, setDirectBillModalOpen] = useState(false);
 
   // ---------------- Categories list state ----------------
   const [catsLoading, setCatsLoading] = useState(false);
@@ -796,6 +878,16 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             )}
             {activeTab === 'assignments' && canMutate && (
               <button className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium" onClick={() => { setSearchParams({ tab: 'assignments' }); setAssignModal({ open: true }); }}>{adminFees.common.createAssignment}</button>
+            )}
+            {canMutate && (
+              <button
+                type="button"
+                onClick={() => setDirectBillModalOpen(true)}
+                className="px-4 py-2 rounded-md bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium inline-flex items-center gap-1.5 shadow-sm"
+                title="Bill one specific student by matric number (shortcut — no assignment wizard needed)"
+              >
+                ⚡ Bill a Student (Direct)
+              </button>
             )}
           </div>
         </header>
@@ -989,6 +1081,34 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
 
       <Modal isOpen={alert.isOpen} title={alert.title} onClose={() => setAlert({ ...alert, isOpen: false })}>
         <p className="text-sm text-gray-800">{alert.message}</p>
+      </Modal>
+
+      <Modal
+        isOpen={directBillModalOpen}
+        title="Bill a Specific Student by Matric (Direct)"
+        size="lg"
+        onClose={() => setDirectBillModalOpen(false)}
+      >
+        <p className="text-xs text-gray-500 mb-4">
+          One-click shortcut for raising a targeted charge for a single student. The bill appears on
+          their Make Payment catalogue (pinned top, DIRECT BILL badge) and in their invoices list
+          immediately after submit.
+        </p>
+        <DirectBillForm
+          actorRole={role}
+          onCancel={() => setDirectBillModalOpen(false)}
+          onSuccess={async (_r: DirectStudentBillSuccessResp) => {
+            void loadAssignments();
+            window.setTimeout(() => {
+              setDirectBillModalOpen(false);
+              notify(
+                'Direct bill issued',
+                `Invoice generated. Switch to the Assignments tab to see ${_r.matricNumber ?? ''}.`,
+                'success',
+              );
+            }, 600);
+          }}
+        />
       </Modal>
     </PortalShell>
   );
@@ -1278,10 +1398,39 @@ const AssignmentsList: React.FC<{
   const totalPages = Math.max(1, Math.ceil((resp?.total ?? 0) / (resp?.pageSize ?? 25)));
   const TYPES = ['STUDENT','PROGRAMME','DEPARTMENT','FACULTY','LEVEL','SESSION','STUDENT_TYPE'] as const;
 
+  const isDirectBill = (a: FeeAssignmentOut) =>
+    a.assignmentType === 'STUDENT' && a.targetStudentId != null;
+
+  const matricOf = (a: FeeAssignmentOut) => a.targetStudent?.matricNumber ?? null;
+  const fullNameOf = (a: FeeAssignmentOut) =>
+    [a.targetStudent?.firstName, a.targetStudent?.lastName]
+      .filter(Boolean)
+      .join(' ')
+      .trim() || null;
+
+  const targetDisplay = (a: FeeAssignmentOut): string => {
+    if (isDirectBill(a)) {
+      const name = fullNameOf(a);
+      const m = matricOf(a);
+      if (name && m) return `${name} · ${m}`;
+      if (name) return name;
+      if (m) return m;
+      return `#${a.targetStudentId}`;
+    }
+    const parts: Array<string | number> = [];
+    if (a.targetProgramme) parts.push(a.targetProgramme);
+    if (a.targetDepartment) parts.push(a.targetDepartment);
+    if (a.targetFaculty) parts.push(a.targetFaculty);
+    if (a.targetLevel) parts.push(`${a.targetLevel}L`);
+    if (a.targetSession) parts.push(a.targetSession);
+    if (a.targetStudentType) parts.push(a.targetStudentType);
+    return parts.join(' · ') || '—';
+  };
+
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
-        <div className="md:col-span-2"><label className="text-xs text-gray-600 font-medium">{tC.search}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="Programme, department, faculty, session, fee name/code…" value={aq.q} onChange={(e) => { aq.setQ(e.target.value); aq.setPage(1); }} /></div>
+        <div className="md:col-span-2"><label className="text-xs text-gray-600 font-medium">{tC.search}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="Programme, department, faculty, session, matric number, fee name/code…" value={aq.q} onChange={(e) => { aq.setQ(e.target.value); aq.setPage(1); }} /></div>
         <div><label className="text-xs text-gray-600 font-medium">{t.filterType}</label>
           <select className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={aq.type} onChange={(e) => { aq.setType(e.target.value); aq.setPage(1); }}>
             <option value="">{tC.all}</option>
@@ -1307,7 +1456,7 @@ const AssignmentsList: React.FC<{
           <thead className="bg-gray-50 text-gray-600">
             <tr>
               <th className="px-4 py-3 text-left font-medium">{t.headerType}</th>
-              <th className="px-4 py-3 text-left font-medium">{t.headerTarget}</th>
+              <th className="px-4 py-3 text-left font-medium">Matric / Target</th>
               <th className="px-4 py-3 text-left font-medium">{t.headerFee}</th>
               <th className="px-4 py-3 text-left font-medium">{t.headerOverride}</th>
               <th className="px-4 py-3 text-left font-medium">{t.headerActive}</th>
@@ -1318,19 +1467,38 @@ const AssignmentsList: React.FC<{
             {loading && <tr><td colSpan={6} className="text-center py-10 text-gray-500">Loading…</td></tr>}
             {!loading && assignments.length === 0 && <tr><td colSpan={6} className="text-center py-10 text-gray-500">{t.empty}</td></tr>}
             {assignments.map((a) => {
-              const parts: Array<string | number> = [];
-              if (a.targetProgramme) parts.push(a.targetProgramme);
-              if (a.targetDepartment) parts.push(a.targetDepartment);
-              if (a.targetFaculty) parts.push(a.targetFaculty);
-              if (a.targetLevel) parts.push(`${a.targetLevel}L`);
-              if (a.targetSession) parts.push(a.targetSession);
-              if (a.targetStudentType) parts.push(a.targetStudentType);
-              if (a.targetStudentId) parts.push(`#${a.targetStudentId}`);
-              const target = parts.join(' · ') || '—';
+              const direct = isDirectBill(a);
+              const matric = matricOf(a);
+              const studentName = fullNameOf(a);
               return (
                 <tr key={a.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-gray-900">{a.assignmentType}</td>
-                  <td className="px-4 py-3 text-gray-700">{target}</td>
+                  <td className="px-4 py-3 text-gray-900 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1.5">
+                      {a.assignmentType}
+                      {direct && (
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200"
+                          title="Direct bill — assigned to one student by matric"
+                        >
+                          DIRECT
+                        </span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 min-w-[200px]">
+                    {direct ? (
+                      <div>
+                        <div className="font-medium text-gray-900">{studentName ?? targetDisplay(a)}</div>
+                        {matric && (
+                          <div className="font-mono text-[11px] text-indigo-700 mt-0.5 bg-indigo-50/70 inline-block px-1.5 py-0.5 rounded border border-indigo-100">
+                            {matric}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-gray-700">{targetDisplay(a)}</div>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-gray-700">
                     <div className="font-medium text-gray-900">{a.fee?.feeCode ?? a.feeId}</div>
                     <div className="text-xs text-gray-500">{a.fee?.name ?? '—'} · {a.fee?.academicSession ?? ''} · {fmtNgn(a.overrideAmount ?? a.fee?.amount ?? 0)}</div>
@@ -1344,7 +1512,17 @@ const AssignmentsList: React.FC<{
                     {canMutate && (
                       <div className="flex items-center justify-end gap-1 text-xs">
                         <button onClick={() => onEdit(a)} className="text-blue-700 hover:text-blue-900 px-2 py-1 rounded hover:bg-blue-50">{t.editAction}</button>
-                        <button onClick={() => onGenerate(a)} className="text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">{t.generateAction}</button>
+                        {!direct && (
+                          <button onClick={() => onGenerate(a)} className="text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">{t.generateAction}</button>
+                        )}
+                        {direct && (
+                          <span
+                            className="text-[10px] uppercase tracking-wide text-gray-400 px-2 py-1"
+                            title="Direct bills auto-generate an invoice at creation; use Bill a Student again to adjust."
+                          >
+                            INV AUTO
+                          </span>
+                        )}
                       </div>
                     )}
                   </td>

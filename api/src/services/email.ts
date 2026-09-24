@@ -488,3 +488,115 @@ export function renderPaymentReminder({
     text: wrapped.text,
   };
 }
+
+export function renderStudentBillAssigned({
+  student,
+  fee,
+  invoice,
+  assignment,
+  noteToStudent,
+}: {
+  student: { firstName?: string | null; lastName?: string | null; matricNumber?: string | null; email?: string | null };
+  fee: { name: string; description?: string | null; id?: number };
+  invoice: { id: number; invoiceNumber: string; amountDue: number | string | { toNumber?: () => number; toString: () => string }; dueDate?: string | Date | null };
+  assignment?: { id?: number };
+  noteToStudent?: string | null;
+}): RenderedEmail {
+  const studentName = `${student.firstName || ''} ${student.lastName || ''}`.trim() || 'Student';
+  const amountNum =
+    typeof invoice.amountDue === 'number'
+      ? invoice.amountDue
+      : typeof invoice.amountDue === 'string'
+        ? Number(invoice.amountDue)
+        : typeof invoice.amountDue?.toNumber === 'function'
+          ? invoice.amountDue.toNumber()
+          : Number(String(invoice.amountDue ?? 0));
+  const amount = formatNaira(Number.isFinite(amountNum) ? amountNum : 0);
+  const dateStr =
+    !invoice.dueDate
+      ? 'As soon as possible'
+      : invoice.dueDate instanceof Date
+        ? invoice.dueDate.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+        : String(invoice.dueDate);
+  const portalBase =
+    process.env.STUDENT_PORTAL_URL ||
+    process.env.CORS_ORIGIN ||
+    'http://localhost:5173';
+  const cleanBase = String(portalBase).replace(/\/+$/, '');
+  const invoiceUrl = `${cleanBase}/student/fees?invoiceId=${encodeURIComponent(String(invoice.id))}`;
+  const btn = buttonLink(invoiceUrl, 'Pay this bill');
+
+  const descriptionRow = fee.description
+    ? `<tr><td style="background:#f0f0f0;"><strong>Fee description</strong></td><td style="white-space:pre-wrap;">${String(fee.description)}</td></tr>`
+    : '';
+  const noteRow = noteToStudent
+    ? `<div style="margin-top:20px;padding:16px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;">
+         <p style="margin:0 0 6px 0;"><strong>Note from the Bursary department:</strong></p>
+         <p style="margin:0;white-space:pre-wrap;">${String(noteToStudent)}</p>
+       </div>`
+    : '';
+  const assignmentRow = assignment?.id
+    ? `<tr><td style="background:#f0f0f0;"><strong>Assignment reference</strong></td><td>#${assignment.id}</td></tr>`
+    : '';
+
+  const bodyHtml = `
+<p>Dear ${studentName},</p>
+<p>A new bill has been assigned to you by the Bursary department. Please review and pay at your earliest convenience:</p>
+<table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
+<tr><td style="background:#f0f0f0;"><strong>Student / Matric</strong></td><td>${studentName}${student.matricNumber ? ` — <span style="font-family:monospace;">${student.matricNumber}</span>` : ''}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Fee</strong></td><td>${fee.name}${fee.id ? ` <span style="color:#666;font-size:12px;">(Fee#${fee.id})</span>` : ''}</td></tr>
+${descriptionRow}
+<tr><td style="background:#f0f0f0;"><strong>Invoice</strong></td><td><span style="font-family:monospace;">${invoice.invoiceNumber}</span></td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Amount due</strong></td><td style="font-weight:bold;color:#b91c1c;font-size:16px;">${amount}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Due date</strong></td><td>${dateStr}</td></tr>
+${assignmentRow}
+</table>
+<p style="margin:20px 0;">${btn.html}</p>
+<p style="color:#666666;font-size:12px;">If you have any questions about this charge, contact the bursary department quoting the invoice number above.</p>
+${noteRow}
+  `.trim();
+
+  const bodyText =
+    `Dear ${studentName},\n\n` +
+    `A new bill has been assigned to you by the Bursary department:\n\n` +
+    `Fee: ${fee.name}\n` +
+    (fee.description ? `Description: ${fee.description}\n` : '') +
+    `Invoice: ${invoice.invoiceNumber}\n` +
+    `Amount due: ${amount}\n` +
+    `Due date: ${dateStr}\n` +
+    (student.matricNumber ? `Matric number: ${student.matricNumber}\n` : '') +
+    (assignment?.id ? `Assignment reference: #${assignment.id}\n` : '') +
+    `\nPay here: ${invoiceUrl}\n\n` +
+    (noteToStudent ? `Note from Bursary: ${noteToStudent}\n\n` : '') +
+    `Contact the bursary department if you have any questions, quoting the invoice number.`;
+
+  const wrapped = wrapEmail(bodyHtml, bodyText);
+  return {
+    subject: `New bill assigned: ${fee.name} (${invoice.invoiceNumber})`,
+    html: wrapped.html,
+    text: wrapped.text,
+  };
+}
+
+/**
+ * Non-blocking email for direct-bill one-click. Returns true on success (or json-transport fallback).
+ * Returns false on transport error and logs WARN — never throws to avoid breaking the billing endpoint.
+ */
+export async function sendStudentBillAssigned(
+  student: Parameters<typeof renderStudentBillAssigned>[0]['student'],
+  fee: Parameters<typeof renderStudentBillAssigned>[0]['fee'],
+  invoice: Parameters<typeof renderStudentBillAssigned>[0]['invoice'],
+  assignment?: Parameters<typeof renderStudentBillAssigned>[0]['assignment'],
+  noteToStudent?: string | null,
+): Promise<boolean> {
+  try {
+    const to = student.email;
+    if (!to) return false;
+    const rendered = renderStudentBillAssigned({ student, fee, invoice, assignment, noteToStudent: noteToStudent ?? null });
+    const result = await sendEmail({ to: String(to), rendered });
+    return !!result?.success;
+  } catch (e: any) {
+    try { console.warn('[sendStudentBillAssigned] failed:', e?.message || String(e)); } catch {}
+    return false;
+  }
+}

@@ -21,6 +21,77 @@ import { z } from 'zod';
 // Zod schemas (reused by routes for validateBody/validateQuery)
 // -----------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Hierarchy resolvers — new simplified flow: caller sends programmeId /
+// levelId / sessionId and the service writes human-readable display names
+// (college / department / program / level / academicSession) into the user
+// row by fetching the Programme / Level / Session rows.
+//
+// Legacy string fields (college / department / program / level as number /
+// academicSession as string) are still accepted for backward compatibility
+// (bulk uploads that send names, older front-end payloads). If both the id
+// AND the legacy string are provided, the resolved display value from the id
+// wins.
+// ---------------------------------------------------------------------------
+async function resolveProgrammeContext(
+  input: Partial<CreateStudentInput>,
+): Promise<{ program?: string | null; department?: string | null; college?: string | null }> {
+  if (input.programmeId !== undefined && input.programmeId !== null) {
+    const idNum = Number(input.programmeId);
+    if (!Number.isNaN(idNum) && idNum > 0) {
+      const row = await prisma.programme.findFirst({
+        where: { id: idNum },
+        select: {
+          name: true,
+          department: {
+            select: { name: true, faculty: { select: { name: true } } },
+          },
+        },
+      });
+      if (row) {
+        return {
+          program: row.name,
+          department: row.department?.name ?? null,
+          college: row.department?.faculty?.name ?? null,
+        };
+      }
+    }
+  }
+  return {
+    program: input.program ?? undefined,
+    department: input.department ?? undefined,
+    college: input.college ?? undefined,
+  };
+}
+
+async function resolveLevelDisplay(input: Partial<CreateStudentInput>): Promise<number | null | undefined> {
+  if (input.levelId !== undefined && input.levelId !== null) {
+    const idNum = Number(input.levelId);
+    if (!Number.isNaN(idNum) && idNum > 0) {
+      const row = await prisma.level.findFirst({ where: { id: idNum }, select: { level: true } });
+      if (row) return Number(row.level);
+    }
+  }
+  if (input.level === undefined || input.level === null) return undefined;
+  const n = Number(input.level);
+  return Number.isNaN(n) ? null : n;
+}
+
+async function resolveSessionDisplay(input: Partial<CreateStudentInput>): Promise<string | null | undefined> {
+  if (input.academicSessionId !== undefined && input.academicSessionId !== null) {
+    const idNum = Number(input.academicSessionId);
+    if (!Number.isNaN(idNum) && idNum > 0) {
+      const row = await prisma.academicSession.findFirst({ where: { id: idNum }, select: { name: true } });
+      if (row) return row.name;
+    }
+  }
+  return input.academicSession ?? undefined;
+}
+
+// ProgrammeId / LevelId / AcademicSessionId accepted but not listed in the
+// Zod strict keys because they were not originally required. For this pass we
+// accept them via `.passthrough()` and consume them inside the service via
+// type assertion.
 export const CreateStudentSchema = z.object({
   email: z.string().email().max(254),
   firstName: z.string().min(1).max(80).trim(),
@@ -32,7 +103,36 @@ export const CreateStudentSchema = z.object({
   college: z.string().min(2).max(120).trim().optional().nullable(),
   department: z.string().min(2).max(120).trim().optional().nullable(),
   program: z.string().min(2).max(120).trim().optional().nullable(),
-  level: z.coerce.number().int().min(100).max(1000).optional().nullable(),
+  level: z
+    .union([z.string(), z.number(), z.null(), z.undefined()])
+    .optional()
+    .nullable()
+    .superRefine((val, ctx) => {
+      if (val === undefined || val === null || val === '') return;
+      const stripped = String(val)
+        .toLowerCase()
+        .replace(/\s*level\s*$/i, '')
+        .replace(/[^0-9-]/g, '')
+        .trim();
+      const n = Number(stripped);
+      if (stripped === '' || Number.isNaN(n) || !Number.isInteger(n) || n < 100 || n > 1000) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'level must be an integer between 100 and 1000 (e.g. 100, 200, or "300 Level")',
+        });
+      }
+    })
+    .transform((val) => {
+      if (val === undefined || val === null || val === '') return undefined;
+      const stripped = String(val)
+        .toLowerCase()
+        .replace(/\s*level\s*$/i, '')
+        .replace(/[^0-9-]/g, '')
+        .trim();
+      const n = Number(stripped);
+      if (stripped === '' || Number.isNaN(n) || !Number.isInteger(n) || n < 100 || n > 1000) return undefined;
+      return n;
+    }),
   academicSession: z.string().max(20).trim().optional().nullable(),
   studentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional().nullable(),
   entryMode: z.enum(['UTME', 'DIRECT_ENTRY', 'TRANSFER', 'OTHER']).optional().nullable(),
@@ -41,13 +141,21 @@ export const CreateStudentSchema = z.object({
   phoneNumber: z.string().max(30).trim().optional().nullable(),
   address: z.string().max(500).trim().optional().nullable(),
   password: z.string().min(8).max(128).optional(),
-});
-export type CreateStudentInput = z.infer<typeof CreateStudentSchema>;
+}).passthrough();
+export type CreateStudentInput = z.infer<typeof CreateStudentSchema> & {
+  programmeId?: number | string | null;
+  levelId?: number | string | null;
+  academicSessionId?: number | string | null;
+};
 
 export const UpdateStudentSchema = CreateStudentSchema.partial().extend({
   accountStatus: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']).optional(),
 });
-export type UpdateStudentInput = z.infer<typeof UpdateStudentSchema>;
+export type UpdateStudentInput = z.infer<typeof UpdateStudentSchema> & {
+  programmeId?: number | string | null;
+  levelId?: number | string | null;
+  academicSessionId?: number | string | null;
+};
 
 export const StudentSelfUpdateSchema = z.object({
   firstName: z.string().min(1).max(80).trim().optional(),
@@ -151,6 +259,27 @@ export class StudentService {
       throw new AppError(i18n.errors.auth.matricExists, 400);
     }
 
+    // ---- hierarchy resolution (programmeId → dept + college) ----------------
+    const [hierarchy, resolvedLevel, resolvedSession] = await Promise.all([
+      resolveProgrammeContext(input),
+      resolveLevelDisplay(input),
+      resolveSessionDisplay(input),
+    ]);
+
+    // ---- defensive: if caller sent an id, it must resolve; otherwise 400 ----
+    const pIdNum = input.programmeId !== undefined && input.programmeId !== null ? Number(input.programmeId) : NaN;
+    if (!Number.isNaN(pIdNum) && pIdNum > 0 && !hierarchy.program) {
+      throw new AppError(i18n.errors.students.invalidProgrammeId, 400);
+    }
+    const lIdNum = input.levelId !== undefined && input.levelId !== null ? Number(input.levelId) : NaN;
+    if (!Number.isNaN(lIdNum) && lIdNum > 0 && resolvedLevel === undefined) {
+      throw new AppError(i18n.errors.students.invalidLevelId, 400);
+    }
+    const sIdNum = input.academicSessionId !== undefined && input.academicSessionId !== null ? Number(input.academicSessionId) : NaN;
+    if (!Number.isNaN(sIdNum) && sIdNum > 0 && resolvedSession === undefined) {
+      throw new AppError(i18n.errors.students.invalidSessionId, 400);
+    }
+
     const pwd = defaultPasswordFor(input);
     const passwordHash = await bcrypt.hash(pwd, 12);
 
@@ -166,11 +295,11 @@ export class StudentService {
     if (input.matricNumber !== undefined) createData.matricNumber = input.matricNumber;
     if (input.admissionNumber !== undefined) createData.admissionNumber = input.admissionNumber ?? undefined;
     if (input.jambNumber !== undefined) createData.jambNumber = input.jambNumber ?? undefined;
-    if (input.college !== undefined) createData.college = input.college ?? undefined;
-    if (input.department !== undefined) createData.department = input.department ?? undefined;
-    if (input.program !== undefined) createData.program = input.program ?? undefined;
-    if (input.level !== undefined) createData.level = input.level ?? undefined;
-    if (input.academicSession !== undefined) createData.academicSession = input.academicSession ?? undefined;
+    if (hierarchy.college !== undefined) createData.college = hierarchy.college ?? undefined;
+    if (hierarchy.department !== undefined) createData.department = hierarchy.department ?? undefined;
+    if (hierarchy.program !== undefined) createData.program = hierarchy.program ?? undefined;
+    if (resolvedLevel !== undefined) createData.level = resolvedLevel ?? undefined;
+    if (resolvedSession !== undefined) createData.academicSession = resolvedSession ?? undefined;
     if (input.studentType !== undefined) createData.studentType = input.studentType ?? undefined;
     if (input.entryMode !== undefined) createData.entryMode = input.entryMode ?? undefined;
     if (input.admissionYear !== undefined) createData.admissionYear = input.admissionYear ?? undefined;
@@ -224,11 +353,29 @@ export class StudentService {
   }
 
   static async getByMatric(matric: string): Promise<Selected> {
+    const trimmed = String(matric ?? '').trim();
+    if (!trimmed) throw new AppError(i18n.errors.auth.userNotFound, 404);
     const user = await prisma.user.findFirst({
-      where: { matricNumber: matric, role: Role.STUDENT },
+      where: {
+        role: Role.STUDENT,
+        OR: [
+          { matricNumber: trimmed },
+          { matricNumber: trimmed.toLowerCase() },
+          { matricNumber: trimmed.toUpperCase() },
+        ],
+      },
       select: STUDENT_SELECT,
     });
-    if (!user) throw new AppError(i18n.errors.auth.userNotFound, 404);
+    if (!user) throw new AppError(i18n.errors.auth.matricNotFound(trimmed), 404);
+    if (user.accountStatus !== AccountStatus.ACTIVE) {
+      const msg =
+        user.accountStatus === AccountStatus.SUSPENDED
+          ? i18n.errors.auth.accountSuspended
+          : user.accountStatus === AccountStatus.GRADUATED
+            ? i18n.errors.auth.accountGraduated
+            : i18n.errors.auth.accountInactive;
+      throw new AppError(msg, 400);
+    }
     return user as unknown as Selected;
   }
 
@@ -268,10 +415,50 @@ export class StudentService {
       }
     }
 
+    // ---- hierarchy resolution if any id-based field changed -------------
+    const patchData: Prisma.UserUpdateInput = { ...(input as Prisma.UserUpdateInput) };
+    if (
+      input.programmeId !== undefined ||
+      input.levelId !== undefined ||
+      input.academicSessionId !== undefined ||
+      input.college !== undefined ||
+      input.department !== undefined ||
+      input.program !== undefined ||
+      input.level !== undefined ||
+      input.academicSession !== undefined
+    ) {
+      const [hierarchy, resolvedLevel, resolvedSession] = await Promise.all([
+        resolveProgrammeContext(input),
+        resolveLevelDisplay(input),
+        resolveSessionDisplay(input),
+      ]);
+      const pIdNum = input.programmeId !== undefined && input.programmeId !== null ? Number(input.programmeId) : NaN;
+      if (!Number.isNaN(pIdNum) && pIdNum > 0 && !hierarchy.program) {
+        throw new AppError(i18n.errors.students.invalidProgrammeId, 400);
+      }
+      const lIdNum = input.levelId !== undefined && input.levelId !== null ? Number(input.levelId) : NaN;
+      if (!Number.isNaN(lIdNum) && lIdNum > 0 && resolvedLevel === undefined) {
+        throw new AppError(i18n.errors.students.invalidLevelId, 400);
+      }
+      const sIdNum = input.academicSessionId !== undefined && input.academicSessionId !== null ? Number(input.academicSessionId) : NaN;
+      if (!Number.isNaN(sIdNum) && sIdNum > 0 && resolvedSession === undefined) {
+        throw new AppError(i18n.errors.students.invalidSessionId, 400);
+      }
+      if (hierarchy.college !== undefined) patchData.college = hierarchy.college ?? null;
+      if (hierarchy.department !== undefined) patchData.department = hierarchy.department ?? null;
+      if (hierarchy.program !== undefined) patchData.program = hierarchy.program ?? null;
+      if (resolvedLevel !== undefined) patchData.level = resolvedLevel ?? null;
+      if (resolvedSession !== undefined) patchData.academicSession = resolvedSession ?? null;
+    }
+    // Strip id-based fields from the final update patch since they are not real DB columns.
+    delete (patchData as any).programmeId;
+    delete (patchData as any).levelId;
+    delete (patchData as any).academicSessionId;
+
     const updated = await prisma.$transaction(async (tx) => {
       const patched = await tx.user.update({
         where: { id },
-        data: input as Prisma.UserUpdateInput,
+        data: patchData,
         select: STUDENT_SELECT,
       });
       await tx.auditLog.create({

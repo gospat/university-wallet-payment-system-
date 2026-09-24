@@ -5,6 +5,25 @@ import { seedPermissions } from './services/permissionSeed';
 
 dotenv.config();
 
+(function expandDollarVars(env = process.env) {
+  const MAX = 3;
+  for (let pass = 0; pass < MAX; pass++) {
+    let changed = false;
+    for (const [k, v] of Object.entries(env)) {
+      if (typeof v !== 'string') continue;
+      if (!/\$\{[^}]+\}/.test(v)) continue;
+      const next = v.replace(/\$\{([A-Z0-9_]+)\}/gi, (_m, name) => {
+        const rep = env[name];
+        if (rep === undefined) return _m;
+        changed = true;
+        return String(rep);
+      });
+      if (next !== v) env[k] = next;
+    }
+    if (!changed) return;
+  }
+})();
+
 if (process.env.REDIS_LAZY_CONNECT === 'true' && !process.env.QUEUE_DISABLE_WORKERS) {
   process.env.QUEUE_DISABLE_WORKERS = 'true';
 }

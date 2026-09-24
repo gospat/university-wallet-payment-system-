@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { catchAsync } from '../utils/catchAsync';
 import {
   CreateFeeAssignmentSchema,
+  DirectStudentBillSchema,
   FeeAssignmentQuerySchema,
   FeeAssignmentService,
   GenerateInvoiceSchema,
@@ -11,6 +12,7 @@ import {
 } from '../services/feeAssignment';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { z } from 'zod';
+import { sendStudentBillAssigned } from '../services/email';
 
 const IdParam = z.object({ id: z.coerce.number().int().positive() });
 
@@ -62,5 +64,40 @@ export const manualStudentInvoice = [
   catchAsync(async (req: Request, res: Response) => {
     const data = await InvoiceEngine.manualInvoice(req.body, req);
     res.status(data.created ? 201 : 200).json({ status: 'success', data });
+  }),
+];
+
+export const createDirectStudentBill = [
+  validateBody(DirectStudentBillSchema),
+  catchAsync(async (req: Request, res: Response) => {
+    const result = await FeeAssignmentService.billStudentByMatric(req.body, req);
+    const { assignment, invoice, created, adhocFeeCreated, fee, student, noteToStudent } = result;
+    let emailQueued = false;
+    let emailError: string | null = null;
+    // Fire-and-forget email (non-blocking; swallow errors)
+    (async () => {
+      try {
+        const ok = await sendStudentBillAssigned(student, fee, invoice, assignment, noteToStudent ?? undefined);
+        emailQueued = !!ok;
+      } catch (e: any) {
+        emailError = e?.message ?? String(e);
+        try { console.warn('[directBill.email] notify failed:', emailError); } catch {}
+      }
+    })().catch(() => {});
+    res.status(created ? 201 : 200).json({
+      status: 'success',
+      data: {
+        assignment,
+        invoice,
+        fee,
+        student,
+        created,
+        assignmentCreated: result.assignmentCreated,
+        invoiceCreated: result.invoiceCreated,
+        adhocFeeCreated,
+        emailQueued,
+        noteToStudent: noteToStudent ?? null,
+      },
+    });
   }),
 ];

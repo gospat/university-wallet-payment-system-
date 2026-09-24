@@ -82,6 +82,8 @@ export type ReconciliationItem = {
   actualAmount: number;
   studentName?: string | null;
   studentId?: number | null;
+  chargeSource?: 'DIRECT_BILL' | 'CATALOGUE';
+  assignmentId?: number | null;
   rawInternal?: any;
   rawGateway?: any;
 };
@@ -269,14 +271,17 @@ function gatewayTxEmail(row: GatewayTxRow): string | null {
   return String(row.Customer?.Email ?? row.Customer?.email ?? row.customer?.email ?? '').trim() || null;
 }
 
+type ChargeSourceFilter = 'ALL' | 'CATALOGUE' | 'DIRECT_BILL';
+
 export class ReconciliationService {
   static async runCompare(params: {
     dateFrom: Date;
     dateTo: Date;
     feeId?: number;
     gateway?: PaymentGateway;
+    chargeSource?: ChargeSourceFilter;
   }): Promise<RunCompareResult> {
-    const { dateFrom, dateTo, feeId, gateway } = params;
+    const { dateFrom, dateTo, feeId, gateway, chargeSource = 'ALL' } = params;
 
     const internalWhere: Prisma.TransactionWhereInput = {
       createdAt: { gte: dateFrom, lte: dateTo },
@@ -288,7 +293,7 @@ export class ReconciliationService {
       internalWhere.gateway = gateway;
     }
 
-    const internalTxs = await prisma.transaction.findMany({
+    const internalTxsRaw = await prisma.transaction.findMany({
       where: internalWhere,
       include: {
         user: { select: { id: true, firstName: true, lastName: true, matricNumber: true } },
@@ -298,7 +303,40 @@ export class ReconciliationService {
       orderBy: { createdAt: 'asc' },
     });
 
-    type InternalTx = typeof internalTxs[number];
+    // Determine chargeSource for each internal transaction and apply filter
+    type InternalTx = (typeof internalTxsRaw)[number] & { chargeSource?: 'DIRECT_BILL' | 'CATALOGUE'; assignmentId?: number | null };
+    const internalTxsAll: InternalTx[] = internalTxsRaw as InternalTx[];
+    const invoiceFeeIds = Array.from(new Set(internalTxsAll.map((t) => t.invoice?.feeId).filter((n) => n != null) as number[]));
+    const directByFeeByStudent = new Map<string, number>(); // "studentId:feeId" -> assignmentId
+    if (invoiceFeeIds.length > 0) {
+      const asgs = await prisma.feeAssignment.findMany({
+        where: {
+          assignmentType: 'STUDENT' as any,
+          isActive: true,
+          feeId: { in: invoiceFeeIds },
+        },
+        select: { id: true, targetStudentId: true, feeId: true },
+      });
+      for (const a of asgs) {
+        if (a.targetStudentId && a.feeId) directByFeeByStudent.set(`${a.targetStudentId}:${a.feeId}`, a.id);
+      }
+    }
+    for (const tx of internalTxsAll) {
+      const key = `${tx.userId}:${tx.invoice?.feeId}`;
+      const asgId = directByFeeByStudent.get(key) ?? null;
+      (tx as any).chargeSource = asgId != null ? 'DIRECT_BILL' : 'CATALOGUE';
+      (tx as any).assignmentId = asgId;
+    }
+
+    let internalTxs: InternalTx[];
+    if (chargeSource === 'ALL') {
+      internalTxs = internalTxsAll;
+    } else if (chargeSource === 'DIRECT_BILL') {
+      internalTxs = internalTxsAll.filter((t) => t.chargeSource === 'DIRECT_BILL');
+    } else {
+      internalTxs = internalTxsAll.filter((t) => t.chargeSource === 'CATALOGUE');
+    }
+
     type ByKey = Map<string, InternalTx[]>;
     const internalByKey = new Map<PaymentGateway, ByKey>();
 
@@ -485,6 +523,8 @@ export class ReconciliationService {
         actualAmount,
         studentName,
         studentId,
+        chargeSource: repInternal ? (repInternal as any).chargeSource ?? 'CATALOGUE' : undefined,
+        assignmentId: repInternal ? (repInternal as any).assignmentId ?? null : undefined,
         rawInternal: repInternal ? { ...repInternal, user: undefined, invoice: undefined, receipts: undefined } : undefined,
         rawGateway: repGateway ?? undefined,
       });
@@ -517,12 +557,14 @@ export class ReconciliationService {
     dateTo: Date;
     feeId?: number;
     gateway?: PaymentGateway;
+    chargeSource?: ChargeSourceFilter;
   }): Promise<{ format: 'csv' | 'json'; payload: string | RunCompareResult; filename: string }> {
     const { summary, items } = await ReconciliationService.runCompare({
       dateFrom: params.dateFrom,
       dateTo: params.dateTo,
       feeId: params.feeId,
       gateway: params.gateway,
+      chargeSource: params.chargeSource ?? 'ALL',
     });
 
     if (params.format === 'json') {
@@ -539,6 +581,8 @@ export class ReconciliationService {
       'Gateway Reference',
       'Payment Reference',
       'Classification',
+      'Charge Source',
+      'Assignment #',
       'Expected Amount (NGN)',
       'Actual Amount (NGN)',
       'Student Name',
@@ -551,6 +595,8 @@ export class ReconciliationService {
       it.gatewayReference ?? '',
       it.paymentReference ?? '',
       it.classification,
+      it.chargeSource ?? '',
+      it.assignmentId ?? '',
       it.expectedAmount.toFixed(2),
       it.actualAmount.toFixed(2),
       it.studentName ?? '',
@@ -559,7 +605,7 @@ export class ReconciliationService {
 
     let csvRows: any[][] = [header, ...rows];
     csvRows.push([]);
-    csvRows.push(['', '', '', '', '', '', 'Category Subtotals']);
+    csvRows.push(['', '', '', '', '', '', '', 'Category Subtotals']);
 
     const classOrder: Array<[string, keyof ReconciliationSummary]> = [
       ['Matched', 'matched'],
@@ -571,10 +617,12 @@ export class ReconciliationService {
       ['Missing Receipt', 'missingReceipt'],
     ];
     for (const [label, key] of classOrder) {
-      csvRows.push(['', '', '', label, String(summary[key]), '', '', '', '']);
+      csvRows.push(['', '', '', '', '', label, String(summary[key]), '', '', '', '']);
     }
     csvRows.push([]);
     csvRows.push([
+      '',
+      '',
       '',
       '',
       '',
@@ -583,8 +631,9 @@ export class ReconciliationService {
       '',
       'System Records',
       String(summary.systemRecords),
+      '',
     ]);
-    csvRows.push(['', '', '', '', '', '', 'Gateway Records', String(summary.gatewayRecords)]);
+    csvRows.push(['', '', '', '', '', '', '', '', 'Gateway Records', String(summary.gatewayRecords), '']);
 
     const csv = Papa.unparse(csvRows, { delimiter: ',' });
     const filename = `recon-${ts(params.dateFrom)}-${ts(params.dateTo)}.csv`;

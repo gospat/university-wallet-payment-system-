@@ -3,6 +3,7 @@ import { AuthService } from '../services/auth';
 import { catchAsync } from '../utils/catchAsync';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
+import { reqIp, reqUa } from '../utils/http';
 
 export const signup = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
   const { user, token } = await AuthService.signup(req.body);
@@ -15,12 +16,7 @@ export const signup = catchAsync(async (req: Request, res: Response, next: NextF
 });
 
 export const login = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  const ip =
-    (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
-    req.ip ||
-    undefined;
-  const userAgent = req.headers['user-agent'];
-  const { user, token } = await AuthService.login(req.body, ip, userAgent);
+  const { user, token } = await AuthService.login(req.body, reqIp(req), reqUa(req));
 
   res.status(200).json({
     status: 'success',

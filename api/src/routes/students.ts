@@ -184,9 +184,38 @@ router.get(
     const sort = (req.query?.sort ?? 'createdAt') as any;
     const order = (req.query?.order ?? 'desc') as any;
 
-    const [rows, total] = await Promise.all([
+    const directAssignments = await prisma.feeAssignment.findMany({
+      where: {
+        assignmentType: 'STUDENT' as any,
+        targetStudentId: me.id,
+        isActive: true,
+        fee: { isActive: true },
+      },
+      select: {
+        id: true,
+        overrideAmount: true,
+        overrideDeadline: true,
+        assignedAt: true,
+        assignedBy: { select: { firstName: true, lastName: true, email: true } },
+        fee: {
+          select: {
+            id: true, feeCode: true, name: true, description: true,
+            categoryId: true, category: { select: { id: true, name: true, code: true } },
+            amount: true, currency: true,
+            academicSession: true, semester: true,
+            college: true, department: true, program: true, level: true, studentType: true,
+            isMandatory: true, paymentDeadline: true, isActive: true,
+            createdAt: true, updatedAt: true,
+          },
+        },
+      },
+    });
+
+    const directFeeIds = new Set(directAssignments.map((da: any) => Number(da.fee.id)));
+
+    const [rows, totalGlobal] = await Promise.all([
       prisma.fee.findMany({
-        where,
+        where: { ...where, id: { notIn: Array.from(directFeeIds) } },
         select: {
           id: true, feeCode: true, name: true, description: true,
           categoryId: true, category: { select: { id: true, name: true, code: true } },
@@ -196,17 +225,47 @@ router.get(
           isMandatory: true, paymentDeadline: true, isActive: true,
           createdAt: true, updatedAt: true,
         },
-        skip,
+        skip: Math.max(0, skip - directAssignments.length),
         take: pageSize,
         orderBy: { [sort]: order },
       }),
       prisma.fee.count({ where }),
     ]);
+
+    const directFeeRows = directAssignments.map((da: any) => {
+      const base = da.fee;
+      const overrideAmount = da.overrideAmount != null ? Number(da.overrideAmount) : null;
+      return {
+        ...base,
+        amount: overrideAmount ?? Number(base.amount),
+        paymentDeadline: da.overrideDeadline ?? base.paymentDeadline,
+        badge: 'DIRECT BILL' as const,
+        assignmentId: da.id,
+        assignedAt: da.assignedAt,
+        assignedBy: da.assignedBy,
+        _isDirectBill: true,
+      };
+    });
+
+    const globalRows = rows.map((r) => ({
+      ...r,
+      amount: Number((r as any).amount),
+      badge: null as null,
+      assignmentId: null as null,
+      _isDirectBill: false,
+    }));
+
+    const combinedCount = directFeeRows.length + globalRows.length;
+    const sliceStart = skip > directFeeRows.length ? 0 : Math.max(0, directFeeRows.length - skip);
+    const directSlice = directFeeRows.slice(Math.min(skip, directFeeRows.length), directFeeRows.length);
+    const finalRows = [...directSlice, ...globalRows].slice(0, pageSize);
+    const adjustedTotal = totalGlobal + directFeeRows.length - directFeeIds.size;
+
     res.status(200).json({
       status: 'success',
       data: {
-        fees: rows.map((r) => ({ ...r, amount: Number((r as any).amount) })),
-        total,
+        fees: finalRows,
+        total: Math.max(adjustedTotal, combinedCount),
         page,
         pageSize,
       },
