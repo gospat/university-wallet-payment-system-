@@ -135,36 +135,40 @@ const DashboardSummarySchema = z.object({
 router.get('/dashboard/summary', validateQuery(DashboardSummarySchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo } = req.query as any;
   const paidWhere: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
-  const invoiceTxWhere: any = {};
-  if (dateFrom) { paidWhere.createdAt = { ...(paidWhere.createdAt || {}), gte: dateFrom }; invoiceTxWhere.createdAt = { ...(invoiceTxWhere.createdAt || {}), gte: dateFrom }; }
-  if (dateTo) { paidWhere.createdAt = { ...(paidWhere.createdAt || {}), lte: dateTo }; invoiceTxWhere.createdAt = { ...(invoiceTxWhere.createdAt || {}), lte: dateTo }; }
+  if (dateFrom) paidWhere.createdAt = { ...(paidWhere.createdAt || {}), gte: dateFrom };
+  if (dateTo) paidWhere.createdAt = { ...(paidWhere.createdAt || {}), lte: dateTo };
 
   const [
     totalPaidAgg,
-    outstandingAgg,
-    expectedAgg,
     studentCount,
-    invoiceCountAgg,
+    receiptsCountAgg,
+    uniquePayingStudentsAgg,
+    feesPublishedCountAgg,
   ] = await Promise.all([
       prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: paidWhere }),
-      prisma.invoice.aggregate({ _sum: { amountDue: true } }),
-      prisma.invoice.aggregate({ _sum: { amountPaid: true } }),
       prisma.user.count({ where: { role: 'STUDENT' as any } }),
-      prisma.invoice.groupBy({
-        by: ['status'],
-        _count: { _all: true },
+      prisma.receipt.count({
+        where: {
+          isVoided: false,
+          paidAt: dateFrom || dateTo ? {
+            ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+            ...(dateTo ? { lte: new Date(dateTo + 'T23:59:59.999Z') } : {}),
+          } as any : undefined,
+        },
       }),
+      prisma.transaction.groupBy({
+        by: ['userId'],
+        where: paidWhere,
+        _count: { userId: true },
+      }),
+      prisma.fee.count({ where: { isActive: true } }),
     ]);
 
   const totalPaid = Number(totalPaidAgg._sum.amount ?? 0);
-  const totalExpectedAllInvoices = Number(outstandingAgg._sum.amountDue ?? 0);
-  const totalCollectedInvoices = Number(expectedAgg._sum.amountPaid ?? 0);
-  const outstanding = Math.max(0, totalExpectedAllInvoices - totalCollectedInvoices);
-
-  const invoiceStatusCounts: Record<string, number> = {};
-  for (const g of invoiceCountAgg) invoiceStatusCounts[g.status] = Number(g._count._all);
-
   const txPaid = Number(totalPaidAgg._count.id || 0);
+  const uniquePayingStudents = Number(uniquePayingStudentsAgg?.length ?? 0);
+  const averageTransaction = txPaid ? totalPaid / txPaid : 0;
+  const receiptsIssued = Number(receiptsCountAgg || 0);
 
   const recentTransactions = await prisma.transaction.findMany({
     where: paidWhere,
@@ -180,13 +184,15 @@ router.get('/dashboard/summary', validateQuery(DashboardSummarySchema), catchAsy
     status: 'success',
     data: {
       cards: {
+        totalCollected: totalPaid,
         totalRevenue: totalPaid,
         totalRevenueTransactions: txPaid,
-        totalOutstanding: outstanding,
-        expectedInvoicesTotal: totalExpectedAllInvoices,
-        collectedInvoicesTotal: totalCollectedInvoices,
+        transactionsCount: txPaid,
+        receiptsIssued,
+        uniquePayingStudents,
+        averageTransaction,
         totalStudents: studentCount,
-        invoiceStatusCounts,
+        feesPublishedCount: Number(feesPublishedCountAgg || 0),
       },
       recentTransactions: recentTransactions.map((t: any) => ({
         id: t.id,
@@ -214,22 +220,14 @@ router.get('/dashboard/stats', validateQuery(DashboardStatsSchema), catchAsync(a
 
   const basePaid: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
   const [
-    todayAgg, weekAgg, monthAgg, pendingWithdrawAgg, unpaidAgg, refundsSuccessAgg,
+    todayAgg, weekAgg, monthAgg, pendingWithdrawAgg, refundsSuccessAgg,
   ] = await Promise.all([
     prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: { ...basePaid, createdAt: { gte: startOfToday } } }),
     prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: { ...basePaid, createdAt: { gte: startOfWeek } } }),
     prisma.transaction.aggregate({ _sum: { amount: true }, _count: { id: true }, where: { ...basePaid, createdAt: { gte: startOfMonth } } }),
     Promise.resolve({ _sum: { amount: null }, _count: { id: 0 } }),
-    prisma.$queryRawUnsafe<[{ outstanding: string | number }]>(`
-      SELECT COALESCE(SUM(amountDue - amountPaid), 0) AS outstanding
-      FROM invoices
-      WHERE (amountDue - amountPaid) > 0 AND status <> 'PAID'
-    `) as Promise<[{ outstanding: string | number }]>,
     prisma.refund.count({ where: { status: 'PAID' as any } }),
   ]);
-
-  const receivablesRow = Array.isArray(unpaidAgg) && unpaidAgg.length > 0 ? unpaidAgg[0] : { outstanding: 0 };
-  const pendingReceivables = Number(receivablesRow.outstanding ?? 0);
 
   res.status(200).json({
     status: 'success',
@@ -250,7 +248,6 @@ router.get('/dashboard/stats', validateQuery(DashboardStatsSchema), catchAsync(a
         count: Number(pendingWithdrawAgg._count.id ?? 0),
         total: Number(pendingWithdrawAgg._sum.amount ?? 0),
       },
-      pendingFeeReceivables: pendingReceivables,
       successfulRefundsCount: Number(refundsSuccessAgg ?? 0),
       windows: {
         startOfToday: startOfToday.toISOString(),
@@ -370,81 +367,128 @@ const CollectionsReportSchema = z.object({
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
   format: z.enum(['json', 'csv']).default('json').optional(),
+  categoryId: z.coerce.number().int().positive().optional(),
+  college: z.string().max(120).trim().optional(),
+  level: z.coerce.number().int().positive().max(1000).optional(),
+  studentId: z.coerce.number().int().positive().optional(),
+  page: z.coerce.number().int().positive().default(1).optional(),
+  pageSize: z.coerce.number().int().positive().max(500).default(100).optional(),
 });
 
 router.get('/reports/collections', validateQuery(CollectionsReportSchema), catchAsync(async (req: any, res) => {
-  const { dateFrom, dateTo, format } = req.query as any;
+  const { dateFrom, dateTo, format, categoryId, college, level, studentId, page, pageSize } = req.query as any;
   const where: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
   if (dateFrom) where.createdAt = { ...(where.createdAt || {}), gte: dateFrom };
   if (dateTo) where.createdAt = { ...(where.createdAt || {}), lte: dateTo };
-  const rows = await prisma.transaction.findMany({
+  if (studentId) where.userId = Number(studentId);
+  if (categoryId || college || level) {
+    where.AND = [];
+    if (categoryId) where.AND.push({ invoice: { fee: { categoryId: Number(categoryId) } } });
+    if (college) where.AND.push({ invoice: { fee: { college } } });
+    if (level) where.AND.push({ invoice: { fee: { level: Number(level) } } });
+  }
+
+  const findManyOpts: any = {
     where,
     orderBy: { createdAt: 'asc' },
     include: {
-      user: { select: { firstName: true, lastName: true, matricNumber: true, email: true } },
+      user: { select: { firstName: true, lastName: true, matricNumber: true, email: true, college: true, department: true, program: true, level: true } },
       invoice: { include: { fee: { include: { category: { select: { id: true, name: true, code: true } } } } } },
-      receipts: { select: { receiptNumber: true, verificationToken: true } },
+      receipts: { select: { receiptNumber: true, verificationToken: true, paidAt: true } },
     },
-  });
+  };
+
+  const rows = format === 'csv'
+    ? await prisma.transaction.findMany(findManyOpts)
+    : await prisma.transaction.findMany({
+      ...findManyOpts,
+      skip: (Number(page) - 1) * Number(pageSize),
+      take: Number(pageSize),
+    });
+  const totalRows = format === 'csv' ? rows.length : await prisma.transaction.count({ where });
 
   const flat = rows.map((t: any) => {
     const inv = t.invoice as any;
     const fee = inv?.fee;
     const cat = fee?.category;
+    const student = t.user;
+    const paidAt = t.receipts?.[0]?.paidAt || t.createdAt;
     return {
-      date: new Date(t.createdAt).toISOString(),
       receiptNumber: t.receipts?.[0]?.receiptNumber ?? '',
-      transactionReference: t.reference,
-      paystackReference: t.paystackReference ?? '',
-      channel: t.paystackChannel ?? '',
-      studentName: t.user ? `${t.user.firstName} ${t.user.lastName}`.trim() : '',
-      matricNumber: t.user?.matricNumber ?? '',
-      studentEmail: t.user?.email ?? '',
-      invoiceNumber: inv?.invoiceNumber ?? '',
+      paidAt: new Date(paidAt).toISOString(),
+      studentName: student ? `${student.firstName} ${student.lastName}`.trim() : '',
+      matricNumber: student?.matricNumber ?? '',
+      college: student?.college ?? '',
+      department: student?.department ?? '',
+      program: student?.program ?? '',
+      level: student?.level ?? null,
       feeName: fee?.name ?? '',
+      feeCode: fee?.feeCode ?? '',
       categoryName: cat?.name ?? '',
       categoryCode: cat?.code ?? '',
       academicSession: inv?.session ?? '',
       semester: inv?.semester ?? '',
-      amountNGN: Number(t.amount).toFixed(2),
+      paidAmount: Number(t.amount).toFixed(2),
+      gateway: (t.gateway ?? '') as string,
+      channel: t.paystackChannel ?? (t.gateway ? String(t.gateway).toLowerCase() : '') ?? '',
+      transactionReference: t.reference ?? '',
+      status: t.status ?? 'SUCCESS',
     };
   });
 
   const totals = flat.reduce((acc: any, r: any) => {
     acc.count += 1;
-    acc.total += Number(r.amountNGN);
+    acc.total += Number(r.paidAmount);
     const key = `${r.categoryCode || 'UNCAT'}`;
     acc.byCat[key] = acc.byCat[key] || { name: r.categoryName || key, total: 0, count: 0 };
-    acc.byCat[key].total += Number(r.amountNGN);
+    acc.byCat[key].total += Number(r.paidAmount);
     acc.byCat[key].count += 1;
+    const fkey = r.college || 'No Faculty';
+    acc.byFaculty[fkey] = acc.byFaculty[fkey] || { name: fkey, total: 0, count: 0 };
+    acc.byFaculty[fkey].total += Number(r.paidAmount);
+    acc.byFaculty[fkey].count += 1;
     return acc;
-  }, { count: 0, total: 0, byCat: {} as Record<string, { name: string; total: number; count: number }> });
+  }, {
+    count: 0, total: 0,
+    byCat: {} as Record<string, { name: string; total: number; count: number }>,
+    byFaculty: {} as Record<string, { name: string; total: number; count: number }>,
+  });
 
   if (format === 'csv') {
     const Papa = require('papaparse');
     const header = [
-      'Date', 'Receipt Number', 'Transaction Reference', 'Paystack Reference', 'Channel',
-      'Student Name', 'Matric Number', 'Student Email', 'Invoice Number',
-      'Fee Name', 'Category Name', 'Category Code',
-      'Academic Session', 'Semester', 'Amount (NGN)',
+      'Receipt No.', 'Date', 'Student Name', 'Matric No.',
+      'Faculty', 'Department', 'Program', 'Level',
+      'Fee Name', 'Fee Code', 'Category',
+      'Academic Session', 'Semester',
+      'Amount (NGN)', 'Gateway', 'Channel', 'Reference', 'Status',
     ];
-    const rows: any = flat.map((r: any) => [
-      r.date, r.receiptNumber, r.transactionReference, r.paystackReference, r.channel,
-      r.studentName, r.matricNumber, r.studentEmail, r.invoiceNumber,
-      r.feeName, r.categoryName, r.categoryCode, r.academicSession, r.semester, r.amountNGN,
+    const dataRows: any = flat.map((r: any) => [
+      r.receiptNumber, r.paidAt, r.studentName, r.matricNumber,
+      r.college, r.department, r.program, r.level ?? '',
+      r.feeName, r.feeCode, r.categoryName ? `${r.categoryName} (${r.categoryCode})` : r.categoryCode,
+      r.academicSession, r.semester,
+      r.paidAmount, r.gateway, r.channel, r.transactionReference, r.status,
     ]);
-    let csvRows: any[][] = [header, ...(rows as any)];
+    let csvRows: any[][] = [header, ...(dataRows as any)];
     csvRows.push([]);
-    csvRows.push(['', '', '', '', '', '', '', '', '', '', '', 'Subtotal by Category']);
+    csvRows.push(['', '', '', '', '', '', '', '', '', '', 'Subtotal by Category', '', '', '', '', '', '']);
     for (const key of Object.keys(totals.byCat)) {
       const c = totals.byCat[key];
-      csvRows.push(['', '', '', '', '', '', '', '', '', '', c.name, key, '', '', Number(c.total).toFixed(2)]);
+      csvRows.push(['', '', '', '', '', '', '', '', '', '', c.name, key, '', '', Number(c.total).toFixed(2), '', `(${c.count} tx)`]);
     }
     csvRows.push([]);
-    csvRows.push(['', '', '', '', '', '', '', '', '', '', '', 'GRAND TOTAL', '', '', Number(totals.total).toFixed(2)]);
+    csvRows.push(['', '', '', '', 'Subtotal by Faculty/College', '', '', '', '', '', '', '', '', '', '', '', '']);
+    for (const key of Object.keys(totals.byFaculty)) {
+      const f = totals.byFaculty[key];
+      csvRows.push(['', '', '', '', f.name, '', '', '', '', '', '', '', '', '', Number(f.total).toFixed(2), '', `(${f.count} tx)`]);
+    }
+    csvRows.push([]);
+    csvRows.push(['', '', '', '', '', '', '', '', '', '', '', '', 'GRAND TOTAL', '', Number(totals.total).toFixed(2), '', `(${totals.count} tx)`]);
+
     const csv = Papa.unparse(csvRows, { delimiter: ',' });
-    const ts = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '');
-    const filename = `collections_${ts(dateFrom ?? new Date())}_${ts(dateTo ?? new Date())}.csv`;
+    const ts = (d: any) => (d ? new Date(d).toISOString().slice(0, 10).replace(/-/g, '') : 'all');
+    const filename = `collections_report_${ts(dateFrom)}_${ts(dateTo)}_${Date.now()}.csv`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
     res.send('\uFEFF' + csv);
@@ -455,13 +499,29 @@ router.get('/reports/collections', validateQuery(CollectionsReportSchema), catch
     status: 'success',
     data: {
       rows: flat,
+      total: totalRows,
       count: totals.count,
-      grandTotal: totals.total,
+      grandTotal: +totals.total.toFixed(2),
       byCategory: Object.entries(totals.byCat).map(([code, vUnk]) => {
         const v = vUnk as { name: string; total: number; count: number };
-        return { code, name: v.name, total: v.total, count: v.count };
+        return { code, name: v.name, total: +v.total.toFixed(2), count: v.count };
       }),
-      filters: { dateFrom: dateFrom || null, dateTo: dateTo || null, format: format || 'json' },
+      byFaculty: Object.entries(totals.byFaculty).map(([code, vUnk]) => {
+        const v = vUnk as { name: string; total: number; count: number };
+        return { code, name: v.name, total: +v.total.toFixed(2), count: v.count };
+      }),
+      filters: {
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
+        format: format || 'json',
+        categoryId: categoryId || null,
+        college: college || null,
+        level: level || null,
+        studentId: studentId || null,
+      },
+      page: Number(page),
+      pageSize: Number(pageSize),
+      totalPages: Math.max(1, Math.ceil(totalRows / Number(pageSize))),
     },
   });
 }));
@@ -495,7 +555,12 @@ router.get(
     const skip = (page - 1) * pageSize;
 
     const where: any = {};
-    if (q.status) where.status = q.status;
+    if (q.status) {
+      where.status = q.status;
+    } else {
+      // Default collections-only: SUCCESS transactions only.
+      where.status = 'SUCCESS';
+    }
     if (q.gateway) where.gateway = q.gateway;
     if (q.studentId) where.userId = q.studentId;
     if (q.invoiceId) where.invoiceId = q.invoiceId;

@@ -722,9 +722,9 @@ const PortalShell: React.FC<PortalShellProps> = ({
                                 </div>
                               </div>
                               <div className="text-right shrink-0">
-                                <div className="text-xs text-gray-400">Outstanding</div>
-                                <div className={`text-sm font-semibold ${Number(student.totalOutstanding || 0) > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                                  {formatNGN(student.totalOutstanding)}
+                                <div className="text-xs text-gray-400">Total Paid</div>
+                                <div className="text-sm font-semibold text-emerald-700">
+                                  {formatNGN(student.totalPaid || 0)}
                                 </div>
                               </div>
                             </div>

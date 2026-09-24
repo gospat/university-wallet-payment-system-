@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Users, DollarSign, Banknote, Shield, Mail, Clock } from 'lucide-react';
+import { Users, DollarSign, Banknote, Shield, Mail, Receipt } from 'lucide-react';
 import api, { navCounters, NavCounters } from '../../services/api';
 import Modal from '../../components/Modal';
 import PortalShell from '../../components/PortalShell';
@@ -139,11 +139,11 @@ const AdminDashboard: React.FC = () => {
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Outstanding Receivables</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">₦{Number(stats?.stats?.totalOutstanding ?? stats?.stats?.outstandingReceivables ?? 0).toLocaleString()}</p>
+                <p className="text-sm font-medium text-gray-500">Receipts Issued</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{Number(stats?.stats?.receiptsIssued ?? stats?.stats?.totalFeesConfigured ?? 0).toLocaleString()}</p>
               </div>
-              <div className="p-3 bg-rose-50 rounded-lg">
-                <Clock className="h-6 w-6 text-rose-600" />
+              <div className="p-3 bg-indigo-50 rounded-lg">
+                <Receipt className="h-6 w-6 text-indigo-600" />
               </div>
             </div>
           </div>

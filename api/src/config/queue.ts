@@ -58,25 +58,27 @@ let _handlers = new Map<string, Handler>();
 let _degradedLogIssued = false;
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const LAZY = process.env.REDIS_LAZY_CONNECT === 'true' || process.env.QUEUE_DISABLE_WORKERS === 'true' || process.env.NODE_ENV === 'test';
 
 function ensureRedis(): InstanceType<typeof Redis> | null {
   if (_redis) return _redis;
   try {
     _redis = new Redis(REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      enableReadyCheck: true,
-      connectTimeout: 1500,
-      commandTimeout: 2000,
+      maxRetriesPerRequest: LAZY ? 0 : 1,
+      enableReadyCheck: !LAZY,
+      connectTimeout: LAZY ? 400 : 1500,
+      commandTimeout: LAZY ? 600 : 2000,
       lazyConnect: true,
-      retryStrategy: (times) => (times > 2 ? null : 200 * times),
+      retryStrategy: () => null,
     });
-    // Suppress noisy errors; getRedisHealth() still surfaces them for admins.
     _redis.on('error', () => {
       /* handled via .ping() probe inside enqueue */
     });
-    _redis.connect().catch(() => {
-      /* lazy connect best-effort — fall through to sync fallback */
-    });
+    if (!LAZY) {
+      _redis.connect().catch(() => {
+        /* lazy connect best-effort — fall through to sync fallback */
+      });
+    }
     return _redis;
   } catch {
     return null;

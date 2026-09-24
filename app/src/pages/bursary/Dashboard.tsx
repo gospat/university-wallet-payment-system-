@@ -5,7 +5,6 @@ import {
   Mail,
   History,
   Banknote,
-  Wallet,
   Users,
   TrendingUp,
   BarChart3,
@@ -14,9 +13,12 @@ import {
   CalendarDays,
   ArrowUpRight,
   Layers,
-  Clock,
   CircleDollarSign,
   GraduationCap,
+  Receipt,
+  CheckCircle2,
+  Percent,
+  ListChecks,
 } from 'lucide-react';
 import api, { navCounters, NavCounters } from '../../services/api';
 import Modal from '../../components/Modal';
@@ -307,11 +309,6 @@ const BursaryDashboard: React.FC = () => {
   };
 
   const cards = summary.cards || {};
-  const outstandingRatio = cards.totalOutstanding
-    ? ((cards.collectedInvoicesTotal ?? 0) / ((cards.expectedInvoicesTotal ?? 0) || 1)) * 100
-    : cards.expectedInvoicesTotal
-      ? 0
-      : 0;
   const sparkData = (trend.buckets || []).map((b) => b.value);
 
   const brand = i18n.portals.bursary.dashboardBrand;
@@ -325,9 +322,6 @@ const BursaryDashboard: React.FC = () => {
           : b.label,
     value: b.value,
   }));
-
-  const invoiceStatuses = cards.invoiceStatusCounts || {};
-  void invoiceStatuses;
 
   return (
     <PortalShell
@@ -427,19 +421,19 @@ const BursaryDashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* KPI cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Collections-only KPI cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 relative overflow-hidden">
             <div className="flex items-start justify-between">
               <div>
                 <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg ring-1 ring-emerald-100">
-                  <CircleDollarSign className="h-3 w-3" /> Revenue
+                  <CircleDollarSign className="h-3 w-3" /> Total Collected
                 </div>
-                <div className="mt-3 text-3xl font-black text-slate-900 tracking-tight">
-                  {naira(cards.totalRevenue ?? 0)}
+                <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
+                  {naira(cards.totalCollected ?? cards.totalRevenue ?? 0)}
                 </div>
                 <div className="mt-1 text-sm text-slate-500 font-medium">
-                  {cards.totalRevenueTransactions ?? 0} successful transactions
+                  {cards.totalRevenueTransactions ?? cards.transactionsCount ?? 0} successful transactions
                 </div>
               </div>
               <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center ring-1 ring-emerald-100">
@@ -457,88 +451,95 @@ const BursaryDashboard: React.FC = () => {
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 relative overflow-hidden">
             <div className="flex items-start justify-between">
               <div>
-                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg ring-1 ring-amber-100">
-                  <Wallet className="h-3 w-3" /> Outstanding Receivables
-                </div>
-                <div className="mt-3 text-3xl font-black text-slate-900 tracking-tight">
-                  {naira(cards.totalOutstanding ?? 0)}
-                </div>
-                <div className="mt-1 text-sm text-slate-500 font-medium">
-                  Collected {outstandingRatio.toFixed(0)}% of expected
-                </div>
-              </div>
-              <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center ring-1 ring-amber-100">
-                <Clock className="h-5 w-5" />
-              </div>
-            </div>
-            <div className="mt-4 h-2 rounded-full bg-slate-100 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-amber-400 to-amber-500"
-                style={{ width: `${Math.min(100, outstandingRatio)}%` }}
-              />
-            </div>
-          </div>
-
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg ring-1 ring-blue-100">
-                  <Users className="h-3 w-3" /> Students
-                </div>
-                <div className="mt-3 text-3xl font-black text-slate-900 tracking-tight">
-                  {(cards.totalStudents ?? 0).toLocaleString()}
-                </div>
-                <div className="mt-1 text-sm text-slate-500 font-medium">
-                  registered fee-paying students
-                </div>
-              </div>
-              <div className="w-11 h-11 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center ring-1 ring-blue-100">
-                <GraduationCap
-                  // @ts-ignore
-                  className="h-5 w-5"
-                />
-              </div>
-            </div>
-            <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-              {[
-                { label: 'Paid', value: invoiceStatuses.PAID ?? 0, color: 'emerald' },
-                { label: 'Part', value: invoiceStatuses.PARTIALLY_PAID ?? 0, color: 'amber' },
-                { label: 'Unpaid', value: invoiceStatuses.UNPAID ?? 0, color: 'rose' },
-              ].map((b) => (
-                <div key={b.label} className="rounded-lg bg-slate-50 py-2 px-1 border border-slate-100">
-                  <div className="text-xs text-slate-500 font-semibold">{b.label}</div>
-                  <div className="text-sm font-black text-slate-800">{Number(b.value).toLocaleString()}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
-            <div className="flex items-start justify-between">
-              <div>
                 <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-lg ring-1 ring-indigo-100">
-                  <Layers className="h-3 w-3" /> Invoices
+                  <Receipt className="h-3 w-3" /> Receipts Issued
                 </div>
-                <div className="mt-3 text-3xl font-black text-slate-900 tracking-tight">
-                  {naira(cards.expectedInvoicesTotal ?? 0)}
+                <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
+                  {(cards.receiptsIssued ?? 0).toLocaleString()}
                 </div>
                 <div className="mt-1 text-sm text-slate-500 font-medium">
-                  Raised ({naira(cards.collectedInvoicesTotal ?? 0)} collected)
+                  Official receipts printed
                 </div>
               </div>
               <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center ring-1 ring-indigo-100">
+                <Receipt className="h-5 w-5" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-teal-700 bg-teal-50 px-2.5 py-1 rounded-lg ring-1 ring-teal-100">
+                  <Users className="h-3 w-3" /> Paying Students
+                </div>
+                <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
+                  {(cards.uniquePayingStudents ?? 0).toLocaleString()}
+                </div>
+                <div className="mt-1 text-sm text-slate-500 font-medium">
+                  Unique students who paid
+                </div>
+              </div>
+              <div className="w-11 h-11 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center ring-1 ring-teal-100">
+                <CheckCircle2 className="h-5 w-5" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-fuchsia-700 bg-fuchsia-50 px-2.5 py-1 rounded-lg ring-1 ring-fuchsia-100">
+                  <Percent className="h-3 w-3" /> Avg Transaction
+                </div>
+                <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
+                  {naira(cards.averageTransaction ?? 0)}
+                </div>
+                <div className="mt-1 text-sm text-slate-500 font-medium">
+                  Mean successful payment
+                </div>
+              </div>
+              <div className="w-11 h-11 rounded-xl bg-fuchsia-50 text-fuchsia-600 flex items-center justify-center ring-1 ring-fuchsia-100">
                 <BarChart3 className="h-5 w-5" />
               </div>
             </div>
-            <div className="mt-4 text-xs text-slate-500 space-y-1">
-              {['OVERDUE', 'REFUNDED'].map((k) =>
-                invoiceStatuses[k] != null ? (
-                  <div key={k} className="flex items-center justify-between">
-                    <span className="text-slate-500 font-medium capitalize">{k.toLowerCase()}</span>
-                    <span className="font-bold text-slate-700">{invoiceStatuses[k]}</span>
-                  </div>
-                ) : null,
-              )}
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-sky-700 bg-sky-50 px-2.5 py-1 rounded-lg ring-1 ring-sky-100">
+                  <GraduationCap className="h-3 w-3" /> Total Students
+                </div>
+                <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
+                  {(cards.totalStudents ?? 0).toLocaleString()}
+                </div>
+                <div className="mt-1 text-sm text-slate-500 font-medium">
+                  Registered students
+                </div>
+              </div>
+              <div className="w-11 h-11 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center ring-1 ring-sky-100">
+                <GraduationCap className="h-5 w-5" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-orange-700 bg-orange-50 px-2.5 py-1 rounded-lg ring-1 ring-orange-100">
+                  <ListChecks className="h-3 w-3" /> Fees Published
+                </div>
+                <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
+                  {(cards.feesPublishedCount ?? 0).toLocaleString()}
+                </div>
+                <div className="mt-1 text-sm text-slate-500 font-medium">
+                  Active fee items in catalogue
+                </div>
+              </div>
+              <div className="w-11 h-11 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center ring-1 ring-orange-100">
+                <Layers className="h-5 w-5" />
+              </div>
             </div>
           </div>
         </div>

@@ -16,7 +16,11 @@ import {
   Layers,
   CircleDollarSign,
   Banknote,
+  ArrowRight,
+  CreditCard,
+  Clock,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import Modal from '../../components/Modal';
 import PortalShell from '../../components/PortalShell';
 import { i18n } from '../../i18n/en';
@@ -47,25 +51,28 @@ const invoiceStatusChip = (s: string) => {
       return { label: s, cls: 'bg-emerald-50 text-emerald-700 ring-emerald-600/10' };
     case 'PARTIALLY_PAID':
       return { label: 'PARTIAL', cls: 'bg-amber-50 text-amber-700 ring-amber-600/10' };
-    case 'UNPAID':
-      return { label: s, cls: 'bg-rose-50 text-rose-700 ring-rose-600/10' };
-    case 'OVERDUE':
-      return { label: s, cls: 'bg-red-50 text-red-700 ring-red-600/10' };
+    case 'PENDING':
+      return { label: s, cls: 'bg-blue-50 text-blue-700 ring-blue-600/10' };
+    case 'FAILED':
+    case 'CANCELLED':
     case 'REFUNDED':
     case 'REVERSED':
-    case 'CANCELLED':
       return { label: s, cls: 'bg-slate-100 text-slate-600 ring-slate-500/10' };
+    case 'UNPAID':
+    case 'OVERDUE':
+      return { label: s, cls: 'bg-rose-50 text-rose-700 ring-rose-600/10' };
     default:
       return { label: s, cls: 'bg-slate-50 text-slate-600 ring-slate-500/10' };
   }
 };
 
 const INVOICE_FILTERS = [
-  { key: 'ALL', label: 'All' },
-  { key: 'UNPAID', label: 'Unpaid' },
-  { key: 'PARTIALLY_PAID', label: 'Partial' },
+  { key: 'ALL', label: 'All attempts' },
   { key: 'PAID', label: 'Paid' },
-  { key: 'OVERDUE', label: 'Overdue' },
+  { key: 'PARTIALLY_PAID', label: 'Partial' },
+  { key: 'PENDING', label: 'Pending' },
+  { key: 'FAILED', label: 'Failed' },
+  { key: 'CANCELLED', label: 'Cancelled' },
 ];
 
 const RECEIPT_FILTERS = [
@@ -76,7 +83,7 @@ const RECEIPT_FILTERS = [
 
 const STUDENT_DASH_TABS = [
   { id: 'overview', label: 'Overview', icon: Layers },
-  { id: 'invoices', label: 'Invoices', icon: FileText },
+  { id: 'invoices', label: 'Payment History', icon: FileText },
   { id: 'receipts', label: 'Receipts', icon: Receipt },
 ];
 
@@ -87,6 +94,7 @@ const PAGE_SIZE = 10;
 const StudentDashboard: React.FC = () => {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const fullName = useMemo(() => {
     if (!user) return 'Student';
@@ -105,7 +113,7 @@ const StudentDashboard: React.FC = () => {
   const [invLoading, setInvLoading] = useState(false);
   const [invTotal, setInvTotal] = useState(0);
   const [invPage, setInvPage] = useState(1);
-  const [invFilter, setInvFilter] = useState<string>('ALL');
+  const [invFilter, setInvFilter] = useState<string>('PAID');
 
   // Receipts
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([]);
@@ -133,13 +141,11 @@ const StudentDashboard: React.FC = () => {
   // ---------- Derived aggregates from schedule -----------------------------
   const kpis = useMemo(() => {
     const s = schedule?.schedule || [];
-    let billed = 0;
     let paid = 0;
     for (const sess of s) {
-      billed += Number(sess.totalBilled || 0);
       paid += Number(sess.totalPaid || 0);
     }
-    return { totalBilled: billed, totalPaid: paid };
+    return { totalPaid: paid };
   }, [schedule]);
 
   // ---------- Initial load --------------------------------------------------
@@ -287,7 +293,33 @@ const StudentDashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* T19: KPI cards */}
+        {/* Browse Available Payments CTA Banner */}
+        <div className="bg-gradient-to-r from-[#0a3d91] via-[#0b46a8] to-[#0e53c5] rounded-2xl shadow-lg border border-[#0a3d91]/20 p-5 md:p-6 relative overflow-hidden">
+          <div className="absolute top-0 right-0 -mt-10 -mr-10 w-56 h-56 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+          <div className="absolute bottom-0 left-0 -mb-10 -ml-10 w-40 h-40 bg-white/5 rounded-full blur-2xl pointer-events-none"></div>
+          <div className="flex flex-col md:flex-row items-start md:items-center gap-5 relative z-10">
+            <div className="w-14 h-14 rounded-2xl bg-white/15 backdrop-blur flex items-center justify-center text-white ring-1 ring-white/20 shrink-0">
+              <CreditCard className="h-7 w-7" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h2 className="text-xl md:text-2xl font-black text-white tracking-tight">
+                Browse Available Payments
+              </h2>
+              <p className="text-blue-100 text-sm md:text-base font-medium mt-1">
+                Select any fee you need to pay — tuition, hostel, departmental dues, and more.
+                No pre-billing required.
+              </p>
+            </div>
+            <button
+              onClick={() => navigate('/student/payments')}
+              className="inline-flex items-center gap-2 bg-white hover:bg-blue-50 text-[#0a3d91] font-black px-5 py-3 rounded-xl shadow-lg transition-all hover:scale-[1.02] shrink-0"
+            >
+              Browse Catalogue <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* KPI cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
             <div className="flex items-start justify-between">
@@ -310,19 +342,19 @@ const StudentDashboard: React.FC = () => {
             <div className="flex items-start justify-between">
               <div>
                 <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg ring-1 ring-blue-100">
-                  <FileText className="h-3 w-3" /> Total Invoices
+                  <Layers className="h-3 w-3" /> Payment Attempts
                 </div>
                 <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
                   {invLoading ? '—' : invTotal.toLocaleString()}
                 </div>
-                <div className="mt-1 text-sm text-slate-500 font-medium">Fee invoices raised for you</div>
+                <div className="mt-1 text-sm text-slate-500 font-medium">Checkout sessions initiated</div>
               </div>
               <div className="w-11 h-11 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center ring-1 ring-blue-100">
-                <Layers className="h-5 w-5" />
+                <Clock className="h-5 w-5" />
               </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-1.5">
-              {['PAID', 'PARTIALLY_PAID', 'UNPAID'].map((k) => {
+              {['PAID', 'PARTIALLY_PAID', 'PENDING', 'FAILED'].map((k) => {
                 const cnt = invoices.filter((i) => i.status === k).length;
                 if (!cnt) return null;
                 return (
@@ -387,7 +419,7 @@ const StudentDashboard: React.FC = () => {
                 <div>
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                      <FileText className="h-4 w-4 text-slate-500" /> Recent Invoices
+                      <FileText className="h-4 w-4 text-slate-500" /> Recent Payment Attempts
                     </h3>
                     <button
                       onClick={() => setActiveTab('invoices')}
@@ -399,7 +431,7 @@ const StudentDashboard: React.FC = () => {
                   <div className="rounded-xl border border-slate-200 overflow-hidden">
                     {invLoading || !invoices.length ? (
                       <div className="p-8 text-center text-sm text-slate-500">
-                        {invLoading ? 'Loading invoices…' : 'No invoices yet.'}
+                        {invLoading ? 'Loading…' : 'No payment attempts yet. Browse the catalogue to start paying.'}
                       </div>
                     ) : (
                       <ul className="divide-y divide-slate-100">
@@ -510,7 +542,7 @@ const StudentDashboard: React.FC = () => {
                     ))}
                   </div>
                   <div className="text-xs text-slate-500 font-medium">
-                    {invTotal.toLocaleString()} total invoice{invTotal === 1 ? '' : 's'}
+                    {invTotal.toLocaleString()} payment attempt{invTotal === 1 ? '' : 's'}
                   </div>
                 </div>
 
@@ -523,7 +555,7 @@ const StudentDashboard: React.FC = () => {
                         <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Due</th>
                         <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Due</th>
                         <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Paid</th>
-                        <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Balance</th>
+                        <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Remaining</th>
                         <th className="px-4 py-3 text-center text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
                       </tr>
                     </thead>
@@ -538,7 +570,7 @@ const StudentDashboard: React.FC = () => {
                         <tr>
                           <td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-500">
                             <FileText className="h-8 w-8 text-slate-300 mx-auto mb-2" />
-                            No invoices match this filter.
+                            No payment attempts match this filter.
                           </td>
                         </tr>
                       ) : (

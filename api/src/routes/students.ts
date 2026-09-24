@@ -73,7 +73,7 @@ router.get('/fees/schedule', protect, restrictTo(Role.STUDENT), catchAsync(async
 }));
 
 router.get('/invoices', protect, restrictTo(Role.STUDENT), validateQuery(StudentInvoiceListSchema), catchAsync(async (req: any, res) => {
-  const data = await StudentFeesService.listInvoices(req.user.id, req.query);
+  const data = await StudentFeesService.listInvoices(req.user.id, { ...req.query, role: Role.STUDENT });
   res.status(200).json({ status: 'success', data });
 }));
 
@@ -115,8 +115,102 @@ router.get(
   restrictTo(Role.STUDENT),
   validateQuery(FeeQuerySchema),
   catchAsync(async (req: any, res) => {
-    const data = await FeeService.list({ ...req.query, isActive: true });
-    res.status(200).json({ status: 'success', data });
+    const me = await prisma.user.findFirst({
+      where: { id: Number(req.user?.id), role: 'STUDENT' as any },
+      select: {
+        id: true, college: true, department: true, program: true,
+        level: true, studentType: true, academicSession: true,
+      },
+    });
+    if (!me) throw new AppError('Student profile not found.', 404);
+
+    const baseWhere: any = { isActive: true };
+    if (req.query?.session) baseWhere.academicSession = req.query.session;
+    if (req.query?.category) {
+      const cat = typeof req.query.category === 'number'
+        ? { id: req.query.category }
+        : { code: String(req.query.category).toUpperCase() };
+      baseWhere.category = cat;
+    }
+    if (req.query?.semester) baseWhere.semester = req.query.semester;
+    if (req.query?.q) {
+      baseWhere.OR = [
+        { name: { contains: String(req.query.q) } },
+        { feeCode: { contains: String(req.query.q) } },
+        { description: { contains: String(req.query.q) } },
+      ];
+    }
+
+    const scopeMatches: any[] = [];
+    const F = (field: string, value: any) => {
+      if (!value && value !== 0 && value !== false) return;
+      scopeMatches.push({ [field]: null });
+      scopeMatches.push({ [field]: value });
+    };
+    F('college', me.college);
+    F('department', me.department);
+    F('program', me.program);
+    F('level', me.level);
+    F('studentType', me.studentType);
+
+    const globalOrMatch: Prisma.FeeWhereInput = {};
+    if (scopeMatches.length > 0) {
+      // For each scope field we AND: (field IS NULL OR field = studentValue).
+      // This ensures each non-global narrowed field matches OR the fee's scope is globally off.
+      globalOrMatch.AND = [];
+      const fields = ['college', 'department', 'program', 'level', 'studentType'];
+      const studentValues: any = me;
+      for (const f of fields) {
+        const v = studentValues[f];
+        if (!v && v !== 0) {
+          // Student lacks the field — only global (null) fees match this dimension.
+          (globalOrMatch.AND as any).push({ [f]: null });
+        } else {
+          (globalOrMatch.AND as any).push({
+            OR: [{ [f]: null }, { [f]: v }],
+          });
+        }
+      }
+    }
+
+    const where: Prisma.FeeWhereInput = {
+      ...baseWhere,
+      ...globalOrMatch,
+    };
+
+    const page = Number(req.query?.page ?? 1);
+    const pageSize = Math.min(Number(req.query?.pageSize ?? 25), 500);
+    const skip = (page - 1) * pageSize;
+    const sort = (req.query?.sort ?? 'createdAt') as any;
+    const order = (req.query?.order ?? 'desc') as any;
+
+    const [rows, total] = await Promise.all([
+      prisma.fee.findMany({
+        where,
+        select: {
+          id: true, feeCode: true, name: true, description: true,
+          categoryId: true, category: { select: { id: true, name: true, code: true } },
+          amount: true, currency: true,
+          academicSession: true, semester: true,
+          college: true, department: true, program: true, level: true, studentType: true,
+          isMandatory: true, paymentDeadline: true, isActive: true,
+          createdAt: true, updatedAt: true,
+        },
+        skip,
+        take: pageSize,
+        orderBy: { [sort]: order },
+      }),
+      prisma.fee.count({ where }),
+    ]);
+    res.status(200).json({
+      status: 'success',
+      data: {
+        fees: rows.map((r) => ({ ...r, amount: Number((r as any).amount) })),
+        total,
+        page,
+        pageSize,
+      },
+    });
   }),
 );
 
@@ -132,8 +226,9 @@ const _FeeInitiateInnerSchema = z.object({
 }).strict();
 const FeeInitiateValidator = [validateParams(FeeIdParam), validateBody(_FeeInitiateInnerSchema)];
 
-// Helper: find-or-create unpaid invoice for (studentId, feeId). Returns invoice id/number.
-async function ensureInvoiceForFee(studentId: number, feeId: number) {
+// Helper: find-or-create PENDING invoice for (studentId, feeId) — never UNPAID.
+// Uses Idempotency-Key header to de-duplicate rapid Pay-Now clicks.
+async function ensureInvoiceForFee(studentId: number, feeId: number, opts?: { idempotencyKey?: string }) {
   const fee = await prisma.fee.findFirst({
     where: { id: feeId, isActive: true },
     select: {
@@ -142,10 +237,35 @@ async function ensureInvoiceForFee(studentId: number, feeId: number) {
     },
   });
   if (!fee) throw new AppError('Fee not found or no longer available.', 404);
+
+  // If idempotency key given, try to return existing one first (even if PENDING).
+  if (opts?.idempotencyKey) {
+    const existingByKey = await prisma.invoice.findFirst({
+      where: {
+        idempotencyKey: opts.idempotencyKey,
+        studentId,
+        feeId: fee.id,
+      },
+      select: { id: true, invoiceNumber: true, amountDue: true, amountPaid: true, status: true },
+    });
+    if (existingByKey) {
+      const bal = Number(existingByKey.amountDue) - Number(existingByKey.amountPaid);
+      if (bal <= 0 && existingByKey.status === 'PAID') {
+        throw new AppError('This fee is already paid.', 409);
+      }
+      return {
+        invoiceId: existingByKey.id,
+        invoiceNumber: existingByKey.invoiceNumber,
+        created: false,
+        fee,
+      };
+    }
+  }
+
   const reuse = await prisma.invoice.findFirst({
     where: {
       studentId, feeId: fee.id,
-      status: { in: ['UNPAID', 'PARTIALLY_PAID', 'PENDING'] as any },
+      status: { in: ['PENDING', 'PARTIALLY_PAID'] as any },
     },
     select: { id: true, invoiceNumber: true, amountDue: true, amountPaid: true, status: true },
   });
@@ -169,7 +289,8 @@ async function ensureInvoiceForFee(studentId: number, feeId: number) {
         fee: { connect: { id: fee.id } },
         amountDue: new (Prisma as any).Decimal(String(fee.amount)),
         amountPaid: new (Prisma as any).Decimal(0),
-        status: 'UNPAID',
+        status: 'PENDING',
+        idempotencyKey: opts?.idempotencyKey ?? null,
         session: fee.academicSession ?? 'General',
         semester: fee.semester ?? undefined,
         dueDate: fee.paymentDeadline ?? undefined,
@@ -186,7 +307,9 @@ router.post(
   restrictTo(Role.STUDENT),
   validateParams(FeeIdParam),
   catchAsync(async (req: any, res) => {
-    const result = await ensureInvoiceForFee(Number(req.user?.id), Number(req.params.feeId));
+    const idempotencyKey = (req.headers?.['idempotency-key'] as string) || req.body?.idempotencyKey;
+    const opts: any = idempotencyKey ? { idempotencyKey: String(idempotencyKey).slice(0, 128) } : undefined;
+    const result = await ensureInvoiceForFee(Number(req.user?.id), Number(req.params.feeId), opts);
     res.status(200).json({
       status: 'success',
       data: {
@@ -214,13 +337,16 @@ router.post(
     const studentId = Number(req.user?.id);
     const feeId = Number(req.params.feeId);
     const partialAmount = req.body?.partialAmount;
-    const ensured = await ensureInvoiceForFee(studentId, feeId);
+    const idempotencyKey: string | undefined =
+      (req.headers?.['idempotency-key'] as string) ||
+      (typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : undefined);
+    const ensured = await ensureInvoiceForFee(studentId, feeId, idempotencyKey ? { idempotencyKey: String(idempotencyKey).slice(0, 128) } : undefined);
     const initInput: any = { invoiceId: ensured.invoiceId };
     if (partialAmount !== undefined && partialAmount !== null) {
       initInput.partialAmount = partialAmount;
     }
     if (typeof req.body?.email === 'string' && req.body.email.trim()) initInput.email = req.body.email.trim();
-    if (typeof req.body?.idempotencyKey === 'string' && req.body.idempotencyKey.trim()) initInput.idempotencyKey = req.body.idempotencyKey.trim();
+    if (idempotencyKey) initInput.idempotencyKey = String(idempotencyKey).slice(0, 128);
     const result = await PaymentService.initiatePayment(studentId, initInput, req);
     res.status(200).json({ status: 'success', data: { ...result, invoiceId: ensured.invoiceId } });
   }),

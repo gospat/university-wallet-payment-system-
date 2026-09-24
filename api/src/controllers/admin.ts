@@ -25,12 +25,9 @@ export const getDashboardStats = catchAsync(async (req: Request, res: Response, 
     where: { isActive: true },
   });
 
-  const outstandingAgg = await prisma.invoice.aggregate({
-    _sum: { amountDue: true, amountPaid: true },
+  const receiptsIssued = await prisma.receipt.count({
+    where: { isVoided: false },
   });
-  const totalExpected = Number(outstandingAgg._sum.amountDue ?? 0);
-  const totalReceivedOnInvoices = Number(outstandingAgg._sum.amountPaid ?? 0);
-  const outstandingReceivables = Math.max(0, totalExpected - totalReceivedOnInvoices);
 
   const auditLogs = await prisma.auditLog.findMany({
     take: 5,
@@ -44,8 +41,9 @@ export const getDashboardStats = catchAsync(async (req: Request, res: Response, 
       stats: {
         totalStudents,
         totalCollected,
+        totalFeesConfigured: totalBills,
         totalBills,
-        outstandingReceivables,
+        receiptsIssued,
       },
       auditLogs,
     },

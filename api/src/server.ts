@@ -50,15 +50,29 @@ bootstrap();
 
 process.on('unhandledRejection', (err) => {
   const msg = err instanceof Error ? err.message : String(err ?? '');
+  const errCode = (err as any)?.code;
+  const errName = (err as any)?.name;
+  const nestedErrors: unknown[] = (err as any)?.errors ?? [];
+  const hasNestedConnRefused = nestedErrors.some(
+    (e: any) => e?.code === 'ECONNREFUSED' || String(e?.message ?? '').includes('ECONNREFUSED'),
+  );
   const isRedisOrNetwork =
     msg.includes('ECONNREFUSED') ||
     msg.includes('Connection is closed') ||
     msg.includes('Connection timeout') ||
     msg.includes('Redis') ||
     msg.includes('ioredis') ||
-    msg.includes('AggregateError');
+    msg.includes('AggregateError') ||
+    errCode === 'ECONNREFUSED' ||
+    errCode === 'EPIPE' ||
+    errCode === 'ECONNRESET' ||
+    errName === 'AggregateError' ||
+    hasNestedConnRefused;
   if (isRedisOrNetwork) {
-    console.warn('[runtime] swallowed non-fatal unhandled rejection:', msg.slice(0, 200));
+    if (!(globalThis as any).__redisWarned) {
+      (globalThis as any).__redisWarned = true;
+      console.warn('[runtime] Redis is not running — queue/emails will use sync degraded mode (no further warnings will be logged).');
+    }
   } else {
     console.error('Unhandled Rejection', err);
     process.exit(1);

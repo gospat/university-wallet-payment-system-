@@ -111,7 +111,7 @@ export class StudentFeesService {
     return { schedule };
   }
 
-  static async listInvoices(studentId: number, query: StudentInvoiceListInput) {
+  static async listInvoices(studentId: number, query: StudentInvoiceListInput & { role?: string }) {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 25;
     const skip = (page - 1) * pageSize;
@@ -119,8 +119,19 @@ export class StudentFeesService {
     const order = (query.order ?? 'desc') as 'asc' | 'desc';
 
     const where: Prisma.InvoiceWhereInput = { studentId };
+    const role: string | undefined = (query as any).role;
+
+    // AC-3 (role-aware): STUDENT role must NEVER see UNPAID invoices, even when explicitly requested.
+    if (role === 'STUDENT') {
+      where.status = query.status && query.status !== 'UNPAID'
+        ? (query.status as any)
+        : { not: 'UNPAID' } as any;
+    } else {
+      // ADMIN / BURSARY: UNPAID allowed via explicit query only; default hides UNPAID
+      // to avoid presenting legacy debt as current KPI.
+      if (query.status) where.status = query.status as any;
+    }
     if (query.session) where.session = query.session;
-    if (query.status) where.status = query.status as any;
     if (query.feeId) where.feeId = query.feeId;
     if (query.dateFrom || query.dateTo) {
       where.createdAt = {};

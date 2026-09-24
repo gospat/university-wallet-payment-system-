@@ -96,29 +96,34 @@ const FeeFormModal: React.FC<{
           <input required className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="2025/2026" value={form.academicSession} onChange={(e) => setForm((f) => ({ ...f, academicSession: e.target.value }))} pattern="^\d{4}\/\d{4}$" disabled={kind === 'edit'} />
         </Field>
         <Field label={t.fieldCollege}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.college ?? ''} onChange={(e) => setForm((f) => ({ ...f, college: e.target.value || undefined }))} />
+          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank — visible to all students" value={form.college ?? ''} onChange={(e) => setForm((f) => ({ ...f, college: e.target.value || undefined }))} />
         </Field>
         <Field label={t.fieldDepartment}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.department ?? ''} onChange={(e) => setForm((f) => ({ ...f, department: e.target.value || undefined }))} />
+          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank — visible to all students" value={form.department ?? ''} onChange={(e) => setForm((f) => ({ ...f, department: e.target.value || undefined }))} />
         </Field>
         <Field label={t.fieldProgram}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.program ?? ''} onChange={(e) => setForm((f) => ({ ...f, program: e.target.value || undefined }))} />
+          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank — visible to all students" value={form.program ?? ''} onChange={(e) => setForm((f) => ({ ...f, program: e.target.value || undefined }))} />
         </Field>
         <Field label={t.fieldLevel}>
-          <input type="number" min={100} step={100} className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="100, 200, 300" value={form.level ?? ''} onChange={(e) => setForm((f) => ({ ...f, level: e.target.value ? Number(e.target.value) : undefined }))} />
+          <input type="number" min={100} step={100} className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank → all levels (e.g. 100, 200)" value={form.level ?? ''} onChange={(e) => setForm((f) => ({ ...f, level: e.target.value ? Number(e.target.value) : undefined }))} />
         </Field>
         <Field label={t.fieldStudentType}>
           <select className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.studentType ?? ''} onChange={(e) => setForm((f) => ({ ...f, studentType: e.target.value || undefined }))}>
-            <option value="">{adminFees.common.all}</option>
+            <option value="">{adminFees.common.all} (visible to every student)</option>
             {Object.keys(studentTypes).map((s) => <option key={s} value={s}>{(studentTypes as any)[s] ?? s}</option>)}
           </select>
         </Field>
         <Field label={t.fieldSemester}>
           <select className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.semester ?? ''} onChange={(e) => setForm((f) => ({ ...f, semester: e.target.value || undefined }))}>
-            <option value="">{adminFees.common.all}</option>
+            <option value="">{adminFees.common.all} semesters</option>
             {Object.keys(semesterLabels).map((s) => <option key={s} value={s}>{(semesterLabels as any)[s] ?? s}</option>)}
           </select>
         </Field>
+        <div className="md:col-span-2">
+          <div className="rounded-md border border-blue-100 bg-blue-50 text-blue-800 px-3 py-2 text-xs font-medium">
+            💡 Scope filters narrow which students see this fee in their catalogue. You do <strong>NOT</strong> need to create an Assignment to publish this fee — saving it makes it visible immediately to matching (or all) students.
+          </div>
+        </div>
         <Field label={t.fieldAmount}>
           <input required type="number" min={0} step="0.01" className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.amount as any} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} disabled={frozen} />
         </Field>
@@ -260,7 +265,7 @@ const AssignmentWizardModal: React.FC<{
   const tC = adminFees.common;
   const [state, setState] = useState<AssignmentWizardState>({ step: 1 });
   const [force, setForce] = useState(false);
-  const [generateNow, setGenerateNow] = useState(true);
+  const [generateNow, setGenerateNow] = useState(false);
   const [result, setResult] = useState<GenerateResp | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -411,13 +416,18 @@ const AssignmentWizardModal: React.FC<{
             <input type="checkbox" checked={!!state.isActive} onChange={(e) => set({ isActive: e.target.checked })} />
             {adminFees.common.active}
           </label>
-          <div className="pt-4 border-t border-gray-100 space-y-2">
+          <div className="pt-4 border-t border-gray-100 space-y-3">
             {!initial && (
               <>
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={generateNow} onChange={(e) => setGenerateNow(e.target.checked)} />
-                  <span>{t.generateCta.replace(' Save & ', '')} immediately after saving</span>
-                </label>
+                <div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={generateNow} onChange={(e) => setGenerateNow(e.target.checked)} />
+                    <span className="font-medium">{t.generateCta.replace(' Save & ', '')} immediately after saving</span>
+                  </label>
+                  <div className="mt-2 ml-6 rounded-md border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2 text-xs">
+                    ⚠️ <strong>Not recommended for the default a-la-carte flow.</strong> Generating now creates UNPAID invoice rows for every matching student upfront. Use this <em>only</em> if you specifically want to track pre-issued invoices per student (e.g. legacy debt rollover). Otherwise, simply save the assignment — students will self-select from the catalogue when they're ready to pay.
+                  </div>
+                </div>
                 <label className="flex items-start gap-2 text-sm">
                   <input className="mt-0.5" type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
                   <div>

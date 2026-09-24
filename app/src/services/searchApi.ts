@@ -8,6 +8,7 @@ export interface SearchStudentRow {
   matricNumber?: string | null;
   email: string;
   totalOutstanding?: number | string | null;
+  totalPaid?: number | string | null;
 }
 
 export interface SearchPaymentRow {

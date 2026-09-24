@@ -322,7 +322,7 @@ const App: React.FC = () => {
                         <div className="mt-10 bg-white border border-gray-200 rounded-2xl p-6 text-sm text-gray-700 space-y-2">
                           <p><span className="font-semibold">Active role:</span> {normalized}</p>
                           <p><span className="font-semibold">User permissions granted:</span> {(permissions[normalized] ?? []).length}</p>
-                          <p><span className="font-semibold">Nav counter badges:</span> 3 outstanding invoices · 5 pending refunds · 2 failed webhooks · 12 pending payments today</p>
+                          <p><span className="font-semibold">Nav counter badges:</span> 5 pending refunds · 2 failed webhooks · 12 successful payments today</p>
                           <p><span className="font-semibold">Global search shown?</span> {showGlobalSearch ? 'Yes (Admin/Bursary top bar)' : 'No (Student)'}</p>
                         </div>
                       </div>
