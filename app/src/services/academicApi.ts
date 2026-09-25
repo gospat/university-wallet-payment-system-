@@ -1,4 +1,66 @@
-import api from './api';
+import api, { API_BASE_URL } from './api';
+
+export type AcademicBulkKind = 'college' | 'department' | 'programme';
+
+export interface BulkRowError {
+  row: number;
+  record: string;
+  message: string;
+}
+
+export interface BulkImportResult {
+  created: number;
+  skipped: number;
+  errors: BulkRowError[];
+  ids: number[];
+  createdItems: Array<{ id: number; code: string; name: string }>;
+  errorsCsvUrl?: string | null;
+}
+
+const pluralKind: Record<AcademicBulkKind, string> = {
+  college: 'faculties',
+  department: 'departments',
+  programme: 'programmes',
+};
+
+export const templateDownloadUrl = (kind: AcademicBulkKind): string => {
+  const token = localStorage.getItem('token') ?? '';
+  return `${API_BASE_URL}/academic/${pluralKind[kind]}/template.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+};
+
+export const templateDownloadXlsxUrl = (kind: AcademicBulkKind): string => {
+  const token = localStorage.getItem('token') ?? '';
+  return `${API_BASE_URL}/academic/${pluralKind[kind]}/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+};
+
+export const facultiesTemplateXlsxUrl = (): string => {
+  const token = localStorage.getItem('token') ?? '';
+  return `${API_BASE_URL}/academic/faculties/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+};
+
+export const departmentsTemplateXlsxUrl = (): string => {
+  const token = localStorage.getItem('token') ?? '';
+  return `${API_BASE_URL}/academic/departments/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+};
+
+export const programmesTemplateXlsxUrl = (): string => {
+  const token = localStorage.getItem('token') ?? '';
+  return `${API_BASE_URL}/academic/programmes/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+};
+
+export const bulkImport = async (
+  kind: AcademicBulkKind,
+  file: File
+): Promise<BulkImportResult> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await api.post<{ data: BulkImportResult }>(
+    `/academic/${pluralKind[kind]}/bulk-import`,
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  );
+  return res.data?.data ?? ({} as BulkImportResult);
+};
 
 export interface FacultyOut {
   id: number;
@@ -44,9 +106,9 @@ export interface LevelOut {
   code: string;
   level: number;
   description?: string | null;
-  programmeId: number;
-  programme?: ProgrammeOut;
-  departmentId?: number;
+  programmeId?: number | null;
+  programme?: ProgrammeOut | null;
+  departmentId?: number | null;
   isActive: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -115,8 +177,8 @@ export interface CreateLevelInput {
   name: string;
   code: string;
   level: number;
-  programmeId: number;
-  departmentId?: number;
+  programmeId?: number | null;
+  departmentId?: number | null;
   description?: string;
   isActive?: boolean;
 }
@@ -134,23 +196,78 @@ export interface CreateSessionInput {
 
 export interface UpdateSessionInput extends Partial<CreateSessionInput> {}
 
+type BackendListResult<T> = {
+  rows: T[];
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrev: boolean;
+};
+
 const list = async <T>(path: string, params?: ListQueryParams): Promise<ListResponse<T>> => {
-  const res = await api.get<{ data: ListResponse<T> }>(path, { params });
-  return res.data.data;
+  const res = await api.get<{ data: BackendListResult<T> }>(path, { params });
+  const raw = res.data.data ?? {} as BackendListResult<T>;
+  const page = Number(params?.page) || 1;
+  const pageSize = Number(params?.pageSize) || 50;
+  return {
+    items: Array.isArray(raw.rows) ? raw.rows : [],
+    total: Number(raw.total) || 0,
+    page,
+    pageSize,
+    totalPages: Number(raw.totalPages) || Math.max(1, Math.ceil((Number(raw.total) || 0) / pageSize)),
+  };
 };
 
-const create = async <TIn, TOut>(path: string, data: TIn): Promise<TOut> => {
-  const res = await api.post<{ data: TOut }>(path, data);
-  return res.data.data;
+const unwrapEnvelope = <TOut>(payload: any): TOut => {
+  if (!payload) return payload as TOut;
+  const keys = ['faculty', 'department', 'programme', 'level', 'session', 'academicSession'];
+  for (const k of keys) {
+    if (typeof payload === 'object' && payload !== null && payload[k] !== undefined) {
+      return payload[k] as TOut;
+    }
+  }
+  return payload as TOut;
 };
 
-const update = async <TIn, TOut>(path: string, id: number, data: TIn): Promise<TOut> => {
-  const res = await api.patch<{ data: TOut }>(`${path}/${id}`, data);
-  return res.data.data;
+function sanitizeAcademicBody<T extends Record<string, any>>(body: T): T {
+  const out: any = { ...body };
+  for (const k of Object.keys(out)) {
+    if (typeof out[k] === 'string' && out[k].trim() === '') {
+      delete out[k];
+    }
+  }
+  for (const numKey of ['facultyId', 'departmentId', 'programmeId', 'level', 'durationYears'] as const) {
+    if (out[numKey] === '' || out[numKey] === null || out[numKey] === undefined) {
+      delete out[numKey];
+    } else if (typeof out[numKey] === 'string') {
+      const parsed = Number(out[numKey]);
+      if (isNaN(parsed) || parsed <= 0) {
+        delete out[numKey];
+      } else {
+        out[numKey] = parsed;
+      }
+    }
+  }
+  return out as T;
+}
+
+const create = async <TIn extends Record<string, any>, TOut>(path: string, data: TIn): Promise<TOut> => {
+  const res = await api.post<{ data: any }>(path, sanitizeAcademicBody(data));
+  return unwrapEnvelope<TOut>(res.data.data);
+};
+
+const update = async <TIn extends Record<string, any>, TOut>(path: string, id: number, data: TIn): Promise<TOut> => {
+  const res = await api.patch<{ data: any }>(`${path}/${id}`, sanitizeAcademicBody(data));
+  return unwrapEnvelope<TOut>(res.data.data);
 };
 
 const deactivate = async (path: string, id: number): Promise<void> => {
   await api.post(`${path}/${id}/deactivate`);
+};
+
+const remove = async (path: string, id: number): Promise<{ deleted: { id: number; name?: string | null; code?: string | null } }> => {
+  const res = await api.delete<{ data: any }>(`${path}/${id}`);
+  return (res.data?.data ?? { deleted: null }) as any;
 };
 
 export const facultiesApi = {
@@ -158,6 +275,7 @@ export const facultiesApi = {
   create: (data: CreateFacultyInput) => create<CreateFacultyInput, FacultyOut>('/academic/faculties', data),
   update: (id: number, data: UpdateFacultyInput) => update<UpdateFacultyInput, FacultyOut>('/academic/faculties', id, data),
   deactivate: (id: number) => deactivate('/academic/faculties', id),
+  remove: (id: number) => remove('/academic/faculties', id),
 };
 
 export const departmentsApi = {
@@ -165,6 +283,7 @@ export const departmentsApi = {
   create: (data: CreateDepartmentInput) => create<CreateDepartmentInput, DepartmentOut>('/academic/departments', data),
   update: (id: number, data: UpdateDepartmentInput) => update<UpdateDepartmentInput, DepartmentOut>('/academic/departments', id, data),
   deactivate: (id: number) => deactivate('/academic/departments', id),
+  remove: (id: number) => remove('/academic/departments', id),
 };
 
 export const programmesApi = {
@@ -172,6 +291,7 @@ export const programmesApi = {
   create: (data: CreateProgrammeInput) => create<CreateProgrammeInput, ProgrammeOut>('/academic/programmes', data),
   update: (id: number, data: UpdateProgrammeInput) => update<UpdateProgrammeInput, ProgrammeOut>('/academic/programmes', id, data),
   deactivate: (id: number) => deactivate('/academic/programmes', id),
+  remove: (id: number) => remove('/academic/programmes', id),
 };
 
 export const levelsApi = {

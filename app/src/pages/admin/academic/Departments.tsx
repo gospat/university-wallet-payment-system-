@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pencil, Ban, Plus, Search } from 'lucide-react';
+import { Pencil, Ban, Plus, Trash2, Search, Download, UploadCloud } from 'lucide-react';
 import PortalShell from '../../../components/PortalShell';
 import ConfirmAction from '../../../components/ConfirmAction';
 import Modal from '../../../components/Modal';
 import { useAuth } from '../../../context/AuthContext';
-import { departmentsApi, DepartmentOut, CreateDepartmentInput, UpdateDepartmentInput, facultiesApi, FacultyOut } from '../../../services/academicApi';
+import { departmentsApi, DepartmentOut, CreateDepartmentInput, UpdateDepartmentInput, facultiesApi, FacultyOut, templateDownloadUrl, departmentsTemplateXlsxUrl, BulkImportResult } from '../../../services/academicApi';
+import BulkImportModal from '../../../components/academic/BulkImportModal';
 import { navCounters, NavCounters } from '../../../services/api';
 import { i18n } from '../../../i18n/en';
 
@@ -37,6 +38,8 @@ type ConfirmState = {
   resourceLabel: string;
   onConfirm: (payload: { reason?: string }) => Promise<void> | void;
   loading: boolean;
+  confirmLabel: string;
+  confirmVariant: 'danger' | 'warning' | 'primary';
 };
 
 const DepartmentsPage: React.FC = () => {
@@ -65,8 +68,11 @@ const DepartmentsPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
 
   const [confirm, setConfirm] = useState<ConfirmState>({
-    isOpen: false, title: '', description: '', resourceLabel: '', onConfirm: () => {}, loading: false,
+    isOpen: false, title: '', description: '', resourceLabel: '', onConfirm: () => {}, loading: false, confirmLabel: 'Confirm', confirmVariant: 'danger',
   });
+
+  const portalRole: 'ADMIN' | 'BURSARY' = user?.role === 'BURSARY' ? 'BURSARY' : 'ADMIN';
+  const canWrite = portalRole === 'ADMIN';
 
   const loadFaculties = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -96,6 +102,33 @@ const DepartmentsPage: React.FC = () => {
   }, [page, pageSize, q]);
 
   useEffect(() => { load(); loadFaculties(); }, [load, loadFaculties]);
+
+  const [bulkModal, setBulkModal] = useState(false);
+
+  const handleBulkSuccess = (_r: BulkImportResult) => {
+    load();
+    loadFaculties();
+  };
+
+  const doDownloadTemplate = () => {
+    const directUrl = templateDownloadUrl('department');
+    const a = document.createElement('a');
+    a.href = directUrl;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const doDownloadTemplateXlsx = () => {
+    const directUrl = departmentsTemplateXlsxUrl();
+    const a = document.createElement('a');
+    a.href = directUrl;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
 
   const openCreate = () => {
     setForm({ name: '', code: '', facultyId: faculties[0]?.id ? String(faculties[0].id) : '', description: '', isActive: true });
@@ -133,6 +166,13 @@ const DepartmentsPage: React.FC = () => {
       }
       setModal({ open: false, kind: 'create' });
       load();
+    } catch (e: any) {
+      setAlert({
+        isOpen: true,
+        type: 'error',
+        title: modal.kind === 'create' ? 'Could not create department' : 'Could not update department',
+        message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+      });
     } finally {
       setSubmitting(false);
     }
@@ -145,6 +185,8 @@ const DepartmentsPage: React.FC = () => {
       description: 'This will deactivate this department. Active children that reference it (if any) will prevent deactivation.',
       resourceLabel: `Department: ${d.name} (${d.code})`,
       loading: false,
+      confirmLabel: 'Deactivate',
+      confirmVariant: 'danger',
       onConfirm: async () => {
         setConfirm((c) => ({ ...c, loading: true }));
         try {
@@ -153,7 +195,40 @@ const DepartmentsPage: React.FC = () => {
           load();
         } catch (e: any) {
           setConfirm((c) => ({ ...c, loading: false }));
-          throw e;
+          setAlert({
+            isOpen: true,
+            type: 'error',
+            title: 'Could not deactivate department',
+            message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+          });
+        }
+      },
+    });
+  };
+
+  const openDelete = (d: DepartmentOut) => {
+    setConfirm({
+      isOpen: true,
+      title: 'Delete Department (permanent)',
+      description: 'This will PERMANENTLY delete this department and all of its structure/history. It CANNOT be undone. If any programmes, students, or fees still reference this department, you will see a detailed error telling you exactly what must be removed first. To keep history and preserve references, use Deactivate (soft-delete) instead.',
+      resourceLabel: `Department: ${d.name} (${d.code})`,
+      loading: false,
+      confirmLabel: 'Delete',
+      confirmVariant: 'danger',
+      onConfirm: async () => {
+        setConfirm((c) => ({ ...c, loading: true }));
+        try {
+          await departmentsApi.remove(d.id);
+          setConfirm((c) => ({ ...c, isOpen: false, loading: false }));
+          load();
+        } catch (e: any) {
+          setConfirm((c) => ({ ...c, loading: false }));
+          setAlert({
+            isOpen: true,
+            type: 'error',
+            title: 'Could not delete department',
+            message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+          });
         }
       },
     });
@@ -166,14 +241,39 @@ const DepartmentsPage: React.FC = () => {
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Departments</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage academic departments within faculties.</p>
+          <p className="text-sm text-gray-500 mt-1">Manage academic departments within colleges. Bursary role has read-only access.</p>
         </div>
-        <button
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm"
-        >
-          <Plus className="h-4 w-4" /> Create Department
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {canWrite && (
+            <>
+              <button
+                onClick={doDownloadTemplate}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 rounded-lg font-medium text-sm"
+              >
+                <Download className="h-4 w-4" /> Download CSV Template
+              </button>
+              <button
+                onClick={doDownloadTemplateXlsx}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-green-300 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg font-medium text-sm"
+              >
+                📗 Download .XLSX Template (2 sheets)
+              </button>
+              <button
+                onClick={() => setBulkModal(true)}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-lg font-medium text-sm"
+              >
+                <UploadCloud className="h-4 w-4" /> Upload CSV / Excel
+              </button>
+            </>
+          )}
+          <button
+            onClick={openCreate}
+            disabled={!canWrite}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Plus className="h-4 w-4" /> Create Department
+          </button>
+        </div>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-2xl p-4">
@@ -197,7 +297,7 @@ const DepartmentsPage: React.FC = () => {
               <tr>
                 <th className="px-4 py-3 text-left font-semibold text-gray-700">Name</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-700">Code</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">Faculty</th>
+                <th className="px-4 py-3 text-left font-semibold text-gray-700">College</th>
                 <th className="px-4 py-3 text-center font-semibold text-gray-700">IsActive</th>
                 <th className="px-4 py-3 text-right font-semibold text-gray-700">Actions</th>
               </tr>
@@ -230,6 +330,12 @@ const DepartmentsPage: React.FC = () => {
                       >
                         <Ban className="h-3.5 w-3.5" /> Deactivate
                       </button>
+                      <button
+                        onClick={() => openDelete(d)}
+                        className="inline-flex items-center gap-1 text-red-700 hover:text-red-900 px-2 py-1 rounded bg-red-50 hover:bg-red-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Delete
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -261,9 +367,9 @@ const DepartmentsPage: React.FC = () => {
         }
       >
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Field label="Faculty">
+          <Field label="College">
             <select className={inputCls} value={form.facultyId} onChange={(e) => setForm({ ...form, facultyId: e.target.value })}>
-              <option value="">Select faculty…</option>
+              <option value="">Select college…</option>
               {faculties.map((f) => <option key={f.id} value={String(f.id)}>{f.code} — {f.name}</option>)}
             </select>
           </Field>
@@ -296,8 +402,8 @@ const DepartmentsPage: React.FC = () => {
         description={confirm.description}
         resourceLabel={confirm.resourceLabel}
         reasonRequired={false}
-        confirmVariant="danger"
-        confirmLabel="Deactivate"
+        confirmVariant={confirm.confirmVariant}
+        confirmLabel={confirm.confirmLabel}
         loading={confirm.loading}
       />
 
@@ -316,13 +422,22 @@ const DepartmentsPage: React.FC = () => {
       >
         <p className="text-gray-700 whitespace-pre-wrap break-words select-text text-sm">{alert.message}</p>
       </Modal>
+
+      <BulkImportModal
+        kind="department"
+        isOpen={bulkModal}
+        onClose={() => setBulkModal(false)}
+        onSuccess={handleBulkSuccess}
+      />
     </div>
   );
 
+  const activePathPrefix = portalRole === 'BURSARY' ? '/bursary' : '/admin';
+
   return (
     <PortalShell
-      role="ADMIN"
-      activePath="/admin/academic/departments"
+      role={portalRole}
+      activePath={`${activePathPrefix}/academic/departments`}
       brand={brand}
       userText={userText}
       userEmail={user?.email}

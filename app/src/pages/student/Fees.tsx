@@ -1,8 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import {
+  Bolt,
+  LayoutGrid,
+  UserCheck,
+  AlertTriangle,
+  CheckCircle2,
+  Sparkles,
+  CalendarClock,
+  DollarSign,
+  Receipt as ReceiptIcon,
+} from 'lucide-react';
 import { i18n, statusLabels, semesterLabels } from '../../i18n/en';
 import PortalShell from '../../components/PortalShell';
 import TxnDetailsDrawer from '../../components/TxnDetailsDrawer';
+import HostedCheckoutModal from '../../components/HostedCheckoutModal';
 import { useAuth } from '../../context/AuthContext';
 import studentFeeApi, {
   type CatalogueFee,
@@ -144,6 +156,19 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
 
   useEffect(() => { load(); }, [load]);
 
+  const assignedFees = useMemo<CatalogueFee[]>(
+    () => (resp?.fees ?? []).filter((f) => !!f._isDirectBill),
+    [resp?.fees],
+  );
+  const catalogueFees = useMemo<CatalogueFee[]>(
+    () => (resp?.fees ?? []).filter((f) => !f._isDirectBill),
+    [resp?.fees],
+  );
+  const assignedTotal = useMemo(
+    () => assignedFees.reduce((s, f) => s + Number(f.amount ?? 0), 0),
+    [assignedFees],
+  );
+
   const goConfirm = useCallback(async (fee: CatalogueFee) => {
     setBusyFeeId(fee.id);
     setToast(null);
@@ -160,105 +185,312 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
   const totalPages = resp ? Math.max(1, Math.ceil(resp.total / pageSize)) : 1;
 
   return (
-    <section className="space-y-6">
-      {/* Intro / filters */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">Available Payments</h2>
-            <p className="text-sm text-slate-500 mt-1">
-              Pick the fee applicable to you and click <b>Pay Now</b>. Newly created fees by the Bursary appear here automatically.
-            </p>
+    <section className="space-y-8">
+      {toast && (
+        <div className={`rounded-xl px-4 py-3 text-sm ${toast.kind === 'ok' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+          {toast.text}
+        </div>
+      )}
+
+      {/* ==============================================================
+           SECTION 1 / 2  —  PERSONAL ASSIGNED BILLS (TOP, PROMINENT)
+           Direct bills only. Physically separate from Catalogue fees.
+           ============================================================== */}
+      <div className="bg-white rounded-2xl shadow-md border-2 border-indigo-200 overflow-hidden">
+        {/* Header banner */}
+        <div className="px-6 py-5 bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 text-white relative">
+          <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_top_right,_rgba(255,255,255,0.35),_transparent_60%)]" />
+          <div className="relative flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-12 h-12 shrink-0 rounded-xl bg-white/15 border border-white/25 backdrop-blur flex items-center justify-center">
+                <Bolt className="w-6 h-6 text-yellow-200" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-xl font-extrabold tracking-tight">
+                    Bills Assigned to You
+                  </h2>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/20 border border-white/30 text-[11px] font-black uppercase tracking-wider backdrop-blur">
+                    <UserCheck className="w-3 h-3" />
+                    {assignedFees.length} Direct {assignedFees.length === 1 ? 'Bill' : 'Bills'}
+                  </span>
+                  {assignedFees.length > 0 && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-400/25 border border-amber-300/40 text-[11px] font-extrabold uppercase tracking-wider text-amber-50">
+                      <DollarSign className="w-3 h-3" />
+                      Total: {formatNgn(assignedTotal)}
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm text-indigo-100 mt-1 leading-relaxed">
+                  <strong className="text-white font-semibold">Do these first.</strong> These are bills issued to <em>you personally</em> by the Bursary or Admin (fines, targeted levies, acceptance fees). Paying any other fee below does NOT count as these.
+                </p>
+              </div>
+            </div>
+            {onNavigateHistory && (
+              <button
+                onClick={onNavigateHistory}
+                className="self-start sm:self-center shrink-0 inline-flex items-center gap-2 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 backdrop-blur text-white text-sm font-semibold px-4 py-2 transition"
+              >
+                <ReceiptIcon className="w-4 h-4" />
+                View Payment History
+              </button>
+            )}
           </div>
-          {onNavigateHistory && (
-            <button
-              onClick={onNavigateHistory}
-              className="self-start sm:self-end inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-semibold px-3.5 py-2 shadow-sm"
-            >
-              View Payment History
-            </button>
-          )}
         </div>
 
-        {toast && (
-          <div className={`rounded-lg px-4 py-3 text-sm ${toast.kind === 'ok' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
-            {toast.text}
+        {/* Loading state */}
+        {loading && (
+          <div className="px-6 py-12 text-sm text-indigo-300 flex items-center justify-center gap-2">
+            <div className="w-4 h-4 rounded-full border-2 border-indigo-300 border-t-transparent animate-spin" />
+            Loading your assigned bills…
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
-          <div className="md:col-span-2">
-            <label className="block text-xs text-slate-600 font-semibold mb-1">Search</label>
-            <input
-              value={q}
-              onChange={(e) => { setQ(e.target.value); setPage(1); }}
-              placeholder="Search by name, code…"
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0a3d91]/20 focus:border-[#0a3d91]"
-            />
+        {/* Error state */}
+        {!loading && error && (
+          <div className="mx-6 my-6 rounded-xl border border-red-200 bg-red-50 text-red-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
+            <span>{error}</span>
+            <button onClick={load} className="font-medium underline-offset-2 hover:underline whitespace-nowrap">Retry</button>
           </div>
-          <div>
-            <label className="block text-xs text-slate-600 font-semibold mb-1">Session</label>
-            <select
-              value={session}
-              onChange={(e) => { setSession(e.target.value); setPage(1); }}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-            >
-              <option value="">All Sessions</option>
-              {sessions.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+        )}
+
+        {/* EMPTY assigned bills state — friendly "nothing urgent" card */}
+        {!loading && !error && assignedFees.length === 0 && (
+          <div className="px-6 py-10 sm:px-10 sm:py-14 text-center">
+            <div className="mx-auto w-20 h-20 rounded-2xl bg-emerald-50 border-2 border-emerald-100 flex items-center justify-center mb-5">
+              <CheckCircle2 className="w-10 h-10 text-emerald-600" />
+            </div>
+            <h3 className="text-lg font-extrabold text-slate-900 mb-1">
+              No personal bills assigned right now
+            </h3>
+            <p className="text-sm text-slate-500 max-w-md mx-auto leading-relaxed">
+              Nothing urgent from the Bursary. If a fine or targeted levy is issued for your account, it will appear here <strong>above the fold</strong> with a bright banner, so you can't miss it.
+            </p>
           </div>
-          <div>
-            <label className="block text-xs text-slate-600 font-semibold mb-1">Category</label>
-            <select
-              value={category}
-              onChange={(e) => { setCategory(e.target.value); setPage(1); }}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-            >
-              <option value="">All Categories</option>
-              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+        )}
+
+        {/* Assigned bills list — WIDER 1/2-column layout, big cards, huge CTA */}
+        {!loading && !error && assignedFees.length > 0 && (
+          <div className="px-6 pb-6 pt-5 space-y-4">
+            {assignedFees.map((fee) => {
+              const categoryText = (fee.category?.name || fee.category?.code || 'DIRECT BILL').toString().toUpperCase();
+              const semesterText = fee.semester ? (semesterLabels as any)[fee.semester] || fee.semester : null;
+              const deadlinePassed = fee.paymentDeadline ? new Date(fee.paymentDeadline).getTime() < Date.now() : false;
+              const amount = Number(fee.amount ?? 0);
+              const busy = busyFeeId === fee.id;
+              return (
+                <article
+                  key={`direct-${fee.id}`}
+                  className="relative rounded-2xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/60 via-white to-white shadow-sm hover:shadow-lg hover:border-indigo-300 transition-all overflow-hidden"
+                >
+                  <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-gradient-to-b from-indigo-500 via-violet-500 to-fuchsia-500" />
+                  <div className="px-6 py-5 pl-8 grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+                    <div className="lg:col-span-5 space-y-1.5 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-fuchsia-100 text-fuchsia-800 ring-1 ring-fuchsia-200 text-[10px] font-black uppercase tracking-widest">
+                          <Bolt className="w-3 h-3" /> Direct Bill
+                        </span>
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ring-1 ${feeBadgeClass(categoryText)}`}>
+                          {categoryText.length > 24 ? categoryText.slice(0, 24) : categoryText}
+                        </span>
+                      </div>
+                      <div className="font-extrabold text-lg text-slate-900 leading-tight">{fee.name ?? '—'}</div>
+                      {fee.feeCode && (
+                        <div className="text-xs text-slate-500 font-mono">{fee.feeCode}</div>
+                      )}
+                      {fee.assignedBy && (
+                        <div className="text-[12px] text-indigo-700/80 mt-1 font-medium">
+                          Assigned by <span className="font-bold">
+                            {[fee.assignedBy.firstName, fee.assignedBy.lastName].filter(Boolean).join(' ').trim() || fee.assignedBy.email || 'Bursary'}
+                          </span>
+                        </div>
+                      )}
+                      {fee.noteToStudent && (
+                        <div className="text-[12px] text-amber-800 mt-1 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 leading-relaxed">
+                          💬 <strong>Note:</strong> {fee.noteToStudent}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="lg:col-span-5 grid grid-cols-2 md:grid-cols-3 gap-x-5 gap-y-2.5">
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 mb-0.5">Amount Due</div>
+                        <div className="text-xl leading-tight font-black text-indigo-700 tabular-nums">{formatNgn(amount)}</div>
+                      </div>
+                      {fee.academicSession && (
+                        <div>
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Session</div>
+                          <div className="text-sm font-semibold text-slate-800">{fee.academicSession}</div>
+                        </div>
+                      )}
+                      {semesterText && (
+                        <div>
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Semester</div>
+                          <div className="text-sm font-semibold text-slate-800">{semesterText}</div>
+                        </div>
+                      )}
+                      {fee.paymentDeadline && (
+                        <div className="col-span-2 md:col-span-3">
+                          <div className={`flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider mb-0.5 ${deadlinePassed ? 'text-red-500' : 'text-slate-400'}`}>
+                            <CalendarClock className="w-3 h-3" />
+                            {deadlinePassed ? 'Deadline Passed' : 'Payment Deadline'}
+                          </div>
+                          <div className={`text-sm font-bold ${deadlinePassed ? 'text-red-700' : 'text-slate-800'}`}>
+                            {formatDate(fee.paymentDeadline)}
+                            {deadlinePassed && (
+                              <span className="ml-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-red-100 text-red-700 ring-1 ring-red-200 text-[10px] font-black uppercase tracking-wider">
+                                <AlertTriangle className="w-2.5 h-2.5" /> Overdue
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="lg:col-span-2">
+                      <button
+                        disabled={busy}
+                        onClick={() => goConfirm(fee)}
+                        className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3.5 text-sm font-extrabold shadow-md transition-all ${
+                          busy
+                            ? 'bg-slate-300 text-slate-600 cursor-wait'
+                            : 'bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 hover:from-indigo-700 hover:via-violet-700 hover:to-fuchsia-700 text-white hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0'
+                        }`}
+                      >
+                        {busy ? (
+                          <>Preparing payment…</>
+                        ) : (
+                          <>
+                            <Sparkles className="w-4 h-4" />
+                            PAY ASSIGNED BILL →
+                          </>
+                        )}
+                      </button>
+                      <div className="mt-2 text-center text-[10px] text-indigo-500 font-bold uppercase tracking-wider">
+                        Settles the bill above only
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
           </div>
-          <div>
-            <label className="block text-xs text-slate-600 font-semibold mb-1">Semester</label>
-            <select
-              value={semester}
-              onChange={(e) => { setSemester(e.target.value as any); setPage(1); }}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-            >
-              <option value="">All</option>
-              <option value="FIRST">First Semester</option>
-              <option value="SECOND">Second Semester</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={sort ?? 'createdAt'}
-              onChange={(e) => setSort(e.target.value as any)}
-              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
-            >
-              <option value="createdAt">Newest</option>
-              <option value="name">Name</option>
-              <option value="feeCode">Code</option>
-              <option value="academicSession">Session</option>
-              <option value="amount">Amount</option>
-            </select>
-            <button
-              onClick={() => setOrder(order === 'asc' ? 'desc' : 'asc')}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              title={order === 'asc' ? 'Ascending' : 'Descending'}
-            >
-              {order === 'asc' ? '↑' : '↓'}
-            </button>
+        )}
+      </div>
+
+      {/* ==============================================================
+           SECTION 2 / 2  —  GENERAL SCHOOL FEE CATALOGUE (BOTTOM)
+           NOT direct bills. Always shown BELOW assigned bills so students
+           can NEVER mistake them for personal bills.
+           ============================================================== */}
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        {/* Header */}
+        <div className="px-6 py-4.5 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-11 h-11 shrink-0 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center">
+                <LayoutGrid className="w-5 h-5 text-slate-700" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-base font-extrabold tracking-tight text-slate-900">
+                    General School Fees — Catalogue
+                  </h2>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 ring-1 ring-slate-200 text-[10px] font-semibold uppercase tracking-wider">
+                    Optional · Pick what applies
+                  </span>
+                  {!loading && resp && (
+                    <span className="text-xs text-slate-500 tabular-nums">
+                      <b className="text-slate-700 font-bold">{catalogueFees.length}</b> general fees
+                      {resp.total > catalogueFees.length ? ` · ${resp.total - assignedFees.length} paginated` : ''}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  These are standard school fees <strong>available to all students</strong>. Select the ones that apply to you — e.g., tuition, ID card, convocation, hostel.
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center justify-between text-xs text-slate-500">
+        {/* FILTERS BAR — only applies to CATALOGUE section */}
+        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70">
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+            <div className="md:col-span-2">
+              <label className="block text-[11px] text-slate-600 font-bold uppercase tracking-wide mb-1">Search catalogue</label>
+              <input
+                value={q}
+                onChange={(e) => { setQ(e.target.value); setPage(1); }}
+                placeholder="Search by name, code…"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400/30 focus:border-slate-400"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-600 font-bold uppercase tracking-wide mb-1">Session</label>
+              <select
+                value={session}
+                onChange={(e) => { setSession(e.target.value); setPage(1); }}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+              >
+                <option value="">All Sessions</option>
+                {sessions.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-600 font-bold uppercase tracking-wide mb-1">Category</label>
+              <select
+                value={category}
+                onChange={(e) => { setCategory(e.target.value); setPage(1); }}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+              >
+                <option value="">All Categories</option>
+                {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-600 font-bold uppercase tracking-wide mb-1">Semester</label>
+              <select
+                value={semester}
+                onChange={(e) => { setSemester(e.target.value as any); setPage(1); }}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+              >
+                <option value="">All</option>
+                <option value="FIRST">First Semester</option>
+                <option value="SECOND">Second Semester</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={sort ?? 'createdAt'}
+                onChange={(e) => setSort(e.target.value as any)}
+                className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
+              >
+                <option value="createdAt">Newest</option>
+                <option value="name">Name</option>
+                <option value="feeCode">Code</option>
+                <option value="academicSession">Session</option>
+                <option value="amount">Amount</option>
+              </select>
+              <button
+                onClick={() => setOrder(order === 'asc' ? 'desc' : 'asc')}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-100"
+                title={order === 'asc' ? 'Ascending' : 'Descending'}
+              >
+                {order === 'asc' ? '↑' : '↓'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Catalogue counter bar */}
+        <div className="px-6 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-slate-500 border-b border-slate-100">
           <span>
-            {resp ? <b className="text-slate-700">{resp.total}</b> : '—'} fees available
-            {resp && resp.fees.length > 0 ? ` · showing ${(resp.page - 1) * resp.pageSize + 1}–${Math.min(resp.page * resp.pageSize, resp.total)}` : ''}
+            {resp ? <b className="text-slate-700 font-bold">{catalogueFees.length}</b> : '—'} general fees loaded
+            {resp && catalogueFees.length > 0 ? ` · page ${(resp.page - 1) * resp.pageSize + 1}–${Math.min(resp.page * resp.pageSize, resp.total - assignedFees.length)}` : ''}
           </span>
           <div className="flex items-center gap-2">
-            <span>Page size</span>
+            <span className="font-bold uppercase tracking-wide">Page size</span>
             <select
               value={pageSize}
               onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
@@ -268,169 +500,138 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
             </select>
           </div>
         </div>
-      </div>
 
-      {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 text-red-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
-          <span>{error}</span>
-          <button onClick={load} className="font-medium underline-offset-2 hover:underline">Retry</button>
-        </div>
-      )}
+        {error && (
+          <div className="mx-6 my-6 rounded-xl border border-red-200 bg-red-50 text-red-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
+            <span>{error}</span>
+            <button onClick={load} className="font-medium underline-offset-2 hover:underline">Retry</button>
+          </div>
+        )}
 
-      {!loading && !error && resp && resp.fees.length === 0 && (
-        <div className="rounded-2xl bg-white border border-slate-200 p-12 text-center text-slate-500">
-          No fees available. Check back later or adjust the filters.
-        </div>
-      )}
+        {loading && !resp && (
+          <div className="px-6 py-12 text-sm text-slate-400 flex items-center justify-center gap-2">
+            <div className="w-4 h-4 rounded-full border-2 border-slate-300 border-t-transparent animate-spin" />
+            Loading catalogue…
+          </div>
+        )}
 
-      {/* Fee Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
-        {resp?.fees.map((fee) => {
-          const categoryText = (fee.category?.name || fee.category?.code || 'OTHER').toString().toUpperCase();
-          const semesterText = fee.semester ? (semesterLabels as any)[fee.semester] || fee.semester : null;
-          const deadlinePassed = fee.paymentDeadline ? new Date(fee.paymentDeadline).getTime() < Date.now() : false;
-          const amount = Number(fee.amount ?? 0);
-          const busy = busyFeeId === fee.id;
-          const isDirect = !!fee._isDirectBill;
-          return (
-            <article
-              key={fee.id}
-              className={`rounded-2xl shadow-sm border overflow-hidden hover:shadow-md transition-all flex flex-col ${
-                isDirect
-                  ? 'bg-white border-indigo-200 hover:border-indigo-400/60 ring-1 ring-indigo-50'
-                  : 'bg-white border-slate-200 hover:border-[#0a3d91]/30'
-              }`}
-            >
-              {isDirect && (
-                <div className="px-5 py-1.5 bg-gradient-to-r from-indigo-600 via-indigo-500 to-rose-500 text-white text-[10px] font-black uppercase tracking-[0.18em] flex items-center justify-between">
-                  <span className="inline-flex items-center gap-1.5">
-                    ⚡ Assigned to you
-                  </span>
-                  <span className="opacity-80">Direct Bill</span>
-                </div>
-              )}
-              <div className="px-5 py-4 border-b border-slate-100 bg-gradient-to-br from-slate-50 via-white to-white flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="font-bold text-slate-900 truncate" title={fee.name ?? ''}>{fee.name ?? '—'}</div>
-                  {fee.feeCode && (
-                    <div className="text-xs text-slate-500 mt-1 font-mono truncate">{fee.feeCode}</div>
-                  )}
-                  {isDirect && fee.assignedBy && (
-                    <div className="text-[11px] text-indigo-600/90 mt-1.5 font-medium">
-                      Assigned by{' '}
-                      <span className="font-semibold">
-                        {[fee.assignedBy.firstName, fee.assignedBy.lastName].filter(Boolean).join(' ').trim() || fee.assignedBy.email || 'Bursary'}
+        {!loading && !error && catalogueFees.length === 0 && resp && (
+          <div className="rounded-b-2xl bg-white p-12 text-center text-slate-500">
+            <div className="mx-auto w-16 h-16 rounded-2xl bg-slate-100 border border-slate-200 flex items-center justify-center mb-4">
+              <LayoutGrid className="w-8 h-8 text-slate-400" />
+            </div>
+            <div className="font-bold text-slate-700">No general fees match your filters</div>
+            <div className="text-sm mt-1">Try clearing the search or adjusting filters above.</div>
+          </div>
+        )}
+
+        {/* Catalogue grid compact 4-col, muted styling, "Pay This Fee" label (NOT assigned) */}
+        {catalogueFees.length > 0 && (
+          <div className="px-6 py-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+              {catalogueFees.map((fee) => {
+                const categoryText = (fee.category?.name || fee.category?.code || 'OTHER').toString().toUpperCase();
+                const semesterText = fee.semester ? (semesterLabels as any)[fee.semester] || fee.semester : null;
+                const deadlinePassed = fee.paymentDeadline ? new Date(fee.paymentDeadline).getTime() < Date.now() : false;
+                const amount = Number(fee.amount ?? 0);
+                const busy = busyFeeId === fee.id;
+                return (
+                  <article
+                    key={`cat-${fee.id}`}
+                    className="rounded-2xl shadow-sm border border-slate-200 bg-white hover:shadow-md hover:border-slate-300 transition-all flex flex-col overflow-hidden"
+                  >
+                    <div className="px-4 py-3 border-b border-slate-100 bg-gradient-to-br from-slate-50/60 via-white to-white flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-bold text-[14px] text-slate-900 leading-snug truncate" title={fee.name ?? ''}>
+                          {fee.name ?? '—'}
+                        </div>
+                        {fee.feeCode && (
+                          <div className="text-[11px] text-slate-500 font-mono mt-0.5 truncate">{fee.feeCode}</div>
+                        )}
+                      </div>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ring-1 shrink-0 ${feeBadgeClass(categoryText)}`}>
+                        {categoryText.length > 16 ? categoryText.slice(0, 16) : categoryText}
                       </span>
                     </div>
-                  )}
-                </div>
-                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ring-1 shrink-0 ${feeBadgeClass(categoryText)}`}>
-                  {categoryText.length > 20 ? categoryText.slice(0, 20) : categoryText}
-                </span>
-              </div>
 
-              <div className="px-5 py-4 space-y-2 text-sm flex-1">
-                <div className="flex items-start justify-between gap-3">
-                  <span className={`font-medium ${isDirect ? 'text-indigo-600/80' : 'text-slate-500'}`}>
-                    Amount{isDirect && <span className="ml-1 text-[10px] uppercase tracking-wider font-black">(Assigned)</span>}
-                  </span>
-                  <span className={`tabular-nums text-base leading-6 font-black ${isDirect ? 'text-indigo-700' : 'text-slate-900'}`}>{formatNgn(amount)}</span>
-                </div>
-                {fee.academicSession && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 font-medium">Session</span>
-                    <span className="text-slate-800 font-semibold">{fee.academicSession}</span>
-                  </div>
-                )}
-                {semesterText && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 font-medium">Semester</span>
-                    <span className="text-slate-800 font-semibold">{semesterText}</span>
-                  </div>
-                )}
-                {fee.level && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 font-medium">Level</span>
-                    <span className="text-slate-800 font-semibold">{fee.level} Level</span>
-                  </div>
-                )}
-                {fee.program && (
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-slate-500 font-medium">Programme</span>
-                    <span className="text-slate-800 font-semibold text-right truncate">{fee.program}</span>
-                  </div>
-                )}
-                {fee.college && (
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-slate-500 font-medium">Faculty</span>
-                    <span className="text-slate-800 font-semibold text-right truncate">{fee.college}</span>
-                  </div>
-                )}
-                {fee.department && (
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-slate-500 font-medium">Department</span>
-                    <span className="text-slate-800 font-semibold text-right truncate">{fee.department}</span>
-                  </div>
-                )}
-                {fee.paymentDeadline && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 font-medium">Deadline</span>
-                    <span className={`font-semibold ${deadlinePassed ? 'text-red-700' : 'text-slate-800'}`}>
-                      {formatDate(fee.paymentDeadline)}
-                    </span>
-                  </div>
-                )}
-              </div>
+                    <div className="px-4 py-3.5 space-y-1.5 text-[12.5px] flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500 font-semibold">Amount</span>
+                        <span className="tabular-nums text-[15px] leading-none font-black text-slate-900">{formatNgn(amount)}</span>
+                      </div>
+                      {fee.academicSession && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500 font-semibold">Session</span>
+                          <span className="text-slate-800 font-bold">{fee.academicSession}</span>
+                        </div>
+                      )}
+                      {semesterText && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500 font-semibold">Semester</span>
+                          <span className="text-slate-800 font-bold">{semesterText}</span>
+                        </div>
+                      )}
+                      {fee.paymentDeadline && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500 font-semibold">Deadline</span>
+                          <span className={`font-bold ${deadlinePassed ? 'text-red-700' : 'text-slate-800'}`}>
+                            {formatDate(fee.paymentDeadline)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
 
-              <div className={`px-5 py-3.5 border-t ${isDirect ? 'border-indigo-100 bg-indigo-50/40' : 'border-slate-100 bg-slate-50/60'}`}>
-                <button
-                  disabled={busy}
-                  onClick={() => goConfirm(fee)}
-                  className={`inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-bold shadow-sm transition-colors ${
-                    busy
-                      ? 'bg-slate-300 text-slate-600 cursor-wait'
-                      : isDirect
-                        ? 'bg-gradient-to-r from-indigo-600 to-rose-600 hover:from-indigo-700 hover:to-rose-700 text-white'
-                        : 'bg-[#0a3d91] hover:bg-[#0b46a8] text-white'
-                  }`}
-                >
-                  {busy ? (
-                    <>Preparing payment…</>
-                  ) : isDirect ? (
-                    <>⚡ PAY ASSIGNED BILL →</>
-                  ) : (
-                    <>PAY NOW →</>
-                  )}
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-
-      {/* Pagination */}
-      {resp && resp.total > 0 && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div className="text-sm text-slate-600">
-            Page <b className="text-slate-800">{page}</b> of <b className="text-slate-800">{totalPages}</b>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page <= 1}
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium disabled:opacity-40 hover:bg-slate-50"
-            >Previous</button>
-            <div className="text-sm tabular-nums text-slate-600 min-w-[80px] text-center">
-              {page} / {totalPages}
+                    <div className="px-4 py-3 border-t border-slate-100 bg-slate-50/60">
+                      <button
+                        disabled={busy}
+                        onClick={() => goConfirm(fee)}
+                        className={`inline-flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-extrabold shadow-sm transition-colors ${
+                          busy
+                            ? 'bg-slate-300 text-slate-600 cursor-wait'
+                            : 'bg-[#0a3d91] hover:bg-[#0b46a8] text-white'
+                        }`}
+                      >
+                        {busy ? (
+                          <>Preparing…</>
+                        ) : (
+                          <>
+                            <DollarSign className="w-3.5 h-3.5" />
+                            PAY THIS FEE →
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages}
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium disabled:opacity-40 hover:bg-slate-50"
-            >Next</button>
           </div>
-        </div>
-      )}
+        )}
+
+        {/* Pagination — counts catalogue only (not assigned bills) */}
+        {resp && resp.total - assignedFees.length > 0 && catalogueFees.length > 0 && (
+          <div className="border-t border-slate-200 bg-white p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-b-2xl">
+            <div className="text-sm text-slate-600">
+              Catalogue page <b className="text-slate-800 font-bold">{page}</b> of <b className="text-slate-800 font-bold">{totalPages}</b>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold disabled:opacity-40 hover:bg-slate-50"
+              >← Previous</button>
+              <div className="text-sm tabular-nums text-slate-600 min-w-[80px] text-center font-bold">
+                {page} / {totalPages}
+              </div>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold disabled:opacity-40 hover:bg-slate-50"
+              >Next →</button>
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 };
@@ -735,6 +936,12 @@ const InvoiceDetailPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'info' });
   const { user, logout } = useAuth();
+  const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
+  const [checkoutModalUrl, setCheckoutModalUrl] = useState('');
+  const [checkoutModalRef, setCheckoutModalRef] = useState<string | undefined>(undefined);
+  const [checkoutModalAmount, setCheckoutModalAmount] = useState<number | undefined>(undefined);
+  const [checkoutModalInvoiceId, setCheckoutModalInvoiceId] = useState<number | string | undefined>(undefined);
+  const [checkoutModalGateway, setCheckoutModalGateway] = useState<string | undefined>(undefined);
 
   const invoiceId = id ? Number(id) : null;
 
@@ -774,12 +981,19 @@ const InvoiceDetailPage: React.FC = () => {
         email: user?.email ?? '',
         idempotencyKey: `INVDTL-${iid}-${Date.now()}`,
       });
+      const initData = (init as any)?.data ?? init;
+      const gl = initData?.gateway_label ?? initData?.gatewayLabel ?? undefined;
       const url = (init as any)?.authorization_url || (init as any)?.data?.authorization_url || '';
+      const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
       if (typeof url === 'string' && url.startsWith('http')) {
-        window.location.href = url;
+        setCheckoutModalUrl(url);
+        setCheckoutModalRef(ref || undefined);
+        setCheckoutModalAmount(Number(pay.amountToPay ?? 0));
+        setCheckoutModalInvoiceId(iid);
+        setCheckoutModalGateway(gl);
+        setCheckoutModalOpen(true);
         return;
       }
-      const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
       if (ref) {
         navigate(`/student/payments/callback/${encodeURIComponent(ref)}`);
         return;
@@ -906,6 +1120,23 @@ const InvoiceDetailPage: React.FC = () => {
       <Modal isOpen={alert.isOpen} title={alert.title} onClose={() => setAlert({ ...alert, isOpen: false })}>
         <p className="text-sm text-gray-800">{alert.message}</p>
       </Modal>
+      <HostedCheckoutModal
+        isOpen={checkoutModalOpen}
+        onClose={() => setCheckoutModalOpen(false)}
+        checkoutUrl={checkoutModalUrl}
+        gatewayLabel={checkoutModalGateway}
+        invoiceId={checkoutModalInvoiceId}
+        amount={checkoutModalAmount}
+        reference={checkoutModalRef}
+        onSuccessNavigate={() => {
+          const ref = checkoutModalRef;
+          if (ref) {
+            navigate(`/student/payments/callback/${encodeURIComponent(ref)}`);
+          } else {
+            navigate('/student/invoices');
+          }
+        }}
+      />
     </PortalShell>
   );
 };

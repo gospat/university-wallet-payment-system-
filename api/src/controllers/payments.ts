@@ -19,7 +19,7 @@ export const initiatePayment = catchAsync(async (req: Request, res: Response) =>
   res.status(200).json({ status: 'success', data: result });
 });
 
-const VerifyParamSchema = z.object({ ref: z.string().min(1).trim() });
+const VerifyParamSchema = z.object({ ref: z.string().min(1).max(255).trim() });
 export const verifyPaymentValidator = [validateParams(VerifyParamSchema)];
 
 export const verifyPayment = catchAsync(async (req: Request, res: Response) => {

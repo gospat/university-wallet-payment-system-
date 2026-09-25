@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, Link, useLocation } from 'react-router-dom';
 import PortalShell from '../../components/PortalShell';
+import HostedCheckoutModal from '../../components/HostedCheckoutModal';
 import { useAuth } from '../../context/AuthContext';
 import { i18n } from '../../i18n/en';
 import { studentFeeApi } from '../../services/studentFees';
@@ -32,6 +33,12 @@ const CheckoutPage: React.FC = () => {
   const [proceeding, setProceeding] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [gatewayLabel, setGatewayLabel] = useState<string | undefined>(undefined);
+  const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
+  const [checkoutModalUrl, setCheckoutModalUrl] = useState('');
+  const [checkoutModalRef, setCheckoutModalRef] = useState<string | undefined>(undefined);
+  const [checkoutModalAmount, setCheckoutModalAmount] = useState<number | undefined>(undefined);
+  const [checkoutModalInvoiceId, setCheckoutModalInvoiceId] = useState<number | string | undefined>(undefined);
+  const [checkoutModalGateway, setCheckoutModalGateway] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     (async () => {
@@ -86,13 +93,23 @@ const CheckoutPage: React.FC = () => {
       const gl = initData?.gateway_label ?? initData?.gatewayLabel ?? undefined;
       if (gl) setGatewayLabel(gl);
       const url = (init as any)?.authorization_url || (init as any)?.data?.authorization_url || '';
-      if (typeof url === 'string' && url.startsWith('http')) {
-        if (typeof window !== 'undefined') {
-          try { window.location.href = url; return; } catch (_) {}
-        }
-      }
       const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
-      navigate(`/student/payments/callback/${encodeURIComponent(ref)}`);
+      if (typeof url === 'string' && url.startsWith('http')) {
+        setCheckoutModalUrl(url);
+        setCheckoutModalRef(ref || undefined);
+        setCheckoutModalAmount(amt);
+        setCheckoutModalInvoiceId(invoiceId);
+        setCheckoutModalGateway(gl);
+        setCheckoutModalOpen(true);
+        setProceeding(false);
+        return;
+      }
+      if (ref) {
+        navigate(`/student/payments/callback/${encodeURIComponent(ref)}`);
+        return;
+      }
+      const fallbackMsg = (init as any)?.message || (init as any)?.data?.message || t.failedInit;
+      setMsg(typeof fallbackMsg === 'string' ? fallbackMsg : t.failedInit);
     } catch (_err: any) {
       const m = _err?.payload?.message || _err?.message || t.failedInit;
       setMsg(typeof m === 'string' ? m : t.failedInit);
@@ -240,6 +257,23 @@ const CheckoutPage: React.FC = () => {
         )}
         </div>
       </div>
+      <HostedCheckoutModal
+        isOpen={checkoutModalOpen}
+        onClose={() => setCheckoutModalOpen(false)}
+        checkoutUrl={checkoutModalUrl}
+        gatewayLabel={checkoutModalGateway}
+        invoiceId={checkoutModalInvoiceId}
+        amount={checkoutModalAmount}
+        reference={checkoutModalRef}
+        onSuccessNavigate={() => {
+          const ref = checkoutModalRef;
+          if (ref) {
+            navigate(`/student/payments/callback/${encodeURIComponent(ref)}`);
+          } else {
+            navigate('/student/invoices');
+          }
+        }}
+      />
     </PortalShell>
   );
 };

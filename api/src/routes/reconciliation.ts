@@ -153,11 +153,11 @@ router.get(
 );
 
 const ReferenceParam = z.object({
-  reference: z.string().min(1).max(200),
+  reference: z.string().min(1).max(200).trim(),
 });
 
 const MarkReconciledBody = z.object({
-  notes: z.string().max(2000).optional(),
+  notes: z.string().max(2000).trim().optional(),
 });
 
 router.post(

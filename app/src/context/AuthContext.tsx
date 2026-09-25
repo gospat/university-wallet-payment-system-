@@ -23,6 +23,7 @@ interface User {
   level?: number | null;
   academicSession?: string | null;
   accountStatus?: 'ACTIVE' | 'SUSPENDED' | 'GRADUATED' | 'WITHDRAWN';
+  mustChangePassword?: boolean | null;
   permissions?: string[];
   createdAt?: string;
   updatedAt?: string;
@@ -33,6 +34,7 @@ interface AuthContextType {
   token: string | null;
   login: (token: string, user: User) => void;
   logout: (reason?: 'SESSION_EXPIRED' | 'LOGOUT' | 'ACCOUNT_INACTIVE') => void;
+  clearMustChangePassword: () => void;
   isAuthenticated: boolean;
   isValidating: boolean;
   authNotice?: string | null;
@@ -201,17 +203,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     []
   );
 
+  const clearMustChangePassword = useCallback(() => {
+    setUser((u) => {
+      if (!u) return u;
+      const next = { ...u, mustChangePassword: false };
+      if (isBrowser) {
+        localStorage.setItem(STORAGE_USER, JSON.stringify(next));
+      }
+      return next;
+    });
+  }, []);
+
   const value = useMemo<AuthContextType>(
     () => ({
       user,
       token,
       login,
       logout,
+      clearMustChangePassword,
       isAuthenticated: !!token,
       isValidating,
       authNotice,
     }),
-    [user, token, login, logout, isValidating, authNotice]
+    [user, token, login, logout, clearMustChangePassword, isValidating, authNotice]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

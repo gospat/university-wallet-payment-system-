@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { UserPlus, ListFilter, RefreshCw, Search, FileText } from 'lucide-react';
+import { UserPlus, ListFilter, RefreshCw, Search, FileText, Pencil, Power, Trash2, X, DollarSign, CalendarClock, AlertCircle, CheckCircle2, Info } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
 import DirectBillForm from '../../components/fees/DirectBillForm';
 import { useAuth } from '../../context/AuthContext';
@@ -72,6 +72,26 @@ const BursaryDirectBillingPage: React.FC<{
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState<FeeAssignmentOut[]>([]);
   const [total, setTotal] = useState(0);
+  const [filterActive, setFilterActive] = useState<boolean | 'all'>(true);
+  const [editingAssignment, setEditingAssignment] = useState<FeeAssignmentOut | null>(null);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editForm, setEditForm] = useState({ overrideAmount: '', overrideDeadline: '', noteToStudent: '' });
+  const [editSaving, setEditSaving] = useState(false);
+
+  function summarizeHttpError(err: any, fallback: string) {
+    const data = (err as any)?.response?.data;
+    const msg = data?.message ?? (typeof err === 'string' ? err : (err as Error)?.message);
+    const details = Array.isArray(data?.details)
+      ? data.details.map((d: any) => typeof d === 'string' ? d : d?.message ?? JSON.stringify(d))
+      : [];
+    return { kind: 'danger' as const, title: msg ?? fallback, details: details.length ? details : undefined, message: undefined };
+  }
+
+  type AlertState = { open: boolean; kind: 'info' | 'success' | 'warn' | 'danger'; title: string; message?: string; details?: string[]; };
+  const [alert, setAlert] = useState<AlertState>({ open: false, kind: 'info', title: '' });
+  const closeAlert = () => setAlert(s => ({ ...s, open: false }));
+  const flashSuccess = (title: string, message?: string) => setAlert({ open: true, kind: 'success', title, message });
+  const flashDanger = (title: string, e: any) => setAlert({ ...summarizeHttpError(e, title), open: true });
 
   const fetchDirectAssignments = useCallback(async () => {
     setLoading(true);
@@ -79,7 +99,7 @@ const BursaryDirectBillingPage: React.FC<{
       const r = await feeApi.listAssignments({
         q: q.trim() || undefined,
         assignmentType: 'STUDENT',
-        isActive: true,
+        isActive: filterActive,
         page,
         pageSize,
       });
@@ -91,7 +111,7 @@ const BursaryDirectBillingPage: React.FC<{
     } finally {
       setLoading(false);
     }
-  }, [q, page, pageSize]);
+  }, [q, page, pageSize, filterActive]);
 
   useEffect(() => {
     if (activeTab === 'assigned') fetchDirectAssignments();
@@ -114,6 +134,101 @@ const BursaryDirectBillingPage: React.FC<{
 
   const amount = (a: FeeAssignmentOut) => a.overrideAmount ?? a.fee?.amount ?? 0;
   const deadline = (a: FeeAssignmentOut) => a.overrideDeadline ?? a.fee?.paymentDeadline;
+
+  const openEditModal = (a: FeeAssignmentOut) => {
+    setEditingAssignment(a);
+    setEditForm({
+      overrideAmount: a.overrideAmount != null ? String(a.overrideAmount) : '',
+      overrideDeadline: a.overrideDeadline ?? '',
+      noteToStudent: a.noteToStudent ?? '',
+    });
+    setEditModalOpen(true);
+  };
+
+  const closeEditModal = () => {
+    setEditModalOpen(false);
+    setEditingAssignment(null);
+    setEditSaving(false);
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAssignment) return;
+    setEditSaving(true);
+    try {
+      if (editForm.overrideAmount.trim() !== '') {
+        const n = Number(editForm.overrideAmount);
+        if (isNaN(n) || n < 0) {
+          flashDanger('Invalid amount', {
+            response: {
+              data: {
+                message: 'Please enter a valid amount (0 or greater), or leave blank to revert to fee template default.',
+              },
+            },
+          });
+          setEditSaving(false);
+          return;
+        }
+      }
+      const body: any = {};
+      if (editForm.overrideAmount.trim() !== '') {
+        body.overrideAmount = Number(editForm.overrideAmount);
+      } else {
+        body.overrideAmount = null;
+      }
+      if (editForm.overrideDeadline) {
+        body.overrideDeadline = editForm.overrideDeadline;
+      } else {
+        body.overrideDeadline = null;
+      }
+      body.noteToStudent = editForm.noteToStudent || null;
+      await feeApi.updateAssignment(editingAssignment.id, body);
+      closeEditModal();
+      flashSuccess('Direct bill updated', 'Amount, deadline and note to student updated successfully.');
+      await fetchDirectAssignments();
+    } catch (e) {
+      flashDanger('Could not save changes to direct bill', e);
+      setEditSaving(false);
+    }
+  };
+
+  const handleToggleActive = async (a: FeeAssignmentOut) => {
+    try {
+      if (a.isActive) {
+        await feeApi.disableAssignment(a.id);
+      } else {
+        await feeApi.enableAssignment(a.id);
+      }
+      await fetchDirectAssignments();
+    } catch (e) {
+      flashDanger('Could not change active status for direct bill', e);
+    }
+  };
+
+  const handleDelete = async (a: FeeAssignmentOut) => {
+    const ok = window.confirm('Cannot be undone. Related UNPAID invoices removed.');
+    if (!ok) return;
+    try {
+      await feeApi.deleteAssignment(a.id);
+      await fetchDirectAssignments();
+    } catch (e) {
+      flashDanger('Could not delete direct bill', e);
+    }
+  };
+
+  const toDateInput = (d: string | null | undefined) => {
+    if (!d) return '';
+    try {
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return '';
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, '0');
+      const day = String(dt.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    } catch {
+      return '';
+    }
+  };
 
   return (
     <PortalShell
@@ -238,7 +353,98 @@ const BursaryDirectBillingPage: React.FC<{
 
         {activeTab === 'assigned' && (
           <div className="space-y-4">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+            {alert.open && (
+              <div className={`rounded-xl border px-4 py-3 shadow-sm ${
+                alert.kind === 'success'
+                  ? 'bg-emerald-50 border-emerald-200'
+                  : alert.kind === 'warn'
+                  ? 'bg-amber-50 border-amber-200'
+                  : alert.kind === 'danger'
+                  ? 'bg-red-50 border-red-200'
+                  : 'bg-slate-50 border-slate-200'
+              }`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    {alert.kind === 'success' ? (
+                      <CheckCircle2 className="h-5 w-5 text-emerald-600 mt-0.5 flex-shrink-0" />
+                    ) : alert.kind === 'warn' ? (
+                      <AlertCircle className="h-5 w-5 text-amber-600 mt-0.5 flex-shrink-0" />
+                    ) : alert.kind === 'danger' ? (
+                      <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    ) : (
+                      <Info className="h-5 w-5 text-slate-600 mt-0.5 flex-shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className={`text-sm font-semibold ${
+                        alert.kind === 'success'
+                          ? 'text-emerald-900'
+                          : alert.kind === 'warn'
+                          ? 'text-amber-900'
+                          : alert.kind === 'danger'
+                          ? 'text-red-900'
+                          : 'text-slate-900'
+                      }`}>
+                        {alert.title}
+                      </p>
+                      {alert.message && (
+                        <p className={`text-xs mt-1 ${
+                          alert.kind === 'success'
+                            ? 'text-emerald-700'
+                            : alert.kind === 'warn'
+                            ? 'text-amber-700'
+                            : alert.kind === 'danger'
+                            ? 'text-red-700'
+                            : 'text-slate-700'
+                        }`}>
+                          {alert.message}
+                        </p>
+                      )}
+                      {alert.details && alert.details.length > 0 && (
+                        <ul className={`text-xs mt-1.5 space-y-0.5 list-disc pl-4 ${
+                          alert.kind === 'danger' ? 'text-red-700' : 'text-slate-700'
+                        }`}>
+                          {alert.details.map((d, i) => (
+                            <li key={i}>{d}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeAlert}
+                    className={`h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 transition-colors ${
+                      alert.kind === 'success'
+                        ? 'text-emerald-600 hover:bg-emerald-100'
+                        : alert.kind === 'warn'
+                        ? 'text-amber-600 hover:bg-amber-100'
+                        : alert.kind === 'danger'
+                        ? 'text-red-600 hover:bg-red-100'
+                        : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+              <div className="md:col-span-1">
+                <label className="text-xs text-gray-600 font-medium block mb-1">Status</label>
+                <select
+                  value={filterActive === 'all' ? 'all' : filterActive ? 'true' : 'false'}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFilterActive(v === 'all' ? 'all' : v === 'true');
+                    setPage(1);
+                  }}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                >
+                  <option value="true">Active only</option>
+                  <option value="false">Inactive only</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
               <div className="md:col-span-2">
                 <label className="text-xs text-gray-600 font-medium block mb-1">Search</label>
                 <div className="relative">
@@ -309,19 +515,20 @@ const BursaryDirectBillingPage: React.FC<{
                       <th className="px-4 py-3 text-center font-medium">Status</th>
                       <th className="px-4 py-3 text-left font-medium">Invoice Ref</th>
                       <th className="px-4 py-3 text-left font-medium">Origin</th>
+                      <th className="px-4 py-3 text-right font-medium">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {loading && (
                       <tr>
-                        <td colSpan={8} className="text-center py-10 text-gray-500">
+                        <td colSpan={9} className="text-center py-10 text-gray-500">
                           Loading direct bills…
                         </td>
                       </tr>
                     )}
                     {!loading && rows.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="text-center py-10 text-gray-500">
+                        <td colSpan={9} className="text-center py-10 text-gray-500">
                           No direct bills yet. Switch to the{' '}
                           <strong>Bill a Student</strong> tab to issue the first one.
                         </td>
@@ -385,6 +592,38 @@ const BursaryDirectBillingPage: React.FC<{
                           </div>
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">{originPill(a)}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(a)}
+                              title="Edit"
+                              className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-indigo-700 hover:bg-indigo-50 border border-transparent hover:border-indigo-200 transition-colors"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleActive(a)}
+                              title={a.isActive ? 'Disable' : 'Enable'}
+                              className={`inline-flex items-center justify-center h-8 w-8 rounded-md border border-transparent transition-colors ${
+                                a.isActive
+                                  ? 'text-amber-700 hover:text-amber-800 hover:bg-amber-50 hover:border-amber-200'
+                                  : 'text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 hover:border-emerald-200'
+                              }`}
+                            >
+                              <Power className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(a)}
+                              title="Delete"
+                              className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -403,6 +642,167 @@ const BursaryDirectBillingPage: React.FC<{
           </div>
         )}
       </div>
+
+      {editModalOpen && editingAssignment && (
+        <div className="fixed inset-0 z-50 p-4 bg-black/40 backdrop-blur-sm flex items-center justify-center">
+          <div className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div className="bg-gradient-to-br from-fuchsia-500 via-indigo-500 to-purple-600 px-5 py-4 flex items-start justify-between text-white">
+              <div className="flex items-start gap-3">
+                <div>
+                  <h2 className="text-2xl font-bold leading-tight">Edit Direct Bill</h2>
+                  <p className="text-xs text-white/80 mt-0.5">
+                    Assignment #{editingAssignment.id} · Change amount, due date, or note for this specific student bill
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-sm bg-white/15 border border-white/20 rounded-full px-2.5 py-1 flex items-center gap-1.5">
+                  <Pencil className="h-3.5 w-3.5" />
+                  Editing
+                </span>
+                <button
+                  type="button"
+                  onClick={closeEditModal}
+                  className="bg-white/10 hover:bg-white/20 rounded-md h-8 w-8 flex items-center justify-center text-white/90 transition-colors"
+                  title="Close"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap bg-gradient-to-r from-indigo-50 via-purple-50 to-fuchsia-50 px-5 py-3 gap-3 items-center border-b border-indigo-100">
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-semibold text-indigo-600 uppercase tracking-wide">Student</div>
+                <div className="text-sm font-bold text-gray-900 truncate">{studentFullName(editingAssignment)}</div>
+                <div className="text-[11px] text-gray-500 font-mono">{editingAssignment.targetStudent?.matricNumber ?? '—'}</div>
+              </div>
+              <div className="w-px h-8 bg-indigo-200/60 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-semibold text-purple-600 uppercase tracking-wide">Fee / Charge</div>
+                <div className="text-sm font-bold text-gray-900 truncate">{editingAssignment.fee?.name ?? `Ad-hoc #${editingAssignment.feeId}`}</div>
+                <div className="text-[11px] text-gray-500 italic font-mono">{editingAssignment.fee?.feeCode ?? editingAssignment.fee?.category?.code ?? '—'}</div>
+              </div>
+              <div className="w-px h-8 bg-indigo-200/60 flex-shrink-0" />
+              <div className="text-right">
+                <div className="text-[11px] font-semibold text-fuchsia-600 uppercase tracking-wide">Currently Charging</div>
+                <div className="inline-block bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white rounded-full px-3 py-1 text-sm font-bold tabular-nums shadow-sm">
+                  ₦ {fmtNgn(amount(editingAssignment))}
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={handleEditSubmit} className="px-5 py-5 space-y-5">
+              <div>
+                <label htmlFor="edit-override-amount" className="block text-xs font-semibold text-gray-700 mb-1.5">
+                  Override Amount (NGN)
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 flex items-center gap-1.5">
+                    <DollarSign className="h-4 w-4" />
+                  </span>
+                  <input
+                    id="edit-override-amount"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={editForm.overrideAmount}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, overrideAmount: e.target.value })
+                    }
+                    placeholder={editingAssignment.fee?.amount != null ? `Default: ${fmtNgn(editingAssignment.fee.amount)}` : 'Leave blank to use default'}
+                    className="w-full rounded-md border border-gray-300 pl-10 pr-3 py-2.5 text-sm tabular-nums focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all"
+                  />
+                </div>
+                <p className="text-[11px] mt-1.5 flex items-start gap-1 text-amber-700 bg-amber-50/60 px-2 py-1.5 rounded border border-amber-100">
+                  <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                  <span>
+                    Editing amount? Leave blank to cancel override → template amount used:{' '}
+                    <strong>{fmtNgn(editingAssignment.fee?.amount)}</strong>.
+                  </span>
+                </p>
+              </div>
+
+              <div>
+                <label htmlFor="edit-override-deadline" className="block text-xs font-semibold text-gray-700 mb-1.5">
+                  Override Deadline
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">
+                    <CalendarClock className="h-4 w-4" />
+                  </span>
+                  <input
+                    id="edit-override-deadline"
+                    type="date"
+                    value={toDateInput(editForm.overrideDeadline)}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, overrideDeadline: e.target.value })
+                    }
+                    className="w-full rounded-md border border-gray-300 pl-10 pr-3 py-2.5 text-sm tabular-nums focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all"
+                  />
+                </div>
+                <p className="text-[11px] mt-1.5 flex items-start gap-1 text-indigo-700 bg-indigo-50/60 px-2 py-1.5 rounded border border-indigo-100">
+                  <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                  <span>
+                    Template default deadline:{' '}
+                    <strong>{fmtDate(editingAssignment.fee?.paymentDeadline)}</strong>. Leave blank to revert to template.
+                  </span>
+                </p>
+              </div>
+
+              <div>
+                <label htmlFor="edit-note-to-student" className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 mb-1.5">
+                  <FileText className="h-3.5 w-3.5 text-gray-500" />
+                  Note to Student
+                </label>
+                <textarea
+                  id="edit-note-to-student"
+                  rows={4}
+                  maxLength={2000}
+                  value={editForm.noteToStudent}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, noteToStudent: e.target.value })
+                  }
+                  placeholder="Optional note visible to the student on this bill…"
+                  className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none transition-all resize-y"
+                />
+                <p className="text-[11px] text-gray-500 mt-1.5 px-2">
+                  Optional. This note appears amber-highlighted on the student's Assigned Bills section (max 2000 chars).
+                </p>
+              </div>
+
+              <div className="px-5 -mx-5 -mb-5 mt-2 py-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs text-gray-500 italic">
+                  <Info className="h-3.5 w-3.5 flex-shrink-0" />
+                  <span>Changes are immediately reflected on the student bill list.</span>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    type="button"
+                    onClick={closeEditModal}
+                    disabled={editSaving}
+                    className="px-4 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors font-medium"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={editSaving}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+                  >
+                    {editSaving ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Pencil className="h-4 w-4" />
+                    )}
+                    {editSaving ? 'Saving…' : 'Save Changes'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </PortalShell>
   );
 };

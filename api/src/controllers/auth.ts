@@ -6,22 +6,61 @@ import { validateBody } from '../middlewares/validate';
 import { reqIp, reqUa } from '../utils/http';
 
 export const signup = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  const { user, token } = await AuthService.signup(req.body);
+  const { user, token, accessToken, refreshToken, expiresInMs } = await AuthService.signup(req.body);
 
   res.status(201).json({
     status: 'success',
     token,
+    accessToken,
+    refreshToken,
+    expiresInMs,
     data: { user },
   });
 });
 
 export const login = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  const { user, token } = await AuthService.login(req.body, reqIp(req), reqUa(req));
+  const { user, token, accessToken, refreshToken, expiresInMs } = await AuthService.login(req.body, reqIp(req), reqUa(req));
 
   res.status(200).json({
     status: 'success',
     token,
+    accessToken,
+    refreshToken,
+    expiresInMs,
     data: { user },
+  });
+});
+
+const refreshSchema = z.object({
+  refreshToken: z.string().min(1).max(2000).trim(),
+});
+
+export const refresh = [
+  validateBody(refreshSchema),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    const { user, accessToken, refreshToken, expiresInMs } = await AuthService.refreshSession(
+      req.body.refreshToken,
+      reqIp(req),
+      reqUa(req)
+    );
+
+    res.status(200).json({
+      status: 'success',
+      token: accessToken,
+      accessToken,
+      refreshToken,
+      expiresInMs,
+      data: { user },
+    });
+  }),
+];
+
+export const logoutAll = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user) return next();
+  await AuthService.revokeAll(req.user.id);
+  res.status(200).json({
+    status: 'success',
+    message: 'All sessions have been logged out.',
   });
 });
 
@@ -35,8 +74,8 @@ export const me = catchAsync(async (req: Request, res: Response, next: NextFunct
 });
 
 const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1).max(128),
-  newPassword: z.string().min(8).max(128),
+  currentPassword: z.string().min(1).max(128).trim(),
+  newPassword: z.string().min(8).max(128).trim(),
 });
 
 export const changePassword = [

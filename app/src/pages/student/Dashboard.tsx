@@ -213,10 +213,10 @@ const StudentDashboard: React.FC = () => {
       return;
     }
     try {
-      const token = (api.defaults.headers.common as any)?.Authorization || '';
+      const token = localStorage.getItem('token') ?? '';
       const response = await api.get(`/students/receipts/${r.id}/download`, {
         responseType: 'blob',
-        headers: { Accept: 'application/pdf', ...(token ? { Authorization: token } : {}) },
+        headers: { Accept: 'application/pdf', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       });
       const blob = new Blob([response.data], { type: 'application/pdf' });
       const url = window.URL.createObjectURL(blob);

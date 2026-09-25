@@ -76,6 +76,20 @@ type PaymentRow = {
 
 type ListResp = { items: PaymentRow[]; total: number; page: number; pageSize: number; totalPages: number };
 
+function isUserCancelError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message ?? '').trim().toLowerCase();
+  return (
+    err?.code === 'ERR_CANCELED' ||
+    err?.name === 'CanceledError' ||
+    err?.name === 'AbortError' ||
+    msg === 'canceled' ||
+    msg === 'aborted' ||
+    msg === 'aborterror' ||
+    String(err?.code ?? '').toUpperCase() === 'ERR_CANCELED'
+  );
+}
+
 const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userText: string; onLogout: () => void; goBack: () => void; dashboardTo: string }> = ({ role, brand, userText, onLogout, goBack, dashboardTo }) => {
   const { user } = useAuth();
   void user;
@@ -84,6 +98,10 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const baseEndpoint = role === 'ADMIN' ? '/admin/payments' : '/bursary/payments';
   const activePath = `/${role.toLowerCase()}/payments`;
+
+  useEffect(() => {
+    setErrorMsg('');
+  }, []);
 
   useEffect(() => { void navCounters().then(setNavCounts); }, []);
 
@@ -121,7 +139,7 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       }
       loadedOnceRef.current = true;
     } catch (e: any) {
-      if (e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError' || e?.name === 'AbortError') return;
+      if (isUserCancelError(e)) return;
       setErrorMsg(e?.message || 'Failed to load payments');
     } finally {
       setLoading(false);
@@ -155,7 +173,7 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
       })
-      .catch((err) => setErrorMsg(err.message || 'Download failed'));
+      .catch((err) => { if (isUserCancelError(err)) return; setErrorMsg(err.message || 'Download failed'); });
   };
 
   return (

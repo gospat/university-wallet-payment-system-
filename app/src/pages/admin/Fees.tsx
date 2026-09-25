@@ -4,8 +4,9 @@
 // Single shared component AdminFeesPage, mounted for /admin/fees/:tab? and
 // /bursary/fees/:tab? via App.tsx (role-based visibility of mutation buttons).
 // =============================================================================
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { ChevronDown, ChevronUp, FileText, Settings2, Trash2, Power } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
 import Modal from '../../components/Modal';
 import ConfirmAction from '../../components/ConfirmAction';
@@ -33,7 +34,7 @@ import feeApi, {
 } from '../../services/adminFees';
 import MatricStudentInput from '../../components/fees/MatricStudentInput';
 
-type AlertState = { isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info'; };
+type AlertState = { isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info'; details?: string[] | null; };
 
 const fmtNgn = (n: number | string | null | undefined) => {
   const v = Number(n ?? 0);
@@ -70,83 +71,326 @@ const FeeFormModal: React.FC<{
   const t = adminFees.fees;
   const tC = adminFees.common;
   const [form, setForm] = useState<CreateFeeInput>(() => initialToForm(initial));
-  useEffect(() => { if (open) setForm(initialToForm(initial)); }, [open, initial]);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  useEffect(() => { if (open) { setForm(initialToForm(initial)); setShowAdvanced(kind === 'edit'); } }, [open, initial, kind]);
   const title = kind === 'create' ? t.createTitle : initial ? t.editTitle(initial.name) : t.createTitle;
 
+  const previewCode = useMemo(() => {
+    const cat = categories.find((c) => c.id === Number(form.categoryId));
+    const nameSlug = (form.name || 'fee').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toUpperCase().slice(0, 18);
+    const code = (cat?.code || cat?.name || 'FEE').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '-').slice(0, 8);
+    return `FEE-${code}-${nameSlug}`.slice(0, 32);
+  }, [form.name, form.categoryId, categories]);
+
+  const selectedCat = categories.find((c) => c.id === Number(form.categoryId));
+
   return (
-    <Modal isOpen={open} title={title} onClose={onClose} footer={
-      <div className="flex justify-end gap-2">
-        <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-800">{tC.cancel}</button>
-        <button type="submit" form="fee-form" disabled={submitting} className="px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm font-medium">{submitting ? tC.submitting : tC.save}</button>
+    <Modal isOpen={open} title={undefined} size="xl" onClose={onClose} footer={
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 sm:gap-3 pt-1 w-full">
+        <div className="flex items-center gap-2 text-xs text-gray-500 flex-1">
+          <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+          Autosave-ready · {kind === 'create' ? 'creates immediately when you click Create Bill' : 'edits applied on Save'}
+        </div>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={onClose} className="px-5 py-2.5 rounded-lg border border-gray-300 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 shadow-sm transition">{tC.cancel}</button>
+          <button
+            type="submit"
+            form="fee-form"
+            disabled={submitting}
+            className="px-6 py-2.5 rounded-lg bg-gradient-to-br from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-md shadow-indigo-600/20 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition"
+          >
+            {submitting
+              ? <span className="inline-flex items-center gap-2"><span className="h-3.5 w-3.5 rounded-full border-2 border-white/60 border-t-white animate-spin" /> {tC.submitting}</span>
+              : kind === 'create' ? 'Create Bill' : tC.save}
+          </button>
+        </div>
       </div>
     }>
+      {/* --------------------  HEADER  -------------------- */}
+      <div className="-mx-6 -mt-4 mb-5">
+        <div className="bg-gradient-to-r from-indigo-600 via-indigo-600 to-blue-600 text-white rounded-t-2xl px-6 py-4 border-b border-white/10">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="h-12 w-12 shrink-0 rounded-2xl bg-white/15 backdrop-blur border border-white/20 flex items-center justify-center ring-2 ring-white/20 shadow-lg shadow-indigo-900/20">
+                <FileText size={22} strokeWidth={2.2} />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-xl font-semibold leading-tight tracking-tight">{title}</h2>
+                  <span className="inline-flex items-center rounded-full bg-white/15 backdrop-blur px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white/90 border border-white/20">
+                    {kind === 'create' ? 'New bill' : 'Edit'}
+                  </span>
+                </div>
+                <p className="text-[13px] text-white/80 mt-0.5 max-w-2xl leading-relaxed">
+                  {kind === 'create'
+                    ? 'Publish a bill to the catalogue — it appears instantly for matching students to pay.'
+                    : 'Edit the master bill metadata. Amounts and category are frozen once invoices exist.'}
+                </p>
+              </div>
+            </div>
+            <div className="hidden sm:flex flex-col items-end gap-1 text-right">
+              <span className="text-[10px] uppercase tracking-[0.14em] text-white/70 font-bold">Step 1 of 1</span>
+              <span className="text-[11px] text-white/80">Fill basic fields · 3 easy sections</span>
+            </div>
+          </div>
+          <ol className="mt-5 flex items-center gap-2 overflow-x-auto pb-0.5">
+            {[
+              { n: 1, label: 'Bill details', color: 'from-indigo-400 to-blue-300' },
+              { n: 2, label: 'Visibility', color: 'from-indigo-500 to-blue-400' },
+              { n: 3, label: 'Advanced', color: 'from-indigo-500 to-blue-500' },
+            ].map((step, idx) => (
+              <li key={step.n} className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 rounded-full bg-white/10 border border-white/15 px-3 py-1.5">
+                  <span className={`h-6 w-6 shrink-0 rounded-full bg-gradient-to-br ${step.color} flex items-center justify-center text-[11px] font-bold text-indigo-900 shadow-inner shadow-white/30`}>
+                    <span className="bg-white/45 rounded-full h-4 w-4 flex items-center justify-center">{step.n}</span>
+                  </span>
+                  <span className="text-[12px] font-semibold tracking-tight text-white">{step.label}</span>
+                </div>
+                {idx < 2 && <span className="h-[2px] w-6 sm:w-8 mx-1 rounded-full bg-white/20" />}
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
+
       {frozen && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2 text-sm mb-4">{t.versionedWarning}</div>
-      )}
-      <form id="fee-form" onSubmit={(e) => { e.preventDefault(); onSubmit(form); }} className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-        <Field label={t.fieldFeeCode}>
-          <input required className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.feeCode} onChange={(e) => setForm((f) => ({ ...f, feeCode: e.target.value }))} pattern="^[A-Za-z0-9\-_]{2,40}$" disabled={kind === 'edit'} />
-        </Field>
-        <Field label={t.fieldFeeName}>
-          <input required className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-        </Field>
-        <Field label={t.fieldCategory}>
-          <select required className="w-full rounded-md border border-gray-300 px-3 py-2" value={String(form.categoryId)} onChange={(e) => setForm((f) => ({ ...f, categoryId: Number(e.target.value) }))} disabled={frozen}>
-            <option value="">—</option>
-            {categories.map((c) => <option key={c.id} value={c.id}>{c.code} — {c.name}</option>)}
-          </select>
-        </Field>
-        <Field label={t.fieldAcademicSession}>
-          <input required className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="2025/2026" value={form.academicSession} onChange={(e) => setForm((f) => ({ ...f, academicSession: e.target.value }))} pattern="^\d{4}\/\d{4}$" disabled={kind === 'edit'} />
-        </Field>
-        <Field label={t.fieldCollege}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank — visible to all students" value={form.college ?? ''} onChange={(e) => setForm((f) => ({ ...f, college: e.target.value || undefined }))} />
-        </Field>
-        <Field label={t.fieldDepartment}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank — visible to all students" value={form.department ?? ''} onChange={(e) => setForm((f) => ({ ...f, department: e.target.value || undefined }))} />
-        </Field>
-        <Field label={t.fieldProgram}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank — visible to all students" value={form.program ?? ''} onChange={(e) => setForm((f) => ({ ...f, program: e.target.value || undefined }))} />
-        </Field>
-        <Field label={t.fieldLevel}>
-          <input type="number" min={100} step={100} className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="Leave blank → all levels (e.g. 100, 200)" value={form.level ?? ''} onChange={(e) => setForm((f) => ({ ...f, level: e.target.value ? Number(e.target.value) : undefined }))} />
-        </Field>
-        <Field label={t.fieldStudentType}>
-          <select className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.studentType ?? ''} onChange={(e) => setForm((f) => ({ ...f, studentType: e.target.value || undefined }))}>
-            <option value="">{adminFees.common.all} (visible to every student)</option>
-            {Object.keys(studentTypes).map((s) => <option key={s} value={s}>{(studentTypes as any)[s] ?? s}</option>)}
-          </select>
-        </Field>
-        <Field label={t.fieldSemester}>
-          <select className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.semester ?? ''} onChange={(e) => setForm((f) => ({ ...f, semester: e.target.value || undefined }))}>
-            <option value="">{adminFees.common.all} semesters</option>
-            {Object.keys(semesterLabels).map((s) => <option key={s} value={s}>{(semesterLabels as any)[s] ?? s}</option>)}
-          </select>
-        </Field>
-        <div className="md:col-span-2">
-          <div className="rounded-md border border-blue-100 bg-blue-50 text-blue-800 px-3 py-2 text-xs font-medium">
-            💡 Scope filters narrow which students see this fee in their catalogue. You do <strong>NOT</strong> need to create an Assignment to publish this fee — saving it makes it visible immediately to matching (or all) students.
+        <div className="rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50 to-amber-50/50 text-amber-900 px-4 py-3 text-sm mb-5 flex items-start gap-3 shadow-sm">
+          <div className="h-7 w-7 shrink-0 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center text-base">⚠️</div>
+          <div>
+            <div className="font-semibold text-amber-900 text-[13px]">Partially editable</div>
+            <div className="text-[12.5px] text-amber-800 mt-0.5 leading-relaxed">{t.versionedWarning}</div>
           </div>
         </div>
-        <Field label={t.fieldAmount}>
-          <input required type="number" min={0} step="0.01" className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.amount as any} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} disabled={frozen} />
-        </Field>
-        <Field label={t.fieldDeadline}>
-          <input type="date" className="w-full rounded-md border border-gray-300 px-3 py-2" value={toISODate(form.paymentDeadline)} onChange={(e) => setForm((f) => ({ ...f, paymentDeadline: e.target.value || undefined }))} disabled={frozen} />
-        </Field>
-        <Field label={t.fieldDescription} full>
-          <textarea rows={2} className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.description ?? ''} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value || undefined }))} />
-        </Field>
-        <div className="flex items-center gap-4 md:col-span-2">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={!!form.isMandatory} onChange={(e) => setForm((f) => ({ ...f, isMandatory: e.target.checked }))} disabled={frozen} />
-            <span>{t.fieldIsMandatory}</span>
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={!!form.isActive} onChange={(e) => setForm((f) => ({ ...f, isActive: e.target.checked }))} />
-            <span>{t.fieldIsActive}</span>
-          </label>
-        </div>
+      )}
+
+      <form id="fee-form" onSubmit={(e) => { e.preventDefault(); onSubmit(form); }} className="space-y-5 text-sm">
+        {/* --------------------  Section 1: Basics card  -------------------- */}
+        <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between gap-3 bg-gradient-to-br from-gray-50 to-white">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 shrink-0 rounded-lg bg-blue-50 border border-blue-100 text-blue-700 flex items-center justify-center font-bold text-[12px]">01</div>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900 leading-tight">Bill details</h3>
+                <p className="text-[11.5px] text-gray-500 mt-0.5">Core fields students will see first in the catalogue</p>
+              </div>
+            </div>
+            <span className="hidden md:inline-flex items-center rounded-full bg-blue-50 text-blue-700 border border-blue-100 px-2.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider">Required · 4 fields</span>
+          </div>
+          <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+            <Field label={t.fieldFeeName}>
+              <div className="relative">
+                <input
+                  required
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition placeholder:text-gray-400"
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="e.g. Convocation gown"
+                />
+              </div>
+            </Field>
+            <Field label={t.fieldCategory}>
+              <select
+                required
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                value={String(form.categoryId)}
+                onChange={(e) => setForm((f) => ({ ...f, categoryId: Number(e.target.value) }))}
+                disabled={frozen}
+              >
+                <option value="">Select bill category…</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              {selectedCat && (
+                <div className="mt-2 flex items-start gap-2 text-[11.5px]">
+                  <span className="inline-flex items-center rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100 px-1.5 py-0.5 font-mono text-[10.5px] leading-none">{selectedCat.code}</span>
+                  <span className="text-gray-500 leading-snug">{selectedCat.description ? selectedCat.description.slice(0, 100) : 'System category'}</span>
+                </div>
+              )}
+            </Field>
+            <Field label={t.fieldAmount}>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-semibold text-sm select-none">₦</span>
+                <input
+                  required
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  className="w-full rounded-lg border border-gray-300 bg-white pl-8 pr-3 py-2.5 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition placeholder:text-gray-400"
+                  value={form.amount as any}
+                  onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))}
+                  disabled={frozen}
+                  placeholder="0.00"
+                />
+              </div>
+            </Field>
+            <Field label={t.fieldFeeCode}>
+              <div className="relative">
+                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Code</span>
+                </div>
+                <input
+                  className="w-full rounded-lg border border-dashed border-gray-300 bg-gray-50/80 pl-16 pr-28 py-2.5 font-mono text-[13px] text-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 focus:bg-white transition"
+                  placeholder={previewCode}
+                  value={form.feeCode}
+                  onChange={(e) => setForm((f) => ({ ...f, feeCode: e.target.value }))}
+                  pattern="^[A-Za-z0-9\-_]{0,32}$"
+                  disabled={kind === 'edit'}
+                />
+                <div className="absolute inset-y-1.5 right-1.5 my-auto flex items-center">
+                  <span className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-br from-indigo-50 to-blue-50 border border-indigo-100 text-indigo-700 px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wider">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Auto
+                  </span>
+                </div>
+              </div>
+              <p className="mt-2 text-[11.5px] text-gray-500 leading-snug">
+                {kind === 'edit'
+                  ? 'Bill code cannot be changed after creation.'
+                  : 'Leave empty — a friendly code is auto-generated. Override if you need a custom code.'}
+              </p>
+            </Field>
+          </div>
+        </section>
+
+        {/* --------------------  Section 2: Scope card  -------------------- */}
+        <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between gap-3 bg-gradient-to-br from-gray-50 to-white">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 shrink-0 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-[12px]">02</div>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900 leading-tight">Visibility scope</h3>
+                <p className="text-[11.5px] text-gray-500 mt-0.5">Narrow who sees this bill — leave blank for every student</p>
+              </div>
+            </div>
+            <span className="hidden md:inline-flex items-center rounded-full bg-gray-50 text-gray-600 border border-gray-200 px-2.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider">Optional · 5 filters</span>
+          </div>
+          <div className="p-5 space-y-4">
+            <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50 via-blue-50/60 to-white text-indigo-900 px-4 py-3.5 flex items-start gap-3">
+              <div className="h-7 w-7 shrink-0 rounded-md bg-white/90 border border-indigo-100 text-indigo-700 flex items-center justify-center text-base shadow-sm">🎯</div>
+              <div className="text-[12.5px] leading-relaxed">
+                <strong className="font-semibold text-indigo-900">Leave all scope filters blank</strong> to make this bill visible to every student.
+                Use the filters below to narrow it to a specific College, Department, Programme, or Student Type.
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+              <Field label={t.fieldCollege}>
+                <input
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                  placeholder="All colleges"
+                  value={form.college ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, college: e.target.value || undefined }))}
+                />
+              </Field>
+              <Field label={t.fieldDepartment}>
+                <input
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                  placeholder="All departments"
+                  value={form.department ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, department: e.target.value || undefined }))}
+                />
+              </Field>
+              <Field label={t.fieldProgram}>
+                <input
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                  placeholder="All programmes"
+                  value={form.program ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, program: e.target.value || undefined }))}
+                />
+              </Field>
+              <Field label={t.fieldStudentType}>
+                <select
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                  value={form.studentType ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, studentType: e.target.value || undefined }))}
+                >
+                  <option value="">All student types</option>
+                  {Object.keys(studentTypes).map((s) => <option key={s} value={s}>{(studentTypes as any)[s] ?? s}</option>)}
+                </select>
+              </Field>
+              <Field label={t.fieldSemester} full>
+                <select
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                  value={form.semester ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, semester: e.target.value || undefined }))}
+                >
+                  <option value="">All semesters</option>
+                  {Object.keys(semesterLabels).map((s) => <option key={s} value={s}>{(semesterLabels as any)[s] ?? s}</option>)}
+                </select>
+              </Field>
+            </div>
+          </div>
+        </section>
+
+        {/* --------------------  Section 3: Advanced toggle  -------------------- */}
+        <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            className="w-full px-5 py-3.5 flex items-center justify-between hover:bg-gray-50/60 transition"
+          >
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 shrink-0 rounded-lg bg-gradient-to-br from-gray-100 to-gray-50 border border-gray-200 text-gray-700 flex items-center justify-center font-bold text-[12px]">03</div>
+              <div className="flex items-center gap-2.5">
+                <Settings2 size={15} className="text-gray-500" />
+                <div className="text-left">
+                  <h3 className="text-sm font-bold text-gray-900 leading-tight">Advanced settings</h3>
+                  <p className="text-[11.5px] text-gray-500 mt-0.5">Session, description, deadline &amp; flags — tweak when you need precision</p>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="hidden md:inline-flex items-center rounded-full bg-gray-50 text-gray-600 border border-gray-200 px-2.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider">Optional · 6 fields</span>
+              <div className="h-8 w-8 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 flex items-center justify-center">
+                {showAdvanced ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+              </div>
+            </div>
+          </button>
+          {showAdvanced && (
+            <div className="border-t border-gray-100 px-5 py-5 bg-gradient-to-br from-gray-50/40 to-white grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+              <Field label={t.fieldDeadline}>
+                <input
+                  type="date"
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                  value={toISODate(form.paymentDeadline)}
+                  onChange={(e) => setForm((f) => ({ ...f, paymentDeadline: e.target.value || undefined }))}
+                  disabled={frozen}
+                />
+                <p className="mt-2 text-[11.5px] text-gray-500">Catalogue bills are evergreen. Deadlines only apply to direct student bills.</p>
+              </Field>
+              <Field label={t.fieldDescription} full>
+                <textarea
+                  rows={2}
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition resize-none"
+                  placeholder="Optional — explain what the bill covers (e.g. Academic gown + cap + scarf to be collected from faculty office)."
+                  value={form.description ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value || undefined }))}
+                />
+              </Field>
+              <div className="md:col-span-2 rounded-xl border border-gray-200 bg-white px-4 py-3.5 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="flex items-center justify-between gap-3 cursor-pointer rounded-lg border border-transparent hover:border-gray-200 hover:bg-gray-50/60 px-3 py-2.5 transition">
+                  <div className="flex items-center gap-3">
+                    <div className="h-9 w-9 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 flex items-center justify-center text-base">📌</div>
+                    <div className="text-left">
+                      <div className="text-[13px] font-semibold text-gray-900 leading-tight">{t.fieldIsMandatory}</div>
+                      <div className="text-[11.5px] text-gray-500 mt-0.5">Appears in Outstanding bills for matching students</div>
+                    </div>
+                  </div>
+                  <input type="checkbox" checked={!!form.isMandatory} onChange={(e) => setForm((f) => ({ ...f, isMandatory: e.target.checked }))} disabled={frozen} className="h-5 w-5 cursor-pointer rounded-md border-gray-300 text-indigo-600 focus:ring-indigo-500" />
+                </label>
+                <label className="flex items-center justify-between gap-3 cursor-pointer rounded-lg border border-transparent hover:border-gray-200 hover:bg-gray-50/60 px-3 py-2.5 transition">
+                  <div className="flex items-center gap-3">
+                    <div className="h-9 w-9 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-700 flex items-center justify-center text-base">✔️</div>
+                    <div className="text-left">
+                      <div className="text-[13px] font-semibold text-gray-900 leading-tight">{t.fieldIsActive}</div>
+                      <div className="text-[11.5px] text-gray-500 mt-0.5">Untick to hide from catalogue without deleting</div>
+                    </div>
+                  </div>
+                  <input type="checkbox" checked={!!form.isActive} onChange={(e) => setForm((f) => ({ ...f, isActive: e.target.checked }))} className="h-5 w-5 cursor-pointer rounded-md border-gray-300 text-indigo-600 focus:ring-indigo-500" />
+                </label>
+              </div>
+            </div>
+          )}
+        </section>
       </form>
     </Modal>
   );
@@ -157,11 +401,10 @@ const FeeFormModal: React.FC<{
       name: x?.name ?? '',
       description: x?.description ?? undefined,
       categoryId: x?.categoryId ?? (categories[0]?.id ?? 0),
-      academicSession: x?.academicSession ?? '',
+      academicSession: x?.academicSession ?? undefined,
       college: x?.college ?? undefined,
       department: x?.department ?? undefined,
       program: x?.program ?? undefined,
-      level: x?.level ?? undefined,
       studentType: x?.studentType ?? undefined,
       semester: x?.semester ?? undefined,
       isMandatory: x?.isMandatory ?? true,
@@ -178,51 +421,122 @@ const CloneFeeModal: React.FC<{
 }> = ({ open, fee, onClose, submitting, onSubmit }) => {
   const t = adminFees.fees;
   const tC = adminFees.common;
-  const [form, setForm] = useState<CloneFeeInput>({ academicSession: '' });
+  const [form, setForm] = useState<CloneFeeInput>({});
   useEffect(() => {
     if (open && fee) setForm({
-      academicSession: fee.academicSession,
       amount: Number(fee.amount) || undefined,
       college: fee.college ?? undefined,
       department: fee.department ?? undefined,
       program: fee.program ?? undefined,
-      level: fee.level ?? undefined,
       semester: fee.semester ?? undefined,
-      feeCode: '',
-      paymentDeadline: fee.paymentDeadline ?? undefined,
     });
   }, [open, fee]);
   if (!fee) return null;
+  const defaultCodePreview = `${fee.feeCode.slice(0, 22)}-V2`;
   return (
-    <Modal isOpen={open} title={t.cloneTitle(fee.name)} onClose={onClose} footer={
-      <div className="flex justify-end gap-2">
-        <button onClick={onClose} className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-800">{tC.cancel}</button>
-        <button form="clone-form" type="submit" disabled={submitting} className="px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm font-medium">{submitting ? tC.submitting : t.cloneCta}</button>
+    <Modal isOpen={open} title={undefined} size="lg" onClose={onClose} footer={
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 sm:gap-3 pt-1 w-full">
+        <div className="flex items-center gap-2 text-xs text-gray-500 flex-1">
+          <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+          Empty fields auto-fill from the original bill
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-lg border border-gray-300 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 shadow-sm transition">{tC.cancel}</button>
+          <button
+            form="clone-form"
+            type="submit"
+            disabled={submitting}
+            className="px-6 py-2.5 rounded-lg bg-gradient-to-br from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-md shadow-indigo-600/20 transition"
+          >
+            {submitting
+              ? <span className="inline-flex items-center gap-2"><span className="h-3.5 w-3.5 rounded-full border-2 border-white/60 border-t-white animate-spin" /> {tC.submitting}</span>
+              : t.cloneCta}
+          </button>
+        </div>
       </div>
     }>
-      <form id="clone-form" onSubmit={(e) => { e.preventDefault(); onSubmit(form); }} className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-        <Field label={t.cloneFieldSession}>
-          <input required className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder="2026/2027" value={form.academicSession} onChange={(e) => setForm((f) => ({ ...f, academicSession: e.target.value }))} pattern="^\d{4}\/\d{4}$" />
-        </Field>
-        <Field label={t.cloneFieldFeeCode}>
-          <input className="w-full rounded-md border border-gray-300 px-3 py-2" placeholder={`${fee.feeCode}_V2 (auto-generated if blank)`} value={form.feeCode ?? ''} onChange={(e) => setForm((f) => ({ ...f, feeCode: e.target.value || undefined }))} />
-        </Field>
-        <Field label={t.cloneFieldAmount}>
-          <input type="number" min={0} step="0.01" className="w-full rounded-md border border-gray-300 px-3 py-2" value={(form.amount as any) ?? ''} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value ? Number(e.target.value) : undefined }))} />
-        </Field>
-        <Field label={t.cloneFieldDeadline}>
-          <input type="date" className="w-full rounded-md border border-gray-300 px-3 py-2" value={toISODate(form.paymentDeadline)} onChange={(e) => setForm((f) => ({ ...f, paymentDeadline: e.target.value || undefined }))} />
-        </Field>
-        <Field label={t.cloneFieldCollege}><input className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.college ?? ''} onChange={(e) => setForm((f) => ({ ...f, college: e.target.value || undefined }))} /></Field>
-        <Field label={t.cloneFieldDepartment}><input className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.department ?? ''} onChange={(e) => setForm((f) => ({ ...f, department: e.target.value || undefined }))} /></Field>
-        <Field label={t.cloneFieldProgram}><input className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.program ?? ''} onChange={(e) => setForm((f) => ({ ...f, program: e.target.value || undefined }))} /></Field>
-        <Field label={t.cloneFieldLevel}><input type="number" min={100} step={100} className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.level as any ?? ''} onChange={(e) => setForm((f) => ({ ...f, level: e.target.value ? Number(e.target.value) : undefined }))} /></Field>
-        <Field label={t.cloneFieldSemester}>
-          <select className="w-full rounded-md border border-gray-300 px-3 py-2" value={form.semester ?? ''} onChange={(e) => setForm((f) => ({ ...f, semester: e.target.value || undefined }))}>
-            <option value="">Keep original</option>
-            {Object.keys(semesterLabels).map((s) => <option key={s} value={s}>{(semesterLabels as any)[s] ?? s}</option>)}
-          </select>
-        </Field>
+      {/* Header */}
+      <div className="-mx-6 -mt-4 mb-5">
+        <div className="bg-gradient-to-r from-indigo-600 via-indigo-600 to-blue-600 text-white rounded-t-2xl px-6 py-4 border-b border-white/10">
+          <div className="flex items-start gap-3.5">
+            <div className="h-12 w-12 shrink-0 rounded-2xl bg-white/15 backdrop-blur border border-white/20 flex items-center justify-center ring-2 ring-white/20 shadow-lg shadow-indigo-900/20">
+              <ChevronDown size={22} className="-rotate-90" strokeWidth={2.2} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-xl font-semibold leading-tight tracking-tight">{t.cloneTitle(fee.name)}</h2>
+                <span className="inline-flex items-center rounded-full bg-white/15 backdrop-blur px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white/90 border border-white/20">Duplicate</span>
+              </div>
+              <p className="text-[13px] text-white/80 mt-0.5 leading-relaxed">
+                Duplicating <span className="font-semibold">{fee.name}</span> — adjust the options below to tailor the new copy. Empty fields auto-fill from sensible defaults.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Summary row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+        {[
+          { label: 'Amount', value: `₦${Number(fee.amount).toLocaleString()}`, tone: 'from-emerald-50 to-white border-emerald-100 text-emerald-800' },
+          { label: 'Session', value: fee.academicSession, tone: 'from-indigo-50 to-white border-indigo-100 text-indigo-800' },
+          { label: 'Scope', value: fee.college || fee.department || fee.program ? (fee.program || fee.department || fee.college)?.slice(0, 22) || 'All' : 'All students', tone: 'from-blue-50 to-white border-blue-100 text-blue-800' },
+          { label: 'Status', value: fee.isActive ? 'Active' : 'Inactive', tone: `from-${fee.isActive ? 'emerald' : 'slate'}-50 to-white border-${fee.isActive ? 'emerald' : 'slate'}-100 text-${fee.isActive ? 'emerald' : 'slate'}-800` },
+        ].map((s) => (
+          <div key={s.label} className={`rounded-xl border px-3.5 py-2.5 bg-gradient-to-br ${s.tone}`}>
+            <div className="text-[10.5px] uppercase tracking-wider font-semibold opacity-80">{s.label}</div>
+            <div className="text-[13px] font-semibold mt-0.5 leading-tight truncate">{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <form id="clone-form" onSubmit={(e) => { e.preventDefault(); onSubmit(form); }}>
+        <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between gap-3 bg-gradient-to-br from-gray-50 to-white">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 shrink-0 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-[12px]">01</div>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900 leading-tight">Override values</h3>
+                <p className="text-[11.5px] text-gray-500 mt-0.5">Leave blank to inherit from the original bill</p>
+              </div>
+            </div>
+            <span className="hidden md:inline-flex items-center rounded-full bg-gray-50 text-gray-600 border border-gray-200 px-2.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider">All optional</span>
+          </div>
+          <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+            <Field label={t.cloneFieldFeeCode}>
+              <div className="relative">
+                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Code</span>
+                </div>
+                <input className="w-full rounded-lg border border-dashed border-gray-300 bg-gray-50/80 pl-16 pr-28 py-2.5 font-mono text-[13px] text-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 focus:bg-white transition" placeholder={defaultCodePreview} value={form.feeCode ?? ''} onChange={(e) => setForm((f) => ({ ...f, feeCode: e.target.value || undefined }))} />
+                <div className="absolute inset-y-1.5 right-1.5 my-auto flex items-center">
+                  <span className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-br from-indigo-50 to-blue-50 border border-indigo-100 text-indigo-700 px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wider">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> Auto
+                  </span>
+                </div>
+              </div>
+            </Field>
+            <Field label={t.cloneFieldAmount}>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-semibold text-sm select-none">₦</span>
+                <input type="number" min={0} step="0.01" className="w-full rounded-lg border border-gray-300 bg-white pl-8 pr-3 py-2.5 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition placeholder:text-gray-400" value={(form.amount as any) ?? ''} placeholder={`Original: ₦${Number(fee.amount).toLocaleString()}`} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value ? Number(e.target.value) : undefined }))} />
+              </div>
+            </Field>
+            <Field label={t.cloneFieldSemester}>
+              <select className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition" value={form.semester ?? ''} onChange={(e) => setForm((f) => ({ ...f, semester: e.target.value || undefined }))}>
+                <option value="">Keep original ({fee.semester ? (semesterLabels as any)[fee.semester] : 'All'})</option>
+                {Object.keys(semesterLabels).map((s) => <option key={s} value={s}>{(semesterLabels as any)[s] ?? s}</option>)}
+              </select>
+            </Field>
+            <Field label={t.cloneFieldCollege}><input className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition" placeholder={`Keep original: ${fee.college || 'All colleges'}`} value={form.college ?? ''} onChange={(e) => setForm((f) => ({ ...f, college: e.target.value || undefined }))} /></Field>
+            <Field label={t.cloneFieldDepartment}><input className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition" placeholder={`Keep original: ${fee.department || 'All departments'}`} value={form.department ?? ''} onChange={(e) => setForm((f) => ({ ...f, department: e.target.value || undefined }))} /></Field>
+            <Field label={t.cloneFieldProgram}><input className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition" placeholder={`Keep original: ${fee.program || 'All programmes'}`} value={form.program ?? ''} onChange={(e) => setForm((f) => ({ ...f, program: e.target.value || undefined }))} /></Field>
+            <Field label={t.fieldStudentType}><select className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition" value={form.studentType ?? ''} onChange={(e) => setForm((f) => ({ ...f, studentType: e.target.value || undefined }))}>
+              <option value="">{`Keep original: ${fee.studentType ? (studentTypes as any)[fee.studentType] : 'All types'}`}</option>
+              {Object.keys(studentTypes).map((s) => <option key={s} value={s}>{(studentTypes as any)[s] ?? s}</option>)}
+            </select></Field>
+          </div>
+        </section>
       </form>
     </Modal>
   );
@@ -260,7 +574,7 @@ const CategoryModal: React.FC<{
 };
 
 // ---------------- Assignment wizard types ----------------
-type AssignmentWizardState = { step: 1 | 2 | 3 | 4 | 5; } & Partial<CreateAssignmentInput>;
+type AssignmentWizardState = { step: 1 | 2 | 3 | 4 | 5; noteToStudent?: string | null; } & Partial<CreateAssignmentInput>;
 
 // ---------------- Wizard student target: matric input (primary) + numeric studentId fallback ----------------
 const StudentTargetField: React.FC<{
@@ -355,12 +669,12 @@ const AssignmentWizardModal: React.FC<{
         targetProgramme: initial.targetProgramme ?? undefined,
         targetDepartment: initial.targetDepartment ?? undefined,
         targetFaculty: initial.targetFaculty ?? undefined,
-        targetLevel: initial.targetLevel ?? undefined,
         targetSession: initial.targetSession ?? undefined,
         targetStudentType: initial.targetStudentType ?? undefined,
         overrideAmount: initial.overrideAmount ? Number(initial.overrideAmount) : undefined,
         overrideDeadline: initial.overrideDeadline ?? undefined,
         isActive: initial.isActive,
+        noteToStudent: initial.noteToStudent ?? undefined,
       });
       setGenerateNow(false);
     } else setState({ step: 1 });
@@ -372,11 +686,10 @@ const AssignmentWizardModal: React.FC<{
     { value: 'PROGRAMME', label: t.typeProgramme, field: 'targetProgramme', labelFn: () => t.targetLabelProgramme },
     { value: 'DEPARTMENT', label: t.typeDepartment, field: 'targetDepartment', labelFn: () => t.targetLabelDepartment },
     { value: 'FACULTY', label: t.typeFaculty, field: 'targetFaculty', labelFn: () => t.targetLabelFaculty },
-    { value: 'LEVEL', label: t.typeLevel, field: 'targetLevel', labelFn: () => t.targetLabelLevel },
-    { value: 'SESSION', label: t.typeSession, field: 'targetSession', labelFn: () => t.targetLabelSession },
     { value: 'STUDENT_TYPE', label: t.typeStudentType, field: 'targetStudentType', labelFn: () => t.targetLabelStudentType },
   ];
   const type = types.find((x) => x.value === state.assignmentType);
+  const selectedFee = fees.find((f) => f.id === state.feeId);
 
   const set = (patch: Partial<CreateAssignmentInput>) => setState((s) => ({ ...s, ...patch }));
   const goTo = (step: AssignmentWizardState['step']) => setState((s) => ({ ...s, step }));
@@ -386,6 +699,147 @@ const AssignmentWizardModal: React.FC<{
     if (target >= 4 && !state.feeId) return false;
     return true;
   };
+
+  const buildBody = (): CreateAssignmentInput => ({
+    feeId: state.feeId!,
+    assignmentType: state.assignmentType!,
+    targetStudentId: state.targetStudentId,
+    targetProgramme: state.targetProgramme,
+    targetDepartment: state.targetDepartment,
+    targetFaculty: state.targetFaculty,
+    targetSession: state.targetSession,
+    targetStudentType: state.targetStudentType,
+    overrideAmount: state.overrideAmount,
+    overrideDeadline: state.overrideDeadline,
+    isActive: state.isActive ?? true,
+    noteToStudent: state.noteToStudent ?? undefined,
+  });
+
+  const isEditMode = !!initial;
+
+  if (isEditMode) {
+    const targetValue = type ? (state as any)[type.field] ?? '' : '';
+    return (
+      <Modal isOpen={open} title={`Edit Bill Assignment #${initial!.id}`} onClose={onClose} footer={
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 sm:gap-3 pt-1 w-full">
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            Changes apply immediately. Changing amount/deadline affects matching student bill displays.
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="px-5 py-2.5 rounded-lg border border-gray-300 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 shadow-sm transition">{tC.cancel}</button>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={async () => {
+                const body = buildBody();
+                const r = await onSubmit(body, false, false);
+                if (r) setResult(r);
+              }}
+              className="px-6 py-2.5 rounded-lg bg-gradient-to-br from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-md shadow-indigo-600/20 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 transition"
+            >
+              {submitting
+                ? <span className="inline-flex items-center gap-2"><span className="h-3.5 w-3.5 rounded-full border-2 border-white/60 border-t-white animate-spin" /> {tC.submitting}</span>
+                : 'Save changes'}
+            </button>
+          </div>
+        </div>
+      }>
+        <div className="space-y-5 text-sm">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white px-4 py-3">
+              <div className="text-[10.5px] uppercase tracking-wider font-semibold text-gray-500">Type</div>
+              <div className="text-[13px] font-semibold text-gray-900 mt-1 leading-tight">{type?.label ?? state.assignmentType}</div>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white px-4 py-3">
+              <div className="text-[10.5px] uppercase tracking-wider font-semibold text-gray-500">Fee</div>
+              <div className="text-[13px] font-semibold text-gray-900 mt-1 leading-tight truncate">
+                {selectedFee ? `[${selectedFee.feeCode}] ${selectedFee.name}` : '—'}
+              </div>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white px-4 py-3">
+              <div className="text-[10.5px] uppercase tracking-wider font-semibold text-gray-500">Target</div>
+              <div className="text-[13px] font-semibold text-gray-900 mt-1 leading-tight truncate">
+                {type ? `${type.label}=${targetValue}` : '—'}
+              </div>
+            </div>
+          </div>
+
+          {result && (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 text-emerald-900 px-4 py-3 text-sm">
+              {t.generateResult(result.matchingStudents, result.alreadyInvoiced, result.created, result.skipped)}
+            </div>
+          )}
+
+          <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-gray-100 flex items-center gap-3 bg-gradient-to-br from-gray-50 to-white">
+              <div className="h-8 w-8 shrink-0 rounded-lg bg-blue-50 border border-blue-100 text-blue-700 flex items-center justify-center font-bold text-[12px]">01</div>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900 leading-tight">Override settings</h3>
+                <p className="text-[11.5px] text-gray-500 mt-0.5">Adjust per-assignment overrides and status</p>
+              </div>
+            </div>
+            <div className="p-5 space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+                <Field label={t.overrideAmount}>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-semibold text-sm select-none">₦</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      className="w-full rounded-lg border border-gray-300 bg-white pl-8 pr-3 py-2.5 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition placeholder:text-gray-400"
+                      value={(state.overrideAmount as any) ?? ''}
+                      onChange={(e) => set({ overrideAmount: e.target.value ? Number(e.target.value) : undefined })}
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <p className="mt-2 text-[11.5px] text-gray-500 leading-snug">
+                    Leave blank to use the fee template amount: {fmtNgn(selectedFee?.amount)}
+                  </p>
+                </Field>
+                <Field label={t.overrideDeadline}>
+                  <input
+                    type="date"
+                    className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition"
+                    value={toISODate(state.overrideDeadline)}
+                    onChange={(e) => set({ overrideDeadline: e.target.value || undefined })}
+                  />
+                  <p className="mt-2 text-[11.5px] text-gray-500 leading-snug">
+                    Template default: {fmtDate(selectedFee?.paymentDeadline)}. Leave blank to use template.
+                  </p>
+                </Field>
+              </div>
+              <Field label="Note to Student" full>
+                <textarea
+                  rows={3}
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition resize-none"
+                  placeholder="Optional — this note will appear on the generated invoice for the student to see."
+                  value={state.noteToStudent ?? ''}
+                  onChange={(e) => setState((s) => ({ ...s, noteToStudent: e.target.value || undefined }))}
+                />
+              </Field>
+              <label className="flex items-center justify-between gap-3 cursor-pointer rounded-lg border border-transparent hover:border-gray-200 hover:bg-gray-50/60 px-3 py-2.5 transition">
+                <div className="flex items-center gap-3">
+                  <div className="h-9 w-9 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-700 flex items-center justify-center text-base">✔️</div>
+                  <div className="text-left">
+                    <div className="text-[13px] font-semibold text-gray-900 leading-tight">{adminFees.common.active}</div>
+                    <div className="text-[11.5px] text-gray-500 mt-0.5">Untick to disable this assignment without deleting it</div>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={!!state.isActive}
+                  onChange={(e) => set({ isActive: e.target.checked })}
+                  className="h-5 w-5 cursor-pointer rounded-md border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                />
+              </label>
+            </div>
+          </section>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal isOpen={open} title={t.wizardTitle} onClose={onClose} footer={
@@ -400,20 +854,7 @@ const AssignmentWizardModal: React.FC<{
               type="button"
               disabled={submitting}
               onClick={async () => {
-                const body: CreateAssignmentInput = {
-                  feeId: state.feeId!,
-                  assignmentType: state.assignmentType!,
-                  targetStudentId: state.targetStudentId,
-                  targetProgramme: state.targetProgramme,
-                  targetDepartment: state.targetDepartment,
-                  targetFaculty: state.targetFaculty,
-                  targetLevel: state.targetLevel,
-                  targetSession: state.targetSession,
-                  targetStudentType: state.targetStudentType,
-                  overrideAmount: state.overrideAmount,
-                  overrideDeadline: state.overrideDeadline,
-                  isActive: state.isActive ?? true,
-                };
+                const body = buildBody();
                 const r = await onSubmit(body, force, generateNow);
                 if (r) setResult(r);
               }}
@@ -438,7 +879,7 @@ const AssignmentWizardModal: React.FC<{
             <button
               key={ty.value}
               type="button"
-              onClick={() => { set({ assignmentType: ty.value, targetStudentId: undefined, targetProgramme: undefined, targetDepartment: undefined, targetFaculty: undefined, targetLevel: undefined, targetSession: undefined, targetStudentType: undefined }); goTo(2); }}
+              onClick={() => { set({ assignmentType: ty.value, targetStudentId: undefined, targetProgramme: undefined, targetDepartment: undefined, targetFaculty: undefined, targetStudentType: undefined }); goTo(2); }}
               className={`text-left p-3 rounded-md border text-sm ${state.assignmentType === ty.value ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
             >
               <div className="font-medium text-gray-900">{ty.label}</div>
@@ -450,9 +891,7 @@ const AssignmentWizardModal: React.FC<{
 
       {state.step === 2 && type && (
         <div className="space-y-4">
-          {type.field === 'targetLevel' ? (
-            <Field label={type.labelFn()}><input type="number" min={100} step={100} className="w-full rounded-md border border-gray-300 px-3 py-2" value={(state.targetLevel as any) ?? ''} onChange={(e) => set({ targetLevel: e.target.value ? Number(e.target.value) : undefined })} /></Field>
-          ) : type.field === 'targetStudentId' ? (
+          {type.field === 'targetStudentId' ? (
             <StudentTargetField
               state={state}
               set={set}
@@ -603,12 +1042,45 @@ const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
       {err && <div className="rounded-md border border-red-200 bg-red-50 text-red-800 px-4 py-2 text-sm">{err}</div>}
 
       {step === 1 && (
-        <div>
-          <input ref={inputRef} type="file" className="hidden" accept=".csv,.xlsx,.xls" onChange={(e) => { const f = e.target.files?.[0]; if (f) onPickFile(f); }} disabled={!canImport || loading} />
-          <button type="button" disabled={!canImport || loading} onClick={() => inputRef.current?.click()} className="w-full border-2 border-dashed border-gray-300 hover:border-blue-400 rounded-xl py-10 text-sm text-gray-600 disabled:opacity-60">
-            <div className="font-semibold">{t.dropzone}</div>
-            <div className="text-xs text-gray-500 mt-2 max-w-2xl mx-auto">{t.sizeLimit}</div>
-          </button>
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-2">
+                <h3 className="text-sm font-bold text-blue-900">📋 Before you start — Fee bulk import guide</h3>
+                <ul className="text-xs text-blue-800/90 space-y-1 list-disc pl-5 max-w-3xl">
+                  <li><span className="font-semibold">Required columns:</span> feeCode, name, categoryCode, amount.</li>
+                  <li><span className="font-semibold">Optional columns:</span> academicSession, level, collegeCode, departmentCode, programmeCode.</li>
+                  <li>Leave <span className="font-mono">collegeCode / departmentCode / programmeCode</span> EMPTY for a GLOBAL fee (every student sees it).</li>
+                  <li>Scope by College first if you need a Dept/Programme scoped fee (Dept lives under College; Programme lives under Dept).</li>
+                  <li>Match fee categories by <span className="font-mono">categoryCode</span> (TUITION, ACCEPTANCE, LIBRARY, OTHER…) from the Categories tab.</li>
+                  <li>Accepted formats: UTF-8 CSV (.csv) or Excel (.xlsx, .xls). Amounts accept up to 2 decimal places, NGN only.</li>
+                </ul>
+              </div>
+              <div className="shrink-0 flex flex-wrap gap-2">
+                <a
+                  href={feeApi.feesTemplateUrl()}
+                  download
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-blue-300 text-blue-700 hover:bg-blue-100 text-sm font-semibold shadow-sm"
+                >
+                  📄 Download .CSV Template
+                </a>
+                <a
+                  href={feeApi.feesTemplateXlsxUrl()}
+                  download
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-green-50 border border-green-300 text-green-700 hover:bg-green-100 text-sm font-semibold shadow-sm"
+                >
+                  📗 Download .XLSX Template (2 sheets)
+                </a>
+              </div>
+            </div>
+          </div>
+          <div>
+            <input ref={inputRef} type="file" className="hidden" accept=".csv,.xlsx,.xls" onChange={(e) => { const f = e.target.files?.[0]; if (f) onPickFile(f); }} disabled={!canImport || loading} />
+            <button type="button" disabled={!canImport || loading} onClick={() => inputRef.current?.click()} className="w-full border-2 border-dashed border-gray-300 hover:border-blue-400 rounded-xl py-10 text-sm text-gray-600 disabled:opacity-60">
+              <div className="font-semibold">{t.dropzone}</div>
+              <div className="text-xs text-gray-500 mt-2 max-w-2xl mx-auto">{t.sizeLimit}</div>
+            </button>
+          </div>
         </div>
       )}
 
@@ -721,9 +1193,28 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   const resolvedTab: FeeTab = searchTab === 'create' ? 'fees' : (searchTab ?? paramTab ?? initialTab ?? 'fees');
   const [activeTab, setActiveTab] = useState<FeeTab>(resolvedTab);
 
-  const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'info' });
-  const notify = (title: string, message: string, type: AlertState['type'] = 'success') => setAlert({ isOpen: true, title, message, type });
-  const onMutateErr = (prefix: string, err: any) => notify(prefix, err?.message ?? 'An unexpected error occurred.', 'error');
+  const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'info', details: null });
+  const notify = (title: string, message: string, type: AlertState['type'] = 'success', details?: string[] | null) => setAlert({ isOpen: true, title, message, type, details: details ?? null });
+  const onMutateErr = (prefix: string, err: any) => {
+    const resp = (err as any)?.response?.data;
+    const msg = resp?.message ?? err?.message ?? 'An unexpected error occurred.';
+    const rawDetails = resp?.details;
+    let details: string[] | undefined;
+    if (Array.isArray(rawDetails)) {
+      details = rawDetails
+        .slice(0, 8)
+        .map((d: any) => {
+          const p = d?.path ? `${d.path}: ` : '';
+          const m = d?.message ?? 'Invalid value';
+          const r = d?.received !== undefined && d.received !== '' ? ` (received: ${JSON.stringify(d.received)})` : '';
+          return `${p}${m}${r}`;
+        });
+      if (rawDetails.length > details.length) {
+        details.push(`…and ${rawDetails.length - details.length} more issue${rawDetails.length - details.length === 1 ? '' : 's'}`);
+      }
+    }
+    notify(prefix, msg, 'error', details);
+  };
 
   useEffect(() => {
     const newResolvedTab: FeeTab = searchTab === 'create' ? 'fees' : (searchTab ?? paramTab ?? initialTab ?? 'fees');
@@ -836,23 +1327,20 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             <h1 className="text-2xl font-semibold text-gray-900">
               {activeTab === 'fees' && adminFees.fees.pageTitle}
               {activeTab === 'categories' && adminFees.categories.pageTitle}
-              {activeTab === 'assignments' && adminFees.assignments.pageTitle}
               {activeTab === 'upload' && adminFees.upload.pageTitle}
             </h1>
             <p className="text-sm text-gray-500 mt-1">
               {activeTab === 'fees' && adminFees.fees.pageSubtitle}
               {activeTab === 'categories' && adminFees.categories.pageSubtitle}
-              {activeTab === 'assignments' && adminFees.assignments.pageSubtitle}
               {activeTab === 'upload' && adminFees.upload.pageSubtitle}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <div className="flex rounded-lg border border-gray-200 bg-white p-1">
-              {(['fees', 'categories', 'assignments', 'upload'] as const).map((t) => {
+              {(['fees', 'categories', 'upload'] as const).map((t) => {
                 const labelMap = {
                   fees: 'Bills',
                   categories: 'Categories',
-                  assignments: 'Assignments',
                   upload: 'Bulk Upload',
                 };
                 return (
@@ -875,9 +1363,6 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             )}
             {activeTab === 'categories' && canMutate && (
               <button className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium" onClick={() => { setSearchParams({ tab: 'categories' }); setCatModal({ open: true, kind: 'create' }); }}>{adminFees.common.createCategory}</button>
-            )}
-            {activeTab === 'assignments' && canMutate && (
-              <button className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium" onClick={() => { setSearchParams({ tab: 'assignments' }); setAssignModal({ open: true }); }}>{adminFees.common.createAssignment}</button>
             )}
             {canMutate && (
               <button
@@ -923,6 +1408,30 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
                   } catch (e: any) {
                     setConfirm((s) => ({ ...s, loading: false }));
                     onMutateErr('Disable failed', e);
+                  }
+                },
+              });
+            }}
+            onDelete={(f) => {
+              setConfirm({
+                isOpen: true,
+                title: 'Delete Bill (permanent)',
+                description: 'Permanently removes this bill from the catalogue. Cannot be undone. If this bill already has assigned students, invoices, or paid transactions, you will see an error with specific counts — use Disable (soft-deactivate) instead to preserve history.',
+                resourceLabel: `Bill: ${f.feeCode} — ${f.name}`,
+                reasonRequired: false,
+                confirmVariant: 'danger',
+                confirmLabel: 'Delete bill',
+                loading: false,
+                onConfirm: async (_payload) => {
+                  setConfirm((s) => ({ ...s, loading: true }));
+                  try {
+                    await feeApi.deleteFee(f.id);
+                    notify('Bill deleted', `${f.feeCode} — ${f.name}`, 'success');
+                    closeConfirm();
+                    await loadFees();
+                  } catch (e: any) {
+                    setConfirm((s) => ({ ...s, loading: false }));
+                    onMutateErr('Delete bill failed', e);
                   }
                 },
               });
@@ -977,6 +1486,28 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
               try { const r = await feeApi.generateInvoices(a.id, force); notify('Invoices generated', adminFees.assignments.generateResult(r.matchingStudents, r.alreadyInvoiced, r.created, r.skipped), 'success'); await loadAssignments(); }
               catch (e: any) { onMutateErr('Generate failed', e); }
             }}
+            onToggleActive={async (a) => {
+              try {
+                if (a.isActive) {
+                  await feeApi.disableAssignment(a.id);
+                } else {
+                  await feeApi.enableAssignment(a.id);
+                }
+                await loadAssignments();
+              } catch (e: any) {
+                onMutateErr('Toggle active failed', e);
+              }
+            }}
+            onDelete={async (a) => {
+              const ok = window.confirm('Cannot be undone. Related UNPAID invoices removed.');
+              if (!ok) return;
+              try {
+                await feeApi.deleteAssignment(a.id);
+                await loadAssignments();
+              } catch (e: any) {
+                onMutateErr('Delete assignment failed', e);
+              }
+            }}
           />
         )}
 
@@ -994,8 +1525,16 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
         onSubmit={async (body) => {
           setFeeSubmitting(true);
           try {
-            if (feeModal.kind === 'create') { await feeApi.createFee(body); notify('Fee created', body.feeCode, 'success'); }
-            else if (feeModal.initial) { await feeApi.updateFee(feeModal.initial.id, body); notify('Fee updated', body.feeCode, 'success'); }
+            let displayCode: string = body.feeCode || (body.name || 'New bill').slice(0, 24);
+            if (feeModal.kind === 'create') {
+              const r = await feeApi.createFee(body);
+              displayCode = (r as any)?.fee?.feeCode || displayCode;
+              notify('Fee created', displayCode, 'success');
+            } else if (feeModal.initial) {
+              await feeApi.updateFee(feeModal.initial.id, body);
+              displayCode = body.feeCode || feeModal.initial.feeCode;
+              notify('Fee updated', displayCode, 'success');
+            }
             setFeeModal({ open: false, kind: 'create' });
             if (searchTab === 'create') setSearchParams({ tab: 'fees' });
             await loadFees();
@@ -1013,7 +1552,13 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
         onSubmit={async (body) => {
           if (!cloneModal.fee) return;
           setFeeSubmitting(true);
-          try { await feeApi.cloneFee(cloneModal.fee.id, body); notify('Fee cloned', body.academicSession, 'success'); setCloneModal({ open: false }); await loadFees(); }
+          try {
+            const r = await feeApi.cloneFee(cloneModal.fee.id, body);
+            const newCode = (r as any)?.fee?.feeCode || cloneModal.fee.feeCode;
+            notify('Fee cloned', newCode, 'success');
+            setCloneModal({ open: false });
+            await loadFees();
+          }
           catch (e: any) { onMutateErr('Clone failed', e); }
           finally { setFeeSubmitting(false); }
         }}
@@ -1079,8 +1624,50 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
         loading={confirm.loading}
       />
 
-      <Modal isOpen={alert.isOpen} title={alert.title} onClose={() => setAlert({ ...alert, isOpen: false })}>
-        <p className="text-sm text-gray-800">{alert.message}</p>
+      <Modal isOpen={alert.isOpen} title={alert.title} onClose={() => setAlert({ ...alert, isOpen: false })}
+        footer={
+          <div className="w-full flex justify-end">
+            <button
+              type="button"
+              onClick={() => setAlert({ ...alert, isOpen: false })}
+              className={`px-5 py-2 rounded-lg text-sm font-semibold text-white shadow-sm focus:outline-none focus:ring-2 transition ${
+                alert.type === 'error'
+                  ? 'bg-gradient-to-br from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 focus:ring-red-500/30'
+                  : alert.type === 'success'
+                  ? 'bg-gradient-to-br from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 focus:ring-emerald-500/30'
+                  : 'bg-gradient-to-br from-slate-600 to-gray-600 hover:from-slate-700 hover:to-gray-700 focus:ring-slate-500/30'
+              }`}
+            >
+              OK
+            </button>
+          </div>
+        }
+      >
+        <div className={`rounded-xl border px-4 py-3 flex items-start gap-3 ${
+          alert.type === 'error' ? 'border-red-200 bg-red-50 text-red-900'
+          : alert.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+          : 'border-blue-200 bg-blue-50 text-blue-900'
+        }`}>
+          <div className={`h-7 w-7 shrink-0 rounded-lg flex items-center justify-center text-base font-bold ${
+            alert.type === 'error' ? 'bg-red-100 text-red-700'
+            : alert.type === 'success' ? 'bg-emerald-100 text-emerald-700'
+            : 'bg-blue-100 text-blue-700'
+          }`}>
+            {alert.type === 'error' ? '!' : alert.type === 'success' ? '✓' : 'i'}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium leading-relaxed">{alert.message}</p>
+            {alert.details && alert.details.length > 0 && (
+              <ul className="mt-3 space-y-1.5">
+                {alert.details.map((d, i) => (
+                  <li key={i} className="text-xs leading-relaxed pl-3 border-l-2 border-black/10 ml-0.5">
+                    <span className="opacity-80">{d}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
       </Modal>
 
       <Modal
@@ -1117,12 +1704,10 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
 // ---------------- Query state hooks ----------------
 function useFeeQueryState() {
   const [q, setQ] = useState('');
-  const [session, setSession] = useState('');
   const [category, setCategory] = useState('');
   const [college, setCollege] = useState('');
   const [department, setDepartment] = useState('');
   const [program, setProgram] = useState('');
-  const [level, setLevel] = useState<string>('');
   const [studentType, setStudentType] = useState('');
   const [semester, setSemester] = useState('');
   const [isActive, setIsActive] = useState('');
@@ -1131,23 +1716,21 @@ function useFeeQueryState() {
   const [pageSize, setPageSize] = useState(25);
   const [sort, setSort] = useState<'createdAt' | 'name' | 'feeCode' | 'academicSession' | 'amount'>('createdAt');
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
-  const reset = () => { setQ(''); setSession(''); setCategory(''); setCollege(''); setDepartment(''); setProgram(''); setLevel(''); setStudentType(''); setSemester(''); setIsActive(''); setIsMandatory(''); setPage(1); };
+  const reset = () => { setQ(''); setCategory(''); setCollege(''); setDepartment(''); setProgram(''); setStudentType(''); setSemester(''); setIsActive(''); setIsMandatory(''); setPage(1); };
   const query: any = { page, pageSize, sort, order };
   if (q) query.q = q;
-  if (session) query.session = session;
   if (category) query.category = isNaN(Number(category)) ? category : Number(category);
   if (college) query.college = college;
   if (department) query.department = department;
   if (program) query.program = program;
-  if (level) query.level = Number(level);
   if (studentType) query.studentType = studentType;
   if (semester) query.semester = semester;
   if (isActive) query.isActive = isActive === 'true';
   if (isMandatory) query.isMandatory = isMandatory === 'true';
 
-  const sigkey = [q, session, category, college, department, program, level, studentType, semester, isActive, isMandatory, page, pageSize, sort, order].join('|');
+  const sigkey = [q, category, college, department, program, studentType, semester, isActive, isMandatory, page, pageSize, sort, order].join('|');
   return { query, sigkey, reset,
-    bind: { q, setQ, session, setSession, category, setCategory, college, setCollege, department, setDepartment, program, setProgram, level, setLevel, studentType, setStudentType, semester, setSemester, isActive, setIsActive, isMandatory, setIsMandatory, page, setPage, pageSize, setPageSize, sort, setSort, order, setOrder },
+    bind: { q, setQ, category, setCategory, college, setCollege, department, setDepartment, program, setProgram, studentType, setStudentType, semester, setSemester, isActive, setIsActive, isMandatory, setIsMandatory, page, setPage, pageSize, setPageSize, sort, setSort, order, setOrder },
   };
 }
 
@@ -1165,8 +1748,6 @@ function useAssignmentQueryState() {
   const [q, setQ] = useState('');
   const [type, setType] = useState('');
   const [feeId, setFeeId] = useState<string>('');
-  const [session, setSession] = useState('');
-  const [level, setLevel] = useState<string>('');
   const [studentType, setStudentType] = useState('');
   const [isActive, setIsActive] = useState('');
   const [page, setPage] = useState(1);
@@ -1175,12 +1756,10 @@ function useAssignmentQueryState() {
   if (q) query.q = q;
   if (type) query.assignmentType = type;
   if (feeId) query.feeId = Number(feeId);
-  if (session) query.targetSession = session;
-  if (level) query.targetLevel = Number(level);
   if (studentType) query.targetStudentType = studentType;
   if (isActive) query.isActive = isActive === 'true';
-  const sigkey = [q, type, feeId, session, level, studentType, isActive, page, pageSize].join('|');
-  return { query, sigkey, q, setQ, type, setType, feeId, setFeeId, session, setSession, level, setLevel, studentType, setStudentType, isActive, setIsActive, page, setPage, pageSize, setPageSize };
+  const sigkey = [q, type, feeId, studentType, isActive, page, pageSize].join('|');
+  return { query, sigkey, q, setQ, type, setType, feeId, setFeeId, studentType, setStudentType, isActive, setIsActive, page, setPage, pageSize, setPageSize };
 }
 
 // ---------------- List views ----------------
@@ -1195,7 +1774,8 @@ const FeesList: React.FC<{
   onClone: (f: FeeOut) => void;
   onActivate: (f: FeeOut) => void;
   onDisable: (f: FeeOut) => void;
-}> = ({ fq, loading, resp, fees, categories, canMutate, onEdit, onClone, onActivate, onDisable }) => {
+  onDelete: (f: FeeOut) => void;
+}> = ({ fq, loading, resp, fees, categories, canMutate, onEdit, onClone, onActivate, onDisable, onDelete }) => {
   const t = adminFees.fees;
   const tC = adminFees.common;
   const totalPages = Math.max(1, Math.ceil((resp?.total ?? 0) / (resp?.pageSize ?? 25)));
@@ -1206,7 +1786,6 @@ const FeesList: React.FC<{
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
           <div className="lg:col-span-2"><label className="text-xs text-gray-600 font-medium">{tC.search}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder={t.searchPlaceholder} value={b.q} onChange={(e) => { b.setQ(e.target.value); b.setPage(1); }} /></div>
-          <div><label className="text-xs text-gray-600 font-medium">{t.filterSession}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="2025/2026" value={b.session} onChange={(e) => { b.setSession(e.target.value); b.setPage(1); }} /></div>
           <div><label className="text-xs text-gray-600 font-medium">{t.filterCategory}</label>
             <select className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={b.category} onChange={(e) => { b.setCategory(e.target.value); b.setPage(1); }}>
               <option value="">{tC.all}</option>
@@ -1216,7 +1795,6 @@ const FeesList: React.FC<{
           <div><label className="text-xs text-gray-600 font-medium">{t.filterCollege}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={b.college} onChange={(e) => { b.setCollege(e.target.value); b.setPage(1); }} /></div>
           <div><label className="text-xs text-gray-600 font-medium">{t.filterDepartment}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={b.department} onChange={(e) => { b.setDepartment(e.target.value); b.setPage(1); }} /></div>
           <div><label className="text-xs text-gray-600 font-medium">{t.filterProgram}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={b.program} onChange={(e) => { b.setProgram(e.target.value); b.setPage(1); }} /></div>
-          <div><label className="text-xs text-gray-600 font-medium">{t.filterLevel}</label><input type="number" className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={b.level} onChange={(e) => { b.setLevel(e.target.value); b.setPage(1); }} /></div>
           <div><label className="text-xs text-gray-600 font-medium">{t.filterStudentType}</label>
             <select className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={b.studentType} onChange={(e) => { b.setStudentType(e.target.value); b.setPage(1); }}>
               <option value="">{tC.all}</option>
@@ -1305,6 +1883,14 @@ const FeesList: React.FC<{
                           ) : (
                             <button onClick={() => onActivate(f)} className="text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">{t.activateAction}</button>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => onDelete(f)}
+                            title="Delete"
+                            className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
                         </div>
                       )}
                     </td>
@@ -1392,11 +1978,13 @@ const AssignmentsList: React.FC<{
   canMutate: boolean;
   onEdit: (a: FeeAssignmentOut) => void;
   onGenerate: (a: FeeAssignmentOut, force?: boolean) => void;
-}> = ({ aq, loading, resp, assignments, canMutate, onEdit, onGenerate }) => {
+  onToggleActive: (a: FeeAssignmentOut) => Promise<void> | void;
+  onDelete: (a: FeeAssignmentOut) => Promise<void> | void;
+}> = ({ aq, loading, resp, assignments, canMutate, onEdit, onGenerate, onToggleActive, onDelete }) => {
   const t = adminFees.assignments;
   const tC = adminFees.common;
   const totalPages = Math.max(1, Math.ceil((resp?.total ?? 0) / (resp?.pageSize ?? 25)));
-  const TYPES = ['STUDENT','PROGRAMME','DEPARTMENT','FACULTY','LEVEL','SESSION','STUDENT_TYPE'] as const;
+  const TYPES = ['STUDENT','PROGRAMME','DEPARTMENT','FACULTY','STUDENT_TYPE'] as const;
 
   const isDirectBill = (a: FeeAssignmentOut) =>
     a.assignmentType === 'STUDENT' && a.targetStudentId != null;
@@ -1421,7 +2009,6 @@ const AssignmentsList: React.FC<{
     if (a.targetProgramme) parts.push(a.targetProgramme);
     if (a.targetDepartment) parts.push(a.targetDepartment);
     if (a.targetFaculty) parts.push(a.targetFaculty);
-    if (a.targetLevel) parts.push(`${a.targetLevel}L`);
     if (a.targetSession) parts.push(a.targetSession);
     if (a.targetStudentType) parts.push(a.targetStudentType);
     return parts.join(' · ') || '—';
@@ -1430,7 +2017,7 @@ const AssignmentsList: React.FC<{
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
-        <div className="md:col-span-2"><label className="text-xs text-gray-600 font-medium">{tC.search}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="Programme, department, faculty, session, matric number, fee name/code…" value={aq.q} onChange={(e) => { aq.setQ(e.target.value); aq.setPage(1); }} /></div>
+        <div className="md:col-span-2"><label className="text-xs text-gray-600 font-medium">{tC.search}</label><input className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="Programme, department, college, session, matric number, fee name/code…" value={aq.q} onChange={(e) => { aq.setQ(e.target.value); aq.setPage(1); }} /></div>
         <div><label className="text-xs text-gray-600 font-medium">{t.filterType}</label>
           <select className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm" value={aq.type} onChange={(e) => { aq.setType(e.target.value); aq.setPage(1); }}>
             <option value="">{tC.all}</option>
@@ -1523,6 +2110,26 @@ const AssignmentsList: React.FC<{
                             INV AUTO
                           </span>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => onToggleActive(a)}
+                          title={a.isActive ? 'Disable' : 'Enable'}
+                          className={`inline-flex items-center justify-center h-8 w-8 rounded-md border border-transparent transition-colors ${
+                            a.isActive
+                              ? 'text-amber-700 hover:text-amber-800 hover:bg-amber-50 hover:border-amber-200'
+                              : 'text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 hover:border-emerald-200'
+                          }`}
+                        >
+                          <Power className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDelete(a)}
+                          title="Delete"
+                          className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                       </div>
                     )}
                   </td>

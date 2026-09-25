@@ -21,7 +21,7 @@ import { reqIp, reqUa } from '../utils/http';
 const IdParam = z.object({ id: z.coerce.number().int().positive() });
 
 const StatusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']) });
-const PasswordResetSchema = z.object({ newPassword: z.string().min(8).max(128).optional() });
+const PasswordResetSchema = z.object({ newPassword: z.string().min(8).max(128).trim().optional() });
 
 // -----------------------------------------------------------------------------
 // CRUD

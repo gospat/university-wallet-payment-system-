@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Download } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
 import api, { navCounters, NavCounters } from '../../services/api';
 import { useSearchParams } from 'react-router-dom';
@@ -69,6 +70,20 @@ type VerifyResp = {
   branding?: { name: string; address?: string; phone?: string; website?: string; bankName?: string; bankAccount?: string };
 };
 
+function isUserCancelError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message ?? '').trim().toLowerCase();
+  return (
+    err?.code === 'ERR_CANCELED' ||
+    err?.name === 'CanceledError' ||
+    err?.name === 'AbortError' ||
+    msg === 'canceled' ||
+    msg === 'aborted' ||
+    msg === 'aborterror' ||
+    String(err?.code ?? '').toUpperCase() === 'ERR_CANCELED'
+  );
+}
+
 const StatusPill: React.FC<{ status: string }> = ({ status }) => {
   const map: Record<string, string> = {
     PENDING: 'bg-amber-50 text-amber-700 border-amber-200',
@@ -110,6 +125,12 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const verifyEndpoint = role === 'ADMIN' ? '/admin/receipts/verify' : '/bursary/receipts/verify';
   const activePath = `/${role.toLowerCase()}/receipts`;
 
+  useEffect(() => {
+    setErrorMsg('');
+    setVerifyError('');
+    setVerifyResult(null);
+  }, []);
+
   useEffect(() => { void navCounters().then(setNavCounts); }, []);
 
   const defaultQuery = useMemo(() => ({
@@ -144,7 +165,7 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       }
       loadedOnceRef.current = true;
     } catch (e: any) {
-      if (e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError' || e?.name === 'AbortError') return;
+      if (isUserCancelError(e)) return;
       setErrorMsg(e?.message || 'Failed to load receipts');
     } finally {
       setLoading(false);
@@ -176,7 +197,20 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
       })
-      .catch((err) => setErrorMsg(err.message || 'Download failed'));
+      .catch((err) => { if (isUserCancelError(err)) return; setErrorMsg(err.message || 'Download failed'); });
+  };
+
+  const receiptsExportUrl = (): string => {
+    const base = (api.defaults.baseURL ?? '/api/v1') + `${baseEndpoint}/export.csv`;
+    const params = new URLSearchParams();
+    Object.entries(query).forEach(([k, v]) => {
+      if (v === null || v === undefined || v === '') return;
+      params.append(k, String(v));
+    });
+    const token = localStorage.getItem('token') ?? '';
+    if (token) params.set('access_token', token);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return base + qs;
   };
 
   // ---------- Verify Receipt panel state ----------
@@ -195,11 +229,9 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       const resp = await api.get<VerifyResp>(`${verifyEndpoint}/${encodeURIComponent(tok)}`);
       setVerifyResult(resp.data);
     } catch (e: any) {
-      if (e?.response?.data) {
-        setVerifyResult(e.response.data);
-      } else {
-        setVerifyError(e?.message || 'Verification failed');
-      }
+      if (isUserCancelError(e)) return;
+      if (e?.response?.data) setVerifyResult(e.response.data);
+      else setVerifyError(e?.message || 'Verification failed');
     } finally {
       setVerifyLoading(false);
     }
@@ -213,17 +245,30 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   return (
     <PortalShell brand={brand} userText={userText} role={role} onLogout={onLogout} activePath={activePath} navCounters={navCounts}>
       <div className="w-full space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">
-            {verifyMode ? 'Verify Receipt' : 'All Receipts'}
-          </h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {verifyMode
-              ? 'Enter a receipt number or verification token to verify authenticity and view details.'
-              : role === 'ADMIN'
-                ? 'Manage, download, and verify all generated fee receipts.'
-                : 'Manage and download finance-issued fee receipts.'}
-          </p>
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">
+              {verifyMode ? 'Verify Receipt' : 'All Receipts'}
+            </h1>
+            <p className="text-sm text-gray-500 mt-1">
+              {verifyMode
+                ? 'Enter a receipt number or verification token to verify authenticity and view details.'
+                : role === 'ADMIN'
+                  ? 'Manage, download, and verify all generated fee receipts.'
+                  : 'Manage and download finance-issued fee receipts.'}
+            </p>
+          </div>
+          {!verifyMode && (
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href={receiptsExportUrl()}
+                download
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-600 text-white font-bold shadow-sm"
+              >
+                <Download className="h-4 w-4" /> CSV export
+              </a>
+            </div>
+          )}
         </div>
 
         {errorMsg && (

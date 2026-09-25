@@ -49,6 +49,20 @@ type ReceiptRow = {
 
 type ListResp = { items: ReceiptRow[]; total: number; page: number; pageSize: number; totalPages: number };
 
+function isUserCancelError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message ?? '').trim().toLowerCase();
+  return (
+    err?.code === 'ERR_CANCELED' ||
+    err?.name === 'CanceledError' ||
+    err?.name === 'AbortError' ||
+    msg === 'canceled' ||
+    msg === 'aborted' ||
+    msg === 'aborterror' ||
+    String(err?.code ?? '').toUpperCase() === 'ERR_CANCELED'
+  );
+}
+
 const MyReceipts: React.FC<{ brand: string; userText: string; onLogout: () => void; goBack: () => void; dashboardTo: string }> = ({ brand, userText, onLogout, goBack, dashboardTo }) => {
   const { user } = useAuth();
   void user;
@@ -57,6 +71,10 @@ const MyReceipts: React.FC<{ brand: string; userText: string; onLogout: () => vo
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const baseEndpoint = '/students/receipts';
   const activePath = '/student/receipts';
+
+  useEffect(() => {
+    setErrorMsg('');
+  }, []);
 
   useEffect(() => { void navCounters().then(setNavCounts); }, []);
 
@@ -91,7 +109,7 @@ const MyReceipts: React.FC<{ brand: string; userText: string; onLogout: () => vo
       }
       loadedOnceRef.current = true;
     } catch (e: any) {
-      if (e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError' || e?.name === 'AbortError') return;
+      if (isUserCancelError(e)) return;
       setErrorMsg(e?.message || 'Failed to load receipts');
     } finally {
       setLoading(false);
@@ -123,7 +141,7 @@ const MyReceipts: React.FC<{ brand: string; userText: string; onLogout: () => vo
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
       })
-      .catch((err) => setErrorMsg(err.message || 'Download failed'));
+      .catch((err) => { if (isUserCancelError(err)) return; setErrorMsg(err.message || 'Download failed'); });
   };
 
   const openPublicVerify = (verificationToken: string) => {

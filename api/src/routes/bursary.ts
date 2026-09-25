@@ -8,6 +8,7 @@ import { bursaryListRefunds, bursaryRequestRefund } from '../controllers/refunds
 import { RefundService } from '../services/refund';
 import { Prisma } from '@prisma/client';
 import { buildBranding } from '../utils/branding';
+import { csvLineSafe, appendCsvIntegrityTrailer } from '../utils/security';
 
 const router = express.Router();
 
@@ -466,7 +467,7 @@ router.get('/reports/collections', validateQuery(CollectionsReportSchema), catch
     const Papa = require('papaparse');
     const header = [
       'Receipt No.', 'Date', 'Student Name', 'Matric No.',
-      'Faculty', 'Department', 'Program', 'Level',
+      'College', 'Department', 'Program', 'Level',
       'Fee Name', 'Fee Code', 'Category',
       'Academic Session', 'Semester',
       'Amount (NGN)', 'Gateway', 'Channel', 'Reference', 'Status',
@@ -486,7 +487,7 @@ router.get('/reports/collections', validateQuery(CollectionsReportSchema), catch
       csvRows.push(['', '', '', '', '', '', '', '', '', '', c.name, key, '', '', Number(c.total).toFixed(2), '', `(${c.count} tx)`]);
     }
     csvRows.push([]);
-    csvRows.push(['', '', '', '', 'Subtotal by Faculty/College', '', '', '', '', '', '', '', '', '', '', '', '']);
+    csvRows.push(['', '', '', '', 'Subtotal by College', '', '', '', '', '', '', '', '', '', '', '', '']);
     for (const key of Object.keys(totals.byFaculty)) {
       const f = totals.byFaculty[key];
       csvRows.push(['', '', '', '', f.name, '', '', '', '', '', '', '', '', '', Number(f.total).toFixed(2), '', `(${f.count} tx)`]);
@@ -540,13 +541,13 @@ router.get('/reports/collections', validateQuery(CollectionsReportSchema), catch
 const BursaryPaymentListQuery = z.object({
   page: z.coerce.number().int().min(1).max(100).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(25),
-  sort: z.string().optional().default('createdAt'),
+  sort: z.string().trim().max(255).optional().default('createdAt'),
   order: z.enum(['asc', 'desc']).optional().default('desc'),
   q: z.string().trim().max(200).optional(),
   status: z.enum(['PENDING', 'SUCCESS', 'FAILED', 'REVERSED']).optional(),
   gateway: z.enum(['PAYSTACK', 'ALATPAY']).optional(),
-  dateFrom: z.string().optional(),
-  dateTo: z.string().optional(),
+  dateFrom: z.string().trim().max(32).optional(),
+  dateTo: z.string().trim().max(32).optional(),
   studentId: z.coerce.number().int().positive().optional(),
   feeId: z.coerce.number().int().positive().optional(),
   invoiceId: z.coerce.number().int().positive().optional(),
@@ -637,12 +638,12 @@ router.get(
 const BursaryReceiptListQuery = z.object({
   page: z.coerce.number().int().min(1).max(100).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(25),
-  sort: z.string().optional().default('paidAt'),
+  sort: z.string().trim().max(255).optional().default('paidAt'),
   order: z.enum(['asc', 'desc']).optional().default('desc'),
   q: z.string().trim().max(200).optional(),
   isVoided: z.enum(['true', 'false']).optional(),
-  dateFrom: z.string().optional(),
-  dateTo: z.string().optional(),
+  dateFrom: z.string().trim().max(32).optional(),
+  dateTo: z.string().trim().max(32).optional(),
   studentId: z.coerce.number().int().positive().optional(),
   feeId: z.coerce.number().int().positive().optional(),
 });
@@ -718,6 +719,90 @@ router.get(
         totalPages: Math.ceil(total / pageSize),
       },
     });
+  }),
+);
+
+router.get(
+  '/receipts/export.csv',
+  requirePermission('VIEW_RECEIPTS'),
+  validateQuery(BursaryReceiptListQuery),
+  catchAsync(async (req: any, res) => {
+    const q = req.query as z.infer<typeof BursaryReceiptListQuery>;
+    const where: any = {};
+    if (q.isVoided === 'true') where.isVoided = true;
+    if (q.isVoided === 'false') where.isVoided = false;
+    if (q.studentId) where.studentId = q.studentId;
+    if (q.feeId) where.invoice = { feeId: q.feeId };
+    if (q.dateFrom || q.dateTo) {
+      where.paidAt = {};
+      if (q.dateFrom) where.paidAt.gte = new Date(q.dateFrom);
+      if (q.dateTo) where.paidAt.lte = new Date(q.dateTo + 'T23:59:59.999Z');
+    }
+    if (q.q) {
+      where.OR = [
+        { receiptNumber: { contains: q.q, mode: 'insensitive' } },
+        { verificationToken: { contains: q.q, mode: 'insensitive' } },
+        { student: { OR: [
+          { firstName: { contains: q.q, mode: 'insensitive' } },
+          { lastName: { contains: q.q, mode: 'insensitive' } },
+          { email: { contains: q.q, mode: 'insensitive' } },
+          { matricNumber: { contains: q.q, mode: 'insensitive' } },
+        ]}},
+        { invoice: { OR: [
+          { invoiceNumber: { contains: q.q, mode: 'insensitive' } },
+          { fee: { OR: [
+            { name: { contains: q.q, mode: 'insensitive' } },
+            { feeCode: { contains: q.q, mode: 'insensitive' } },
+          ]}},
+        ]}},
+      ];
+    }
+    const rows = await prisma.receipt.findMany({
+      where,
+      take: 50000,
+      orderBy: { paidAt: 'desc' },
+      include: {
+        student: { select: { id: true, firstName: true, lastName: true, email: true, matricNumber: true } },
+        invoice: { select: { id: true, invoiceNumber: true, fee: { select: { id: true, name: true, feeCode: true } } } },
+        transaction: { select: { reference: true, paystackChannel: true, gateway: true, type: true, amount: true, status: true, createdAt: true } },
+      },
+    });
+    const header = ['receiptNumber', 'verificationToken', 'paidAt', 'paidAmount', 'studentName', 'studentEmail', 'matricNumber', 'invoiceNumber', 'feeName', 'feeCode', 'gateway', 'channel', 'txReference', 'status', 'voided'];
+    let csv = '\uFEFF' + csvLineSafe(header);
+    for (const r of rows) {
+      const stu = r.student as any;
+      const stuName = [stu?.firstName, stu?.lastName].filter(Boolean).join(' ');
+      const inv = r.invoice as any;
+      const tx = r.transaction as any;
+      csv += csvLineSafe([
+        r.receiptNumber,
+        r.verificationToken,
+        r.paidAt?.toISOString() ?? '',
+        String(r.paidAmount ?? ''),
+        stuName,
+        stu?.email ?? '',
+        stu?.matricNumber ?? '',
+        inv?.invoiceNumber ?? '',
+        inv?.fee?.name ?? '',
+        inv?.fee?.feeCode ?? '',
+        tx?.gateway ?? '',
+        tx?.paystackChannel ?? '',
+        tx?.reference ?? '',
+        tx?.status ?? '',
+        r.isVoided ? 'YES' : 'NO',
+      ]);
+    }
+    const ts = (d: any) => (d ? new Date(String(d)).toISOString().slice(0, 10).replace(/-/g, '') : 'all');
+    const filename = `receipts_${ts(q.dateFrom)}_${ts(q.dateTo)}_${Date.now()}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    if (((q as any).format ?? 'csv') === 'json') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename=receipts_${ts(q.dateFrom)}_${ts(q.dateTo)}.json`);
+      return res.status(200).json({ status: 'success', data: { rows } });
+    }
+    const csvWithIntegrity = appendCsvIntegrityTrailer(csv);
+    res.status(200).send(csvWithIntegrity);
   }),
 );
 

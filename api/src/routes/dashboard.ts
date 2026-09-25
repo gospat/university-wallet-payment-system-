@@ -1,5 +1,6 @@
 import express from 'express';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { protect } from '../middlewares/auth';
 import { validateQuery } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
@@ -22,7 +23,7 @@ router.get(
       let makePayment = 0;
       if (userId) {
         try {
-          const rows = (await prisma.$queryRawUnsafe<[{ cnt: string | number }]>(`
+          const rows = (await prisma.$queryRaw<[{ cnt: string | number }]>(Prisma.sql`
             SELECT COUNT(*) AS cnt
             FROM invoices
             WHERE userId = ${userId}

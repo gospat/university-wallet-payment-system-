@@ -211,11 +211,9 @@ const buildAdminNav = (role: Role, _counters?: Record<string, number>): NavGroup
       title: i18n.sidebar.groups.academicStructure,
       headingIcon: School,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/academic/faculties' : '/admin/academic/faculties', icon: School, label: 'Faculties', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/academic/faculties' : '/admin/academic/faculties', icon: School, label: 'Colleges', sub: true },
         { to: role === 'BURSARY' ? '/bursary/academic/departments' : '/admin/academic/departments', icon: School, label: 'Departments', sub: true },
         { to: role === 'BURSARY' ? '/bursary/academic/programmes' : '/admin/academic/programmes', icon: School, label: 'Programmes', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/academic/levels' : '/admin/academic/levels', icon: School, label: 'Levels', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/academic/sessions' : '/admin/academic/sessions', icon: School, label: 'Academic Sessions', sub: true },
       ],
     },
   ];

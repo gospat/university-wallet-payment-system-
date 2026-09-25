@@ -163,6 +163,7 @@ export type CatalogueFee = {
   paymentDeadline?: string | null;
   isActive?: boolean;
   _isDirectBill?: boolean;
+  noteToStudent?: string | null;
   badge?: string | null;
   assignmentId?: number | null;
   assignedAt?: string;

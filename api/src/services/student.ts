@@ -15,7 +15,33 @@ import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
 import { AccountStatus, Role, User, Prisma } from '@prisma/client';
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// Secure password generator — parity with frontend create-student widget.
+// Guarantees at least 1 uppercase, 1 lowercase, 1 digit, 1 symbol; then
+// fills remaining chars from combined pool + Fisher-Yates shuffled.
+// NEVER use user-owned data (matric, email, names) as a password source —
+// that made the previous reset implementation trivially guessable.
+// ---------------------------------------------------------------------------
+function generateStrongTemporaryPassword(length = 14): string {
+  const uppers = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lowers = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const syms = '!@#$%^&*';
+  const all = uppers + lowers + digits + syms;
+
+  const pick = (pool: string): string => pool[crypto.randomInt(pool.length)];
+
+  const chars = [pick(uppers), pick(lowers), pick(digits), pick(syms)];
+  for (let i = 4; i < length; i++) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
 
 // -----------------------------------------------------------------------------
 // Zod schemas (reused by routes for validateBody/validateQuery)
@@ -92,17 +118,59 @@ async function resolveSessionDisplay(input: Partial<CreateStudentInput>): Promis
 // Zod strict keys because they were not originally required. For this pass we
 // accept them via `.passthrough()` and consume them inside the service via
 // type assertion.
+const optStr = (max: number, min = 0) =>
+  z.preprocess(
+    (v) => {
+      if (v === null || v === undefined) return undefined;
+      const s = typeof v === 'string' ? v.trim() : String(v).trim();
+      return s.length === 0 ? undefined : s;
+    },
+    min > 0 ? z.string().min(min).max(max).optional() : z.string().max(max).optional(),
+  );
+const optStrNullable = (max: number, min = 0) =>
+  z.preprocess(
+    (v) => {
+      if (v === null || v === undefined) return null;
+      const s = typeof v === 'string' ? v.trim() : String(v).trim();
+      return s.length === 0 ? null : s;
+    },
+    (min > 0
+      ? z.string().min(min).max(max).nullable().optional()
+      : z.string().max(max).nullable().optional()) as any,
+  );
+const optEnumNullable = <T extends [string, ...string[]]>(t: T) =>
+  z.preprocess(
+    (v) => {
+      if (v === null || v === undefined) return null;
+      const s = typeof v === 'string' ? v.trim() : String(v).trim();
+      return s.length === 0 ? null : s;
+    },
+    z.enum(t).nullable().optional(),
+  );
+const optYearNullable = z.preprocess(
+  (v) => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'string' && v.trim() === '') return null;
+    const n = Number(v);
+    return Number.isNaN(n) ? null : n;
+  },
+  z.number().int().min(1990).max(2100).nullable().optional(),
+);
+
 export const CreateStudentSchema = z.object({
-  email: z.string().email().max(254),
-  firstName: z.string().min(1).max(80).trim(),
-  middleName: z.string().max(80).trim().optional().nullable(),
-  lastName: z.string().min(1).max(80).trim(),
-  matricNumber: z.string().min(3).max(50).trim(),
-  admissionNumber: z.string().max(50).trim().optional().nullable(),
-  jambNumber: z.string().max(50).trim().optional().nullable(),
-  college: z.string().min(2).max(120).trim().optional().nullable(),
-  department: z.string().min(2).max(120).trim().optional().nullable(),
-  program: z.string().min(2).max(120).trim().optional().nullable(),
+  email: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().toLowerCase() : String(v ?? '').trim().toLowerCase()),
+    z.string().email().max(255),
+  ),
+  firstName: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(1).max(80)),
+  middleName: optStrNullable(80),
+  lastName: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(1).max(80)),
+  matricNumber: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(3).max(50)),
+  admissionNumber: optStrNullable(50),
+  jambNumber: optStrNullable(50),
+  college: optStrNullable(120, 2),
+  department: optStrNullable(120, 2),
+  program: optStrNullable(120, 2),
   level: z
     .union([z.string(), z.number(), z.null(), z.undefined()])
     .optional()
@@ -133,14 +201,17 @@ export const CreateStudentSchema = z.object({
       if (stripped === '' || Number.isNaN(n) || !Number.isInteger(n) || n < 100 || n > 1000) return undefined;
       return n;
     }),
-  academicSession: z.string().max(20).trim().optional().nullable(),
-  studentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional().nullable(),
-  entryMode: z.enum(['UTME', 'DIRECT_ENTRY', 'TRANSFER', 'OTHER']).optional().nullable(),
-  admissionYear: z.coerce.number().int().min(1990).max(2100).optional().nullable(),
-  graduationYear: z.coerce.number().int().min(1990).max(2100).optional().nullable(),
-  phoneNumber: z.string().max(30).trim().optional().nullable(),
-  address: z.string().max(500).trim().optional().nullable(),
-  password: z.string().min(8).max(128).optional(),
+  academicSession: optStrNullable(20),
+  studentType: optEnumNullable(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']),
+  entryMode: optEnumNullable(['UTME', 'DIRECT_ENTRY', 'TRANSFER', 'OTHER']),
+  admissionYear: optYearNullable,
+  graduationYear: optYearNullable,
+  phoneNumber: optStrNullable(30),
+  address: optStrNullable(500),
+  password: z.preprocess(
+    (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : String(v)),
+    z.string().min(8).max(128).optional(),
+  ),
 }).passthrough();
 export type CreateStudentInput = z.infer<typeof CreateStudentSchema> & {
   programmeId?: number | string | null;
@@ -163,18 +234,18 @@ export const StudentSelfUpdateSchema = z.object({
   lastName: z.string().min(1).max(80).trim().optional(),
   phoneNumber: z.string().max(30).trim().optional().nullable(),
   address: z.string().max(500).trim().optional().nullable(),
-  email: z.string().email().max(254).optional(),
+  email: z.string().trim().max(255).email().optional(),
 });
 export type StudentSelfUpdateInput = z.infer<typeof StudentSelfUpdateSchema>;
 
 export const StudentQuerySchema = z.object({
-  q: z.string().max(200).optional(),
-  matricNumber: z.string().max(50).optional(),
-  college: z.string().max(120).optional(),
-  department: z.string().max(120).optional(),
-  program: z.string().max(120).optional(),
+  q: z.string().max(200).trim().optional(),
+  matricNumber: z.string().max(50).trim().optional(),
+  college: z.string().max(120).trim().optional(),
+  department: z.string().max(120).trim().optional(),
+  program: z.string().max(120).trim().optional(),
   level: z.coerce.number().int().optional(),
-  academicSession: z.string().max(20).optional(),
+  academicSession: z.string().max(20).trim().optional(),
   studentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional(),
   accountStatus: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']).optional(),
   page: z.coerce.number().int().min(1).default(1),
@@ -300,8 +371,8 @@ export class StudentService {
     if (hierarchy.program !== undefined) createData.program = hierarchy.program ?? undefined;
     if (resolvedLevel !== undefined) createData.level = resolvedLevel ?? undefined;
     if (resolvedSession !== undefined) createData.academicSession = resolvedSession ?? undefined;
-    if (input.studentType !== undefined) createData.studentType = input.studentType ?? undefined;
-    if (input.entryMode !== undefined) createData.entryMode = input.entryMode ?? undefined;
+    if (input.studentType !== undefined) createData.studentType = (input.studentType ?? undefined) as any;
+    if (input.entryMode !== undefined) createData.entryMode = (input.entryMode ?? undefined) as any;
     if (input.admissionYear !== undefined) createData.admissionYear = input.admissionYear ?? undefined;
     if (input.graduationYear !== undefined) createData.graduationYear = input.graduationYear ?? undefined;
     if (input.phoneNumber !== undefined) createData.phoneNumber = input.phoneNumber ?? undefined;
@@ -577,18 +648,24 @@ export class StudentService {
     const existing = await prisma.user.findFirst({ where: { id, role: Role.STUDENT }, select: { id: true, matricNumber: true } });
     if (!existing) throw new AppError(i18n.errors.auth.userNotFound, 404);
 
-    const temporaryPassword =
-      opts?.newPassword ??
-      (existing.matricNumber || Math.random().toString(36).slice(2, 12));
+    const temporaryPassword = opts?.newPassword ?? generateStrongTemporaryPassword(14);
     const hash = await bcrypt.hash(temporaryPassword, 12);
 
     await prisma.$transaction(async (tx) => {
-      await tx.user.update({ where: { id }, data: { password: hash, failedLoginAttempts: 0, lockedUntil: null } });
+      await tx.user.update({
+        where: { id },
+        data: {
+          password: hash,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          mustChangePassword: true,
+        },
+      });
       await tx.auditLog.create({
         data: {
           action: i18n.auditActions.passwordResetCompleted,
           entityType: 'USER', entityId: String(id), userId: actorId,
-          oldValue: JSON_DB_NULL, newValue: { passwordChanged: true } as Prisma.InputJsonValue,
+          oldValue: JSON_DB_NULL, newValue: { passwordChanged: true, mustChangePassword: true } as Prisma.InputJsonValue,
           ipAddress: opts?.ip, userAgent: opts?.userAgent,
         },
       });

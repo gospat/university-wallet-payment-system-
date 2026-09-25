@@ -150,20 +150,16 @@ router.get(
     F('college', me.college);
     F('department', me.department);
     F('program', me.program);
-    F('level', me.level);
     F('studentType', me.studentType);
 
     const globalOrMatch: Prisma.FeeWhereInput = {};
     if (scopeMatches.length > 0) {
-      // For each scope field we AND: (field IS NULL OR field = studentValue).
-      // This ensures each non-global narrowed field matches OR the fee's scope is globally off.
       globalOrMatch.AND = [];
-      const fields = ['college', 'department', 'program', 'level', 'studentType'];
+      const fields = ['college', 'department', 'program', 'studentType'];
       const studentValues: any = me;
       for (const f of fields) {
         const v = studentValues[f];
         if (!v && v !== 0) {
-          // Student lacks the field — only global (null) fees match this dimension.
           (globalOrMatch.AND as any).push({ [f]: null });
         } else {
           (globalOrMatch.AND as any).push({
@@ -195,6 +191,7 @@ router.get(
         id: true,
         overrideAmount: true,
         overrideDeadline: true,
+        noteToStudent: true,
         assignedAt: true,
         assignedBy: { select: { firstName: true, lastName: true, email: true } },
         fee: {
@@ -239,6 +236,7 @@ router.get(
         ...base,
         amount: overrideAmount ?? Number(base.amount),
         paymentDeadline: da.overrideDeadline ?? base.paymentDeadline,
+        noteToStudent: da.noteToStudent ?? null,
         badge: 'DIRECT BILL' as const,
         assignmentId: da.id,
         assignedAt: da.assignedAt,
@@ -280,8 +278,8 @@ const _FeeInitiateInnerSchema = z.object({
     z.number().positive(),
     z.string().refine((s) => Number(s) > 0, { message: 'positive numeric required' }).transform((s) => Number(s)),
   ]).optional(),
-  email: z.string().email().optional(),
-  idempotencyKey: z.string().min(1).max(128).optional(),
+  email: z.string().trim().max(255).email().optional(),
+  idempotencyKey: z.string().min(1).max(128).trim().optional(),
 }).strict();
 const FeeInitiateValidator = [validateParams(FeeIdParam), validateBody(_FeeInitiateInnerSchema)];
 
@@ -334,9 +332,9 @@ async function ensureInvoiceForFee(studentId: number, feeId: number, opts?: { id
     return { invoiceId: reuse.id, invoiceNumber: reuse.invoiceNumber, created: false, fee };
   }
   const created = await prisma.$transaction(async (tx: any) => {
-    const baseRow = await (tx as any).$queryRawUnsafe(
-      'SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE',
-    ) as Array<{ next_id: number }>;
+    const baseRow = (await (tx as any).$queryRaw(
+      Prisma.sql`SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE`,
+    )) as unknown as Array<{ next_id: number }>;
     let nextId = Number(baseRow?.[0]?.next_id ?? 0);
     if (Number.isNaN(nextId) || nextId <= 0) nextId = 1;
     const fiscalYear = fee.academicSession?.split('/')?.[0] ?? undefined;

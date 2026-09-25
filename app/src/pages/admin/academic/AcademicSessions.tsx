@@ -130,6 +130,13 @@ const AcademicSessionsPage: React.FC = () => {
       }
       setModal({ open: false, kind: 'create' });
       load();
+    } catch (e: any) {
+      setAlert({
+        isOpen: true,
+        type: 'error',
+        title: modal.kind === 'create' ? 'Could not create session' : 'Could not update session',
+        message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+      });
     } finally {
       setSubmitting(false);
     }
@@ -150,7 +157,12 @@ const AcademicSessionsPage: React.FC = () => {
           load();
         } catch (e: any) {
           setConfirm((c) => ({ ...c, loading: false }));
-          throw e;
+          setAlert({
+            isOpen: true,
+            type: 'error',
+            title: 'Could not deactivate session',
+            message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+          });
         }
       },
     });
@@ -163,7 +175,7 @@ const AcademicSessionsPage: React.FC = () => {
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Academic Sessions</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage academic sessions (e.g. 2024/2025).</p>
+          <p className="text-sm text-gray-500 mt-1">Manage academic sessions (e.g. 2024/2025). Bursary role has read-only access.</p>
         </div>
         <button onClick={openCreate} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm">
           <Plus className="h-4 w-4" /> Create Session
@@ -299,8 +311,11 @@ const AcademicSessionsPage: React.FC = () => {
     </div>
   );
 
+  const portalRole: 'ADMIN' | 'BURSARY' = user?.role === 'BURSARY' ? 'BURSARY' : 'ADMIN';
+  const activePathPrefix = portalRole === 'BURSARY' ? '/bursary' : '/admin';
+
   return (
-    <PortalShell role="ADMIN" activePath="/admin/academic/sessions" brand={brand} userText={userText} userEmail={user?.email} onLogout={logout} userPermissions={user?.permissions} navCounters={navCounts}
+    <PortalShell role={portalRole} activePath={`${activePathPrefix}/academic/sessions`} brand={brand} userText={userText} userEmail={user?.email} onLogout={logout} userPermissions={user?.permissions} navCounters={navCounts}
       showGlobalSearch>
       {content}
     </PortalShell>

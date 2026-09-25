@@ -3,6 +3,7 @@ import { z } from 'zod';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import type { Request } from 'express';
+import { auditActions } from '../i18n/en';
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
@@ -49,66 +50,137 @@ function paginate<T>(rows: T[], total: number, page: number, limit: number): Lis
   };
 }
 
+// --- tolerant zod wrappers (empty string → undefined, same pattern as fee.ts) ---
+const optStr = (max: number, min = 0) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : v === null || v === undefined ? undefined : String(v).trim() || undefined),
+    min > 0 ? z.string().min(min).max(max).trim().optional() : z.string().max(max).trim().optional(),
+  );
+const optEmail = (max = 150) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim().toLowerCase()) : undefined),
+    z.string().email().max(max).optional(),
+  );
+const optBool = z.preprocess(
+  (v) => {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+      if (s === 'false' || s === '0' || s === 'off' || s === 'no' || s === '') return false;
+    }
+    return v;
+  },
+  z.boolean().optional(),
+);
+const posInt = z.preprocess(
+  (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : Number(v)) : v),
+  z.number().int().positive(),
+);
+const posIntOpt = z.preprocess(
+  (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : Number(v)),
+  z.number().int().positive().optional(),
+);
+const posIntOrNull = z.preprocess(
+  (v) => {
+    if (v === null || v === undefined) return v;
+    if (typeof v === 'string' && v.trim() === '') return null;
+    return Number(v);
+  },
+  z.union([z.number().int().positive(), z.null()]).optional(),
+);
+
 export const CreateFacultySchema = z.object({
-  name: z.string().min(2).max(150).trim(),
-  code: z.string().min(1).max(30).trim().optional(),
-  deanEmail: z.string().email().max(150).trim().optional(),
-  isActive: z.boolean().default(true).optional(),
+  name: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(2).max(150)),
+  code: optStr(30, 1),
+  deanEmail: optEmail(150),
+  isActive: optBool,
 });
 export const UpdateFacultySchema = CreateFacultySchema.partial();
 export type CreateFacultyInput = z.infer<typeof CreateFacultySchema>;
 export type UpdateFacultyInput = z.infer<typeof UpdateFacultySchema>;
 
 export const CreateDepartmentSchema = z.object({
-  name: z.string().min(2).max(150).trim(),
-  code: z.string().min(1).max(30).trim().optional(),
-  facultyId: z.number().int().positive(),
-  headEmail: z.string().email().max(150).trim().optional(),
-  isActive: z.boolean().default(true).optional(),
+  name: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(2).max(150)),
+  code: optStr(30, 1),
+  facultyId: posInt,
+  headEmail: optEmail(150),
+  isActive: optBool,
 });
 export const UpdateDepartmentSchema = CreateDepartmentSchema.partial().omit({ facultyId: true }).extend({
-  facultyId: z.number().int().positive().optional(),
+  facultyId: posIntOpt,
 });
 export type CreateDepartmentInput = z.infer<typeof CreateDepartmentSchema>;
 export type UpdateDepartmentInput = z.infer<typeof UpdateDepartmentSchema>;
 
 export const CreateProgrammeSchema = z.object({
-  name: z.string().min(2).max(150).trim(),
-  code: z.string().min(1).max(30).trim().optional(),
-  departmentId: z.number().int().positive(),
-  durationYears: z.number().int().positive().max(20).default(4).optional(),
-  coordinatorEmail: z.string().email().max(150).trim().optional(),
-  isActive: z.boolean().default(true).optional(),
+  name: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(2).max(150)),
+  code: optStr(30, 1),
+  departmentId: posInt,
+  durationYears: z.preprocess(
+    (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? 4 : Number(v)),
+    z.number().int().positive().max(20).default(4).optional(),
+  ),
+  coordinatorEmail: optEmail(150),
+  isActive: optBool,
 });
 export const UpdateProgrammeSchema = CreateProgrammeSchema.partial().omit({ departmentId: true }).extend({
-  departmentId: z.number().int().positive().optional(),
+  departmentId: posIntOpt,
 });
 export type CreateProgrammeInput = z.infer<typeof CreateProgrammeSchema>;
 export type UpdateProgrammeInput = z.infer<typeof UpdateProgrammeSchema>;
 
 export const CreateLevelSchema = z.object({
-  level: z.string().min(1).max(20).trim(),
-  programmeId: z.number().int().positive(),
-  isActive: z.boolean().default(true).optional(),
+  level: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim() : v === null || v === undefined ? '' : String(v)),
+    z.string().min(1).max(20).trim(),
+  ),
+  programmeId: posIntOrNull,
+  isActive: optBool,
 });
-export const UpdateLevelSchema = CreateLevelSchema.partial().omit({ programmeId: true }).extend({
-  programmeId: z.number().int().positive().optional(),
+export const UpdateLevelSchema = CreateLevelSchema.partial().extend({
+  programmeId: posIntOrNull,
 });
 export type CreateLevelInput = z.infer<typeof CreateLevelSchema>;
 export type UpdateLevelInput = z.infer<typeof UpdateLevelSchema>;
 
 export const CreateAcademicSessionSchema = z.object({
-  name: z.string().min(4).max(20).trim(),
-  startDate: z.coerce.date().optional(),
-  endDate: z.coerce.date().optional(),
-  isActive: z.boolean().default(true).optional(),
+  name: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(4).max(20)),
+  startDate: z.preprocess(
+    (v) => {
+      if (v === null || v === undefined) return undefined;
+      if (typeof v === 'string') {
+        if (v.trim() === '') return undefined;
+        const d = new Date(v);
+        return Number.isNaN(+d) ? undefined : d;
+      }
+      return v instanceof Date ? v : new Date(String(v));
+    },
+    z.date().optional(),
+  ),
+  endDate: z.preprocess(
+    (v) => {
+      if (v === null || v === undefined) return undefined;
+      if (typeof v === 'string') {
+        if (v.trim() === '') return undefined;
+        const d = new Date(v);
+        return Number.isNaN(+d) ? undefined : d;
+      }
+      return v instanceof Date ? v : new Date(String(v));
+    },
+    z.date().optional(),
+  ),
+  isActive: optBool,
 });
 export const UpdateAcademicSessionSchema = CreateAcademicSessionSchema.partial();
 export type CreateAcademicSessionInput = z.infer<typeof CreateAcademicSessionSchema>;
 export type UpdateAcademicSessionInput = z.infer<typeof UpdateAcademicSessionSchema>;
 
 export const ListQuerySchema = z.object({
-  search: z.string().max(200).trim().optional(),
+  search: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+    z.string().max(200).optional(),
+  ),
   page: z.coerce.number().int().positive().default(1).optional(),
   limit: z.coerce.number().int().positive().max(500).default(25).optional(),
   isActive: z.union([z.boolean(), z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1')]).optional(),
@@ -177,7 +249,7 @@ export class FacultyService {
         isActive: data.isActive ?? true,
       };
       const created: any = await prisma.faculty.create({ data: payload, select: FACULTY_SELECT as any });
-      await writeAudit(req, { action: 'FACULTY_CREATED', entityType: 'FACULTY', entityId: created.id, newValue: created });
+      await writeAudit(req, { action: auditActions.facultyCreated, entityType: 'FACULTY', entityId: created.id, newValue: created });
       return created;
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -201,7 +273,7 @@ export class FacultyService {
 
     try {
       const updated = await prisma.faculty.update({ where: { id }, data: payload, select: FACULTY_SELECT as any });
-      await writeAudit(req, { action: 'FACULTY_UPDATED', entityType: 'FACULTY', entityId: id, oldValue: existing, newValue: updated });
+      await writeAudit(req, { action: auditActions.facultyUpdated, entityType: 'FACULTY', entityId: id, oldValue: existing, newValue: updated });
       return updated;
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -224,8 +296,42 @@ export class FacultyService {
       throw new AppError(`Cannot deactivate Faculty because it is still referenced by ${activeChildren} active Department(s)`, 400);
     }
     const updated = await prisma.faculty.update({ where: { id }, data: { isActive: false }, select: FACULTY_SELECT as any });
-    await writeAudit(req, { action: 'FACULTY_DEACTIVATED', entityType: 'FACULTY', entityId: id, oldValue: existing, newValue: updated });
+    await writeAudit(req, { action: auditActions.facultyDeactivated, entityType: 'FACULTY', entityId: id, oldValue: existing, newValue: updated });
     return updated;
+  }
+
+  static async remove(id: number, req?: ReqLike) {
+    const existing = await prisma.faculty.findFirst({
+      where: { id },
+      include: {
+        _count: {
+          select: {
+            departments: true,
+          },
+        },
+      },
+    });
+    if (!existing) throw new AppError('College not found', 404);
+
+    const [students, fees] = await Promise.all([
+      prisma.user.count({ where: { role: 'STUDENT', facultyId: id } }),
+      prisma.fee.count({ where: { facultyId: id } }),
+    ]);
+    const references: string[] = [];
+    const deptCount = (existing as any)._count.departments;
+    if (deptCount > 0) references.push(`${deptCount} department(s)`);
+    if (students > 0) references.push(`${students} student(s)`);
+    if (fees > 0) references.push(`${fees} fee catalogue item(s)`);
+    if (references.length > 0) {
+      throw new AppError(
+        `Cannot delete this College: it is still referenced by — ${references.join(', ')}. ` +
+        `Please remove, reassign, or deactivate those records first (or use Deactivate to soft-delete instead).`,
+        409,
+      );
+    }
+    const deleted = await prisma.faculty.delete({ where: { id }, select: { id: true, name: true, code: true } });
+    await writeAudit(req, { action: auditActions.facultyDeleted, entityType: 'FACULTY', entityId: id, oldValue: existing });
+    return { deleted };
   }
 }
 
@@ -273,7 +379,7 @@ export class DepartmentService {
         faculty: { connect: { id: data.facultyId } },
       };
       const created: any = await prisma.department.create({ data: payload, select: DEPARTMENT_SELECT as any });
-      await writeAudit(req, { action: 'DEPARTMENT_CREATED', entityType: 'DEPARTMENT', entityId: created.id, newValue: created });
+      await writeAudit(req, { action: auditActions.departmentCreated, entityType: 'DEPARTMENT', entityId: created.id, newValue: created });
       return created;
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -301,7 +407,7 @@ export class DepartmentService {
 
     try {
       const updated = await prisma.department.update({ where: { id }, data: payload, select: DEPARTMENT_SELECT as any });
-      await writeAudit(req, { action: 'DEPARTMENT_UPDATED', entityType: 'DEPARTMENT', entityId: id, oldValue: existing, newValue: updated });
+      await writeAudit(req, { action: auditActions.departmentUpdated, entityType: 'DEPARTMENT', entityId: id, oldValue: existing, newValue: updated });
       return updated;
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -322,8 +428,36 @@ export class DepartmentService {
       throw new AppError(`Cannot deactivate Department because it is still referenced by ${activeChildren} active Programme(s)`, 400);
     }
     const updated = await prisma.department.update({ where: { id }, data: { isActive: false }, select: DEPARTMENT_SELECT as any });
-    await writeAudit(req, { action: 'DEPARTMENT_DEACTIVATED', entityType: 'DEPARTMENT', entityId: id, oldValue: existing, newValue: updated });
+    await writeAudit(req, { action: auditActions.departmentDeactivated, entityType: 'DEPARTMENT', entityId: id, oldValue: existing, newValue: updated });
     return updated;
+  }
+
+  static async remove(id: number, req?: ReqLike) {
+    const existing = await prisma.department.findFirst({
+      where: { id },
+      include: { _count: { select: { programmes: true } } },
+    });
+    if (!existing) throw new AppError('Department not found', 404);
+
+    const [students, fees] = await Promise.all([
+      prisma.user.count({ where: { role: 'STUDENT', departmentId: id } }),
+      prisma.fee.count({ where: { departmentId: id } }),
+    ]);
+    const references: string[] = [];
+    const progCount = (existing as any)._count.programmes;
+    if (progCount > 0) references.push(`${progCount} programme(s)`);
+    if (students > 0) references.push(`${students} student(s)`);
+    if (fees > 0) references.push(`${fees} fee catalogue item(s)`);
+    if (references.length > 0) {
+      throw new AppError(
+        `Cannot delete this Department: it is still referenced by — ${references.join(', ')}. ` +
+        `Please remove, reassign, or deactivate those records first (or use Deactivate to soft-delete instead).`,
+        409,
+      );
+    }
+    const deleted = await prisma.department.delete({ where: { id }, select: { id: true, name: true, code: true } });
+    await writeAudit(req, { action: auditActions.departmentDeleted, entityType: 'DEPARTMENT', entityId: id, oldValue: existing });
+    return { deleted };
   }
 }
 
@@ -372,7 +506,7 @@ export class ProgrammeService {
         department: { connect: { id: data.departmentId } },
       };
       const created: any = await prisma.programme.create({ data: payload, select: PROGRAMME_SELECT as any });
-      await writeAudit(req, { action: 'PROGRAMME_CREATED', entityType: 'PROGRAMME', entityId: created.id, newValue: created });
+      await writeAudit(req, { action: auditActions.programmeCreated, entityType: 'PROGRAMME', entityId: created.id, newValue: created });
       return created;
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -401,7 +535,7 @@ export class ProgrammeService {
 
     try {
       const updated = await prisma.programme.update({ where: { id }, data: payload, select: PROGRAMME_SELECT as any });
-      await writeAudit(req, { action: 'PROGRAMME_UPDATED', entityType: 'PROGRAMME', entityId: id, oldValue: existing, newValue: updated });
+      await writeAudit(req, { action: auditActions.programmeUpdated, entityType: 'PROGRAMME', entityId: id, oldValue: existing, newValue: updated });
       return updated;
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -422,8 +556,36 @@ export class ProgrammeService {
       throw new AppError(`Cannot deactivate Programme because it is still referenced by ${activeChildren} active Level(s)`, 400);
     }
     const updated = await prisma.programme.update({ where: { id }, data: { isActive: false }, select: PROGRAMME_SELECT as any });
-    await writeAudit(req, { action: 'PROGRAMME_DEACTIVATED', entityType: 'PROGRAMME', entityId: id, oldValue: existing, newValue: updated });
+    await writeAudit(req, { action: auditActions.programmeDeactivated, entityType: 'PROGRAMME', entityId: id, oldValue: existing, newValue: updated });
     return updated;
+  }
+
+  static async remove(id: number, req?: ReqLike) {
+    const existing = await prisma.programme.findFirst({
+      where: { id },
+      include: { _count: { select: { levels: true } } },
+    });
+    if (!existing) throw new AppError('Programme not found', 404);
+
+    const [students, fees] = await Promise.all([
+      prisma.user.count({ where: { role: 'STUDENT', programmeId: id } }),
+      prisma.fee.count({ where: { programmeId: id } }),
+    ]);
+    const references: string[] = [];
+    const levelCount = (existing as any)._count.levels;
+    if (levelCount > 0) references.push(`${levelCount} level(s)`);
+    if (students > 0) references.push(`${students} student(s)`);
+    if (fees > 0) references.push(`${fees} fee catalogue item(s)`);
+    if (references.length > 0) {
+      throw new AppError(
+        `Cannot delete this Programme: it is still referenced by — ${references.join(', ')}. ` +
+        `Please remove, reassign, or deactivate those records first (or use Deactivate to soft-delete instead).`,
+        409,
+      );
+    }
+    const deleted = await prisma.programme.delete({ where: { id }, select: { id: true, name: true, code: true } });
+    await writeAudit(req, { action: auditActions.programmeDeleted, entityType: 'PROGRAMME', entityId: id, oldValue: existing });
+    return { deleted };
   }
 }
 
@@ -458,21 +620,25 @@ export class LevelService {
   }
 
   static async create(data: CreateLevelInput, req?: ReqLike) {
-    const prog = await prisma.programme.findFirst({ where: { id: data.programmeId } });
-    if (!prog) throw new AppError('Referenced programme does not exist', 400);
+    if (data.programmeId !== undefined && data.programmeId !== null) {
+      const prog = await prisma.programme.findFirst({ where: { id: data.programmeId } });
+      if (!prog) throw new AppError('Referenced programme does not exist', 400);
+    }
 
     try {
       const payload: Prisma.LevelCreateInput = {
         level: data.level,
         isActive: data.isActive ?? true,
-        programme: { connect: { id: data.programmeId } },
       };
+      if (data.programmeId !== undefined && data.programmeId !== null) {
+        payload.programme = { connect: { id: data.programmeId } };
+      }
       const created = await prisma.level.create({ data: payload, select: LEVEL_SELECT as any });
       await writeAudit(req, { action: 'LEVEL_CREATED', entityType: 'LEVEL', entityId: created.id, newValue: created });
       return created;
     } catch (err: any) {
       if (err?.code === 'P2002') {
-        throw new AppError('A level with this name/number already exists under the selected programme', 400);
+        throw new AppError('A level with this number already exists (with or without the same programme assignment)', 400);
       }
       throw err;
     }
@@ -482,7 +648,7 @@ export class LevelService {
     const existing = await prisma.level.findFirst({ where: { id } });
     if (!existing) throw new AppError('Level not found', 404);
 
-    if (data.programmeId !== undefined) {
+    if (data.programmeId !== undefined && data.programmeId !== null) {
       const prog = await prisma.programme.findFirst({ where: { id: data.programmeId } });
       if (!prog) throw new AppError('Referenced programme does not exist', 400);
     }
@@ -490,7 +656,13 @@ export class LevelService {
     const payload: Prisma.LevelUpdateInput = {};
     if (data.level !== undefined) payload.level = data.level;
     if (data.isActive !== undefined) payload.isActive = data.isActive;
-    if (data.programmeId !== undefined) payload.programme = { connect: { id: data.programmeId } };
+    if (data.programmeId !== undefined) {
+      if (data.programmeId === null) {
+        payload.programme = { disconnect: true };
+      } else {
+        payload.programme = { connect: { id: data.programmeId } };
+      }
+    }
 
     try {
       const updated = await prisma.level.update({ where: { id }, data: payload, select: LEVEL_SELECT as any });
@@ -498,7 +670,7 @@ export class LevelService {
       return updated;
     } catch (err: any) {
       if (err?.code === 'P2002') {
-        throw new AppError('A level with this name/number already exists under the selected programme', 400);
+        throw new AppError('A level with this number already exists (with or without the same programme assignment)', 400);
       }
       throw err;
     }

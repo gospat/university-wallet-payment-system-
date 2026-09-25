@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { stageFeeUpload, previewFeeUpload, confirmFeeImport, getErrorCsvPath } from '../services/feeBulkUpload';
 import { AppError } from '../utils/AppError';
+import { validateSpreadsheetBytes } from '../utils/security';
 import { i18n } from '../i18n/en';
 import { z } from 'zod';
 import { validateBody, validateParams } from '../middlewares/validate';
@@ -24,7 +25,7 @@ const FeeConfirmSchema = z.object({
   duplicateStrategy: z.enum(['SKIP', 'UPDATE', 'ERROR']).default('SKIP'),
 });
 
-const IdParam = z.object({ id: z.string().min(3).max(100) });
+const IdParam = z.object({ id: z.string().min(3).max(100).trim() });
 
 function parseMultipartForm(req: IncomingMessage): Promise<{ fields: Fields; files: Files }> {
   const uploadDir = ensureTmpDir();
@@ -65,6 +66,8 @@ export const stageFeeBulkUpload = catchAsync(async (req: Request, res: Response,
   }
   const ext = path.extname(file.originalFilename).toLowerCase();
   if (!ALLOWED_EXT.has(ext)) return next(new AppError(i18n.errors.upload.unsupportedFormat, 400));
+  const v = validateSpreadsheetBytes(file.filepath, ext);
+  if (!v.ok) return next(new AppError(v.error!, 400));
 
   try {
     const result = await stageFeeUpload({

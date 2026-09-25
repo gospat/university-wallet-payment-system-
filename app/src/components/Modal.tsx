@@ -13,7 +13,7 @@ const SIZE_CLASSES: Record<ModalSize, string> = {
 interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
-  title: string;
+  title?: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
   size?: ModalSize;
@@ -23,31 +23,60 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer,
   const titleId = useId();
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const lastActiveRef = useRef<HTMLElement | null>(null);
+  const didOpenRef = useRef(false);
 
+  // Open-focus: fire ONLY on the false → true transition of isOpen.
+  // NEVER re-run on subsequent re-renders or onClose identity changes
+  // (that would steal focus from form inputs back to the X on every keystroke).
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      didOpenRef.current = false;
+      return;
+    }
+    if (didOpenRef.current) return;
+    didOpenRef.current = true;
     lastActiveRef.current = document.activeElement as HTMLElement | null;
     requestAnimationFrame(() => {
-      closeBtnRef.current?.focus();
+      const dialogEl = closeBtnRef.current?.closest('[role="dialog"]') as HTMLElement | null;
+      const firstInput = dialogEl?.querySelector<HTMLElement>(
+        'input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (firstInput && typeof firstInput.focus === 'function') {
+        firstInput.focus({ preventScroll: true });
+      } else {
+        closeBtnRef.current?.focus?.();
+      }
     });
+  }, [isOpen]);
 
+  // Close-restore: fire ONLY on the true → false transition of isOpen.
+  useEffect(() => {
+    if (isOpen) return;
+    return () => {
+      if (didOpenRef.current) {
+        didOpenRef.current = false;
+        requestAnimationFrame(() => {
+          lastActiveRef.current?.focus?.();
+          lastActiveRef.current = null;
+        });
+      }
+    };
+  }, [isOpen]);
+
+  // Escape-key listener. Safe to re-bind when onClose / isOpen changes.
+  useEffect(() => {
+    if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      requestAnimationFrame(() => {
-        lastActiveRef.current?.focus?.();
-      });
-    };
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
   return (
     <div
-      key={isOpen ? 'open' : 'closed'}
       role="presentation"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm transition-opacity"
       onMouseDown={(e) => {
@@ -57,30 +86,43 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer,
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby={titleId}
-        className={`bg-white rounded-2xl shadow-xl w-full ${SIZE_CLASSES[size]} transform transition-all scale-100`}
+        aria-labelledby={title ? titleId : undefined}
+        className={`bg-white rounded-2xl shadow-xl w-full ${SIZE_CLASSES[size]} transform transition-all scale-100 flex flex-col max-h-[90vh] overflow-hidden`}
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-gray-100">
-          <h3 id={titleId} className="text-xl font-bold text-gray-900">{title}</h3>
-          <button 
-            onClick={onClose}
-            ref={closeBtnRef}
-            aria-label="Close dialog"
-            className="text-gray-400 hover:text-gray-500 hover:bg-gray-100 p-2 rounded-full transition-colors"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+        {title !== undefined && title !== null ? (
+          <div className="flex items-center justify-between p-6 border-b border-gray-100 shrink-0">
+            <h3 id={titleId} className="text-xl font-bold text-gray-900">{title}</h3>
+            <button
+              onClick={onClose}
+              ref={closeBtnRef}
+              aria-label="Close dialog"
+              className="text-gray-400 hover:text-gray-500 hover:bg-gray-100 p-2 rounded-full transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end p-2 shrink-0 z-10 relative">
+            <button
+              onClick={onClose}
+              ref={closeBtnRef}
+              aria-label="Close dialog"
+              className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 p-2 rounded-full transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        )}
 
-        {/* Body */}
-        <div className="p-6">
+        {/* Body — scrollable */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
           {children}
         </div>
 
-        {/* Footer */}
+        {/* Footer — sticky */}
         {footer && (
-          <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-100 bg-gray-50/50 rounded-b-2xl">
+          <div className="shrink-0 px-6 py-4 border-t border-gray-100 bg-gray-50 rounded-b-2xl">
             {footer}
           </div>
         )}

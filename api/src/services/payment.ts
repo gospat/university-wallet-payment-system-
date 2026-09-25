@@ -42,8 +42,8 @@ export const InitiatePaymentSchema = z
   .object({
     invoiceId: z.coerce.number().int().positive(),
     partialAmount: z.union([z.number().positive(), z.string().refine((s) => Number(s) > 0, { message: 'positive numeric required' }).transform((s) => Number(s))]).optional(),
-    email: z.string().email().optional(),
-    idempotencyKey: z.string().min(1).max(128).optional(),
+    email: z.string().trim().max(255).email().optional(),
+    idempotencyKey: z.string().min(1).max(128).trim().optional(),
   })
   .strict()
   .refine((v) => !('amount' in (v as any)), {

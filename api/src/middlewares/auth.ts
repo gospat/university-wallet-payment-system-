@@ -24,6 +24,9 @@ export const protect = catchAsync(
     if (authHeader && authHeader.startsWith('Bearer')) {
       token = authHeader.split(' ')[1];
     }
+    if (!token && typeof (req.query as any).access_token === 'string') {
+      token = (req.query as any).access_token;
+    }
 
     if (!token) {
       return next(new AppError('You are not logged in! Please log in to get access.', 401));
@@ -38,6 +41,10 @@ export const protect = catchAsync(
 
     if (typeof decoded !== 'object' || !decoded || typeof decoded.id !== 'number') {
       return next(new AppError('Invalid token. Please log in again.', 401));
+    }
+
+    if (decoded.type && decoded.type !== 'access') {
+      return next(new AppError('Invalid token type. Please use an access token.', 401));
     }
 
     const currentUser = await prisma.user.findUnique({

@@ -38,6 +38,15 @@ const fmtDate = (d: string | Date | null | undefined) => {
 const toISODate = (s: string | null | undefined) =>
   s ? new Date(s).toISOString().slice(0, 10) : '';
 
+const SectionTitle: React.FC<{ num: 1 | 2 | 3; text: string }> = ({ num, text }) => (
+  <div className="flex items-center gap-2 mb-2">
+    <div className="h-6 w-6 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center">
+      {num}
+    </div>
+    <div className="text-sm font-semibold text-gray-900">{text}</div>
+  </div>
+);
+
 const DirectBillForm: React.FC<DirectBillFormProps> = ({
   actorRole,
   onSuccess,
@@ -63,7 +72,7 @@ const DirectBillForm: React.FC<DirectBillFormProps> = ({
   const [noteToStudent, setNoteToStudent] = useState<string>('');
 
   const [submitting, setSubmitting] = useState(false);
-  const [submitErr, setSubmitErr] = useState<string | null>(null);
+  const [submitErr, setSubmitErr] = useState<{ title: string; details?: string[] | null } | null>(null);
   const [submitOk, setSubmitOk] = useState<DirectStudentBillSuccessResp | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -118,7 +127,6 @@ const DirectBillForm: React.FC<DirectBillFormProps> = ({
   useEffect(() => {
     resetOutcome();
   }, [matric, mode, selectedFeeId, adhocName, overrideAmount, overrideDeadline, noteToStudent]);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit || !resolved) return;
@@ -146,11 +154,25 @@ const DirectBillForm: React.FC<DirectBillFormProps> = ({
           overrideAmount: Number(overrideAmount.trim()),
         };
       }
-      const resp = await feeApi.createDirectStudentBill(body);
+      const resp = await feeApi.createDirectStudentBill(body, {
+        idempotencyKey: `direct-bill-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      });
       setSubmitOk(resp);
       onSuccess?.(resp);
     } catch (err: any) {
-      setSubmitErr(err?.message?.toString?.() || 'Failed to bill student. Please retry.');
+      const backendTitle: string = err?.response?.data?.message ?? err?.message?.toString?.() ?? 'Failed to bill student. Please retry.';
+      const rawDetails: Array<{ path?: string; message?: string; received?: any }> | undefined = err?.response?.data?.details;
+      let details: string[] | null = null;
+      if (Array.isArray(rawDetails)) {
+        details = rawDetails.slice(0, 8).map((d: any) => {
+          const p = d?.path ? `${d.path}: ` : '';
+          const m = d?.message ?? 'Invalid value';
+          const r = d?.received !== undefined && String(d.received) !== '' ? ` (received: ${JSON.stringify(d.received)})` : '';
+          return `${p}${m}${r}`;
+        });
+        if (rawDetails.length > 8) details.push(`…and ${rawDetails.length - 8} more`);
+      }
+      setSubmitErr({ title: backendTitle, details });
     } finally {
       setSubmitting(false);
     }
@@ -166,15 +188,6 @@ const DirectBillForm: React.FC<DirectBillFormProps> = ({
       /* noop */
     }
   };
-
-  const SectionTitle: React.FC<{ num: 1 | 2 | 3; text: string }> = ({ num, text }) => (
-    <div className="flex items-center gap-2 mb-2">
-      <div className="h-6 w-6 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center">
-        {num}
-      </div>
-      <div className="text-sm font-semibold text-gray-900">{text}</div>
-    </div>
-  );
 
   return (
     <form onSubmit={handleSubmit} className={`space-y-5 ${compact ? '' : 'px-1'}`}>
@@ -396,7 +409,18 @@ const DirectBillForm: React.FC<DirectBillFormProps> = ({
       {submitErr && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex items-start gap-2">
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-600" />
-          <div className="min-w-0 flex-1">{submitErr}</div>
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="font-medium">{submitErr.title}</div>
+            {submitErr.details && submitErr.details.length > 0 && (
+              <ul className="space-y-1">
+                {submitErr.details.map((d, i) => (
+                  <li key={i} className="text-xs leading-relaxed pl-3 border-l-2 border-red-200/80 opacity-90">
+                    {d}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
       )}
 

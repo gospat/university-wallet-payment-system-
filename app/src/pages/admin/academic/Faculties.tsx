@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Pencil, Ban, Plus, Search } from 'lucide-react';
+import { Pencil, Ban, Plus, Trash2, Search, Download, UploadCloud } from 'lucide-react';
 import PortalShell from '../../../components/PortalShell';
 import ConfirmAction from '../../../components/ConfirmAction';
 import Modal from '../../../components/Modal';
 import { useAuth } from '../../../context/AuthContext';
-import { facultiesApi, FacultyOut, CreateFacultyInput, UpdateFacultyInput } from '../../../services/academicApi';
+import { facultiesApi, FacultyOut, CreateFacultyInput, UpdateFacultyInput, templateDownloadUrl, facultiesTemplateXlsxUrl, BulkImportResult } from '../../../services/academicApi';
+import BulkImportModal from '../../../components/academic/BulkImportModal';
 import { navCounters, NavCounters } from '../../../services/api';
 import { i18n } from '../../../i18n/en';
 
@@ -37,6 +38,8 @@ type ConfirmState = {
   resourceLabel: string;
   onConfirm: (payload: { reason?: string }) => Promise<void> | void;
   loading: boolean;
+  confirmLabel: string;
+  confirmVariant: 'danger' | 'warning' | 'primary';
 };
 
 const FacultiesPage: React.FC = () => {
@@ -64,8 +67,11 @@ const FacultiesPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
 
   const [confirm, setConfirm] = useState<ConfirmState>({
-    isOpen: false, title: '', description: '', resourceLabel: '', onConfirm: () => {}, loading: false,
+    isOpen: false, title: '', description: '', resourceLabel: '', onConfirm: () => {}, loading: false, confirmLabel: 'Confirm', confirmVariant: 'danger',
   });
+
+  const portalRole: 'ADMIN' | 'BURSARY' = user?.role === 'BURSARY' ? 'BURSARY' : 'ADMIN';
+  const canWrite = portalRole === 'ADMIN';
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -85,6 +91,32 @@ const FacultiesPage: React.FC = () => {
   }, [page, pageSize, q]);
 
   useEffect(() => { load(); }, [load]);
+
+  const [bulkModal, setBulkModal] = useState(false);
+
+  const handleBulkSuccess = (_r: BulkImportResult) => {
+    load();
+  };
+
+  const doDownloadTemplate = () => {
+    const directUrl = templateDownloadUrl('college');
+    const a = document.createElement('a');
+    a.href = directUrl;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const doDownloadTemplateXlsx = () => {
+    const directUrl = facultiesTemplateXlsxUrl();
+    const a = document.createElement('a');
+    a.href = directUrl;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
 
   const openCreate = () => {
     setForm({ name: '', code: '', description: '', isActive: true });
@@ -119,6 +151,13 @@ const FacultiesPage: React.FC = () => {
       }
       setModal({ open: false, kind: 'create' });
       load();
+    } catch (e: any) {
+      setAlert({
+        isOpen: true,
+        type: 'error',
+        title: modal.kind === 'create' ? 'Could not create college' : 'Could not update college',
+        message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+      });
     } finally {
       setSubmitting(false);
     }
@@ -127,10 +166,12 @@ const FacultiesPage: React.FC = () => {
   const openDeactivate = (f: FacultyOut) => {
     setConfirm({
       isOpen: true,
-      title: 'Deactivate Faculty',
-      description: 'This will deactivate this faculty. Active children that reference it (if any) will prevent deactivation.',
-      resourceLabel: `Faculty: ${f.name} (${f.code})`,
+      title: 'Deactivate College',
+      description: 'This will deactivate this college. Active children that reference it (if any) will prevent deactivation.',
+      resourceLabel: `College: ${f.name} (${f.code})`,
       loading: false,
+      confirmLabel: 'Deactivate',
+      confirmVariant: 'danger',
       onConfirm: async () => {
         setConfirm((c) => ({ ...c, loading: true }));
         try {
@@ -139,7 +180,40 @@ const FacultiesPage: React.FC = () => {
           load();
         } catch (e: any) {
           setConfirm((c) => ({ ...c, loading: false }));
-          throw e;
+          setAlert({
+            isOpen: true,
+            type: 'error',
+            title: 'Could not deactivate college',
+            message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+          });
+        }
+      },
+    });
+  };
+
+  const openDelete = (f: FacultyOut) => {
+    setConfirm({
+      isOpen: true,
+      title: 'Delete College (permanent)',
+      description: 'This will PERMANENTLY delete this college and all of its structure/history. It CANNOT be undone. If any departments, students, or fees still reference this college, you will see a detailed error telling you exactly what must be removed first. To keep history and preserve references, use Deactivate (soft-delete) instead.',
+      resourceLabel: `College: ${f.name} (${f.code})`,
+      loading: false,
+      confirmLabel: 'Delete',
+      confirmVariant: 'danger',
+      onConfirm: async () => {
+        setConfirm((c) => ({ ...c, loading: true }));
+        try {
+          await facultiesApi.remove(f.id);
+          setConfirm((c) => ({ ...c, isOpen: false, loading: false }));
+          load();
+        } catch (e: any) {
+          setConfirm((c) => ({ ...c, loading: false }));
+          setAlert({
+            isOpen: true,
+            type: 'error',
+            title: 'Could not delete college',
+            message: e?.response?.data?.message ?? e?.message ?? String(e ?? 'Unknown error'),
+          });
         }
       },
     });
@@ -151,15 +225,40 @@ const FacultiesPage: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Faculties</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage academic faculties in the institution.</p>
+          <h1 className="text-2xl font-bold text-gray-900">Colleges</h1>
+          <p className="text-sm text-gray-500 mt-1">Manage academic colleges in the institution. Bursary role has read-only access.</p>
         </div>
-        <button
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm"
-        >
-          <Plus className="h-4 w-4" /> Create Faculty
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {canWrite && (
+            <>
+              <button
+                onClick={doDownloadTemplate}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 rounded-lg font-medium text-sm"
+              >
+                <Download className="h-4 w-4" /> Download CSV Template
+              </button>
+              <button
+                onClick={doDownloadTemplateXlsx}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-green-300 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg font-medium text-sm"
+              >
+                📗 Download .XLSX Template (2 sheets)
+              </button>
+              <button
+                onClick={() => setBulkModal(true)}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg font-medium text-sm"
+              >
+                <UploadCloud className="h-4 w-4" /> Upload CSV / Excel
+              </button>
+            </>
+          )}
+          <button
+            onClick={openCreate}
+            disabled={!canWrite}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Plus className="h-4 w-4" /> Create College
+          </button>
+        </div>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-2xl p-4">
@@ -193,7 +292,7 @@ const FacultiesPage: React.FC = () => {
                 <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-500">Loading…</td></tr>
               )}
               {!loading && (rows?.length ?? 0) === 0 && (
-                <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-500">No faculties found.</td></tr>
+                <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-500">No colleges found.</td></tr>
               )}
               {rows.map((f) => (
                 <tr key={f.id} className="hover:bg-gray-50/60">
@@ -215,6 +314,12 @@ const FacultiesPage: React.FC = () => {
                         className="inline-flex items-center gap-1 text-red-700 hover:text-red-900 px-2 py-1 rounded hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Ban className="h-3.5 w-3.5" /> Deactivate
+                      </button>
+                      <button
+                        onClick={() => openDelete(f)}
+                        className="inline-flex items-center gap-1 text-red-700 hover:text-red-900 px-2 py-1 rounded bg-red-50 hover:bg-red-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Delete
                       </button>
                     </div>
                   </td>
@@ -248,7 +353,7 @@ const FacultiesPage: React.FC = () => {
       <Modal
         isOpen={modal.open}
         onClose={() => setModal({ open: false, kind: 'create' })}
-        title={modal.kind === 'create' ? 'Create Faculty' : `Edit Faculty: ${modal.initial?.name ?? ''}`}
+        title={modal.kind === 'create' ? 'Create College' : `Edit College: ${modal.initial?.name ?? ''}`}
         footer={
           <>
             <button
@@ -269,7 +374,7 @@ const FacultiesPage: React.FC = () => {
       >
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="Name">
-            <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Faculty of Science" />
+            <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. College of Natural Sciences" />
           </Field>
           <Field label="Code">
             <input className={inputCls} value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} placeholder="e.g. SCI" />
@@ -296,8 +401,8 @@ const FacultiesPage: React.FC = () => {
         description={confirm.description}
         resourceLabel={confirm.resourceLabel}
         reasonRequired={false}
-        confirmVariant="danger"
-        confirmLabel="Deactivate"
+        confirmVariant={confirm.confirmVariant}
+        confirmLabel={confirm.confirmLabel}
         loading={confirm.loading}
       />
 
@@ -316,13 +421,22 @@ const FacultiesPage: React.FC = () => {
       >
         <p className="text-gray-700 whitespace-pre-wrap break-words select-text text-sm">{alert.message}</p>
       </Modal>
+
+      <BulkImportModal
+        kind="college"
+        isOpen={bulkModal}
+        onClose={() => setBulkModal(false)}
+        onSuccess={handleBulkSuccess}
+      />
     </div>
   );
 
+  const activePathPrefix = portalRole === 'BURSARY' ? '/bursary' : '/admin';
+
   return (
     <PortalShell
-      role="ADMIN"
-      activePath="/admin/academic/faculties"
+      role={portalRole}
+      activePath={`${activePathPrefix}/academic/faculties`}
       brand={brand}
       userText={userText}
       userEmail={user?.email}

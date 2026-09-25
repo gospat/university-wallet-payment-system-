@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
+  Download,
   Filter,
   Info,
   Loader2,
@@ -147,6 +148,13 @@ const AdminAuditLogs: React.FC = () => {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <a
+              href={auditApi.exportUrl(filters)}
+              download
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 text-sm font-semibold hover:bg-emerald-100"
+            >
+              <Download className="w-4 h-4" /> CSV export
+            </a>
             <button onClick={() => setFiltersOpen((x) => !x)} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-sm hover:bg-slate-50">
               <Filter className="w-4 h-4" /> Filters
             </button>
@@ -362,7 +370,7 @@ const AdminAuditLogs: React.FC = () => {
         title={detail ? `Audit #${detail.id} · ${detail.action} ${detail.entity}` : 'Audit Details'}
       >
         {detail && (
-          <div className="space-y-5 text-sm max-h-[75vh] overflow-y-auto pr-2">
+          <div className="space-y-5 text-sm">
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Time</div>

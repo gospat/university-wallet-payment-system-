@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Save, RotateCcw, Settings, CreditCard, Shield, Landmark, FileText, BookOpen, PenLine, Info } from 'lucide-react';
+import { Save, RotateCcw, Settings, CreditCard, Shield, Landmark, FileText, PenLine, Info } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
 import ConfirmAction from '../../components/ConfirmAction';
 import Modal from '../../components/Modal';
 import { useAuth } from '../../context/AuthContext';
 import { settingsApi, SystemSettingsOut, SystemSettingsPatch } from '../../services/adminApi';
 import { navCounters, NavCounters } from '../../services/api';
-import { Link, useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { i18n } from '../../i18n/en';
 
 const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm';
@@ -446,37 +446,6 @@ const SystemSettingsPage: React.FC = () => {
                     <em> "requires no signature"</em> to <em>"validates the Bursary signatory above"</em> and renders a
                     2-column signature + <strong>"APPROVED BY"</strong> manual stamp box on printed PDFs.
                   </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="p-6 border-b border-gray-100 flex items-center gap-3">
-                <div className="p-2 bg-indigo-50 rounded-lg">
-                  <BookOpen className="h-5 w-5 text-indigo-700" />
-                </div>
-                <div>
-                  <h2 className="text-lg font-bold text-gray-900">Session</h2>
-                  <p className="text-sm text-gray-500">Academic sessions configuration</p>
-                </div>
-              </div>
-              <div className="p-6">
-                <div className="border border-indigo-200 bg-indigo-50/50 rounded-lg p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <BookOpen className="h-4 w-4 text-indigo-600" />
-                      <span className="text-sm font-semibold text-indigo-900">Academic Sessions</span>
-                    </div>
-                    <p className="text-sm text-indigo-700">
-                      Academic sessions are managed in the Academic Structure → Sessions module.
-                    </p>
-                  </div>
-                  <Link
-                    to="/admin/academic/sessions"
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-sm transition-colors self-start sm:self-center"
-                  >
-                    Go to Sessions →
-                  </Link>
                 </div>
               </div>
             </div>

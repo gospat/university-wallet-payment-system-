@@ -112,3 +112,11 @@ export const disableFee = [
     res.status(200).json({ status: 'success', data: { fee: updated } });
   }),
 ];
+
+export const deleteFee = [
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response) => {
+    const removed = await FeeService.remove(Number(req.params.id), req);
+    res.status(200).json({ status: 'success', data: removed });
+  }),
+];

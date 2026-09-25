@@ -7,7 +7,8 @@ import api, { navCounters, NavCounters } from '../../services/api';
 import type { AxiosRequestConfig } from 'axios';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Copy, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap } from 'lucide-react';
+import { Copy, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap, ShieldAlert, Key, Lock } from 'lucide-react';
+import { programmesApi } from '../../services/academicApi';
 
 type ProgrammeOption = {
   id: number;
@@ -16,8 +17,6 @@ type ProgrammeOption = {
   departmentName?: string | null;
   collegeName?: string | null;
 };
-type LevelOption = { id: number; level: number; programmeId?: number | null };
-type SessionOption = { id: number; name: string; isActive?: boolean };
 
 type StudentRow = {
   id: number;
@@ -49,6 +48,7 @@ type AlertState = {
   title: string;
   message: string;
   type: 'error' | 'success' | 'info';
+  details?: string[] | null;
   actionLabel?: string;
   onAction?: () => void;
 };
@@ -78,8 +78,6 @@ type StudentInputState = {
   password: string;
   matricNumber: string;
   programmeId: string;
-  levelId: string;
-  academicSessionId: string;
   studentType: string;
   phoneNumber: string;
   accountStatus: string;
@@ -88,7 +86,7 @@ type StudentInputState = {
 const emptyInput = (): StudentInputState => ({
   email: '', firstName: '', middleName: '', lastName: '',
   password: generateStrongPassword(),
-  matricNumber: '', programmeId: '', levelId: '', academicSessionId: '',
+  matricNumber: '', programmeId: '',
   studentType: 'UNDERGRADUATE', phoneNumber: '', accountStatus: 'ACTIVE',
 });
 
@@ -107,6 +105,45 @@ const StatusPill: React.FC<{ status: string }> = ({ status }) => {
   );
 };
 
+type Validity = 'idle' | 'ok' | 'warn' | 'err';
+
+const baseInputCls = 'w-full px-3 py-2 rounded-lg border text-sm bg-white transition';
+
+const borderFor = (validity: Validity): string => {
+  switch (validity) {
+    case 'ok': return 'border-green-400 focus:ring-green-500 focus:border-green-500';
+    case 'warn': return 'border-amber-400 focus:ring-amber-500 focus:border-amber-500';
+    case 'err': return 'border-red-400 focus:ring-red-500 focus:border-red-500';
+    default: return 'border-gray-300 focus:ring-blue-500 focus:border-blue-500';
+  }
+};
+
+const validInput = (validity?: Validity): string => `${baseInputCls} ${borderFor(validity ?? 'idle')}`;
+
+const Field: React.FC<{
+  label: string;
+  hint?: string;
+  required?: boolean;
+  validity?: Validity;
+  forceValidation?: boolean;
+  children: React.ReactNode;
+}> = ({ label, hint, required, validity = 'idle', forceValidation = false, children }) => {
+  const state = (forceValidation || validity === 'ok') ? validity : 'idle';
+  return (
+    <div className="space-y-1">
+      <label className="flex items-center gap-1 text-[13px] font-semibold text-gray-800">
+        {label}
+        <span className={`text-red-500 leading-none ${required ? '' : 'hidden'}`}>*</span>
+        <CheckCircle2 className={`w-3.5 h-3.5 text-green-600 ${state === 'ok' ? '' : 'hidden'}`} />
+        <AlertTriangle className={`w-3.5 h-3.5 text-amber-600 ${state === 'warn' ? '' : 'hidden'}`} />
+        <XCircle className={`w-3.5 h-3.5 text-red-600 ${state === 'err' ? '' : 'hidden'}`} />
+      </label>
+      {children}
+      <p className={`text-[11px] text-gray-500 leading-tight ${hint && state !== 'err' ? '' : 'hidden'}`}>{hint ?? ''}</p>
+    </div>
+  );
+};
+
 const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userText: string; onLogout: () => void; goBack: () => void; dashboardTo: string; }> = ({ role, brand, userText, onLogout, goBack, dashboardTo }) => {
   const { user } = useAuth();
   const location = useLocation();
@@ -117,14 +154,20 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   void goBack;
   void dashboardTo;
 
-  // Hierarchy dropdown options (Programmes / Levels / Sessions) — populated
-  // once on mount. If the user hasn't set up Programme/Level/Session yet
-  // (clean slate Option B), we show helpful empty-state callouts.
+  // Hierarchy dropdown options (Programmes) — populated once on
+  // mount. If the user hasn't set up Programme yet (clean slate), we
+  // show helpful empty-state callouts. Level is intentionally NOT required on
+  // the student record — it can be derived later from programme duration, and
+  // the filter/sort bars still allow filtering by numeric level column.
   const [programmeOptions, setProgrammeOptions] = useState<ProgrammeOption[]>([]);
-  const [levelOptions, setLevelOptions] = useState<LevelOption[]>([]);
-  const [sessionOptions, setSessionOptions] = useState<SessionOption[]>([]);
   const [hierarchyLoading, setHierarchyLoading] = useState(true);
   const [hierarchyErr, setHierarchyErr] = useState<string | null>(null);
+
+  // Guard refs — set synchronously during render from downstream state vars
+  // declared later (editorOpen, bulkOpen). Allows the viewMode useEffect (L181)
+  // to check them without TS "used before declaration" errors.
+  const editorOpenRef = useRef<'create' | 'edit' | null>(null);
+  const bulkOpenRef = useRef(false);
 
   useEffect(() => {
     navCounters().then(setNavCounts);
@@ -136,41 +179,16 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       setHierarchyLoading(true);
       setHierarchyErr(null);
       try {
-        const [progs, levels, sess] = await Promise.all([
-          api.get<any>('/academic/programmes?limit=500').then((r) => {
-            const d = r.data?.data?.items ?? r.data?.data;
-            if (!Array.isArray(d)) return [];
-            return d.map((x: any): ProgrammeOption => ({
-              id: Number(x.id),
-              name: String(x.name ?? ''),
-              code: x.code ?? null,
-              departmentName: String(x.department?.name ?? ''),
-              collegeName: String(x.department?.faculty?.name ?? ''),
-            }));
-          }),
-          api.get<any>('/academic/levels?limit=500').then((r) => {
-            const d = r.data?.data?.items ?? r.data?.data;
-            if (!Array.isArray(d)) return [];
-            return d.map((x: any): LevelOption => ({
-              id: Number(x.id),
-              level: Number(x.level),
-              programmeId: x.programmeId ?? null,
-            }));
-          }),
-          api.get<any>('/academic/sessions?limit=200').then((r) => {
-            const d = r.data?.data?.items ?? r.data?.data;
-            if (!Array.isArray(d)) return [];
-            return d.map((x: any): SessionOption => ({
-              id: Number(x.id),
-              name: String(x.name ?? ''),
-              isActive: x.isActive,
-            }));
-          }),
-        ]);
+        const progsResp = await programmesApi.list({ page: 1, pageSize: 500 });
         if (cancelled) return;
+        const progs: ProgrammeOption[] = progsResp.items.map((x: any) => ({
+          id: Number(x.id),
+          name: String(x.name ?? ''),
+          code: x.code ?? null,
+          departmentName: String(x.department?.name ?? ''),
+          collegeName: String(x.department?.faculty?.name ?? ''),
+        }));
         setProgrammeOptions(progs);
-        setLevelOptions(levels);
-        setSessionOptions(sess);
       } catch (e: any) {
         if (!cancelled) setHierarchyErr(e?.message ?? 'Failed to load');
       } finally {
@@ -183,24 +201,21 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
 
   useEffect(() => {
     if (viewMode === 'create') {
+      if (editorOpenRef.current === 'create' || editorOpenRef.current === 'edit') return;
       setEditorState(emptyInput());
       setEditingId(null);
       setEditorOpen('create');
     } else if (viewMode === 'upload') {
+      if (bulkOpenRef.current) return;
       resetBulk();
       setBulkOpen(true);
-    } else if (viewMode === 'history') {
-      setTimeout(() => {
-        const el = document.getElementById('import-history');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
     }
   }, [viewMode]);
 
   // ---- query state --------------------------------------------------------
   const [query, setQuery] = useState({
     q: '', matric: '', college: '', department: '', program: '',
-    level: '', session: '', studentType: '', accountStatus: '',
+    studentType: '', accountStatus: '',
     page: '1', pageSize: '25', sort: 'createdAt', order: 'desc',
   });
   type StudentsPageDataNormalized = { students: StudentRow[]; total: number; page: number; pageSize: number; pageCount?: number };
@@ -263,13 +278,14 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [query.q, query.matric, query.college, query.department, query.program, query.level, query.session, query.studentType, query.accountStatus]);
+  }, [query.q, query.matric, query.college, query.department, query.program, query.studentType, query.accountStatus]);
 
   // ---- alerts and toast ---------------------------------------------------
   const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'error' });
 
   // ---- create/edit modal -------------------------------------------------
   const [editorOpen, setEditorOpen] = useState<'create' | 'edit' | null>(null);
+  editorOpenRef.current = editorOpen;
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editorState, setEditorState] = useState<StudentInputState>(emptyInput());
   const [editorSubmitting, setEditorSubmitting] = useState(false);
@@ -281,8 +297,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       password: '',
       matricNumber: s.matricNumber ?? '',
       programmeId: '',
-      levelId: '',
-      academicSessionId: '',
       studentType: s.studentType ?? 'UNDERGRADUATE',
       phoneNumber: s.phoneNumber ?? '',
       accountStatus: s.accountStatus,
@@ -303,8 +317,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       { field: 'Email', ok: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.email) },
       { field: 'Matric Number', ok: !!v.matricNumber.trim() },
       { field: 'Programme', ok: !!v.programmeId },
-      { field: 'Level', ok: !!v.levelId },
-      { field: 'Academic Session', ok: !!v.academicSessionId },
       { field: 'Temporary Password', ok: editorOpen === 'edit' ? true : (v.password.length >= 8) },
     ];
   };
@@ -320,7 +332,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         const v = editorState[k];
         if (v === '' || v === undefined || v === null) return;
         if (k === 'password' && editorOpen === 'edit') return;
-        if (k === 'programmeId' || k === 'levelId' || k === 'academicSessionId') {
+        if (k === 'programmeId') {
           const n = Number(v);
           if (!Number.isNaN(n) && n > 0) payload[k] = n;
         } else {
@@ -339,7 +351,26 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       setSearchParams({});
       loadStudents();
     } catch (err: any) {
-      setAlert({ isOpen: true, title: editorOpen === 'create' ? i18n.dashboard.admin.addStudentFailed : 'Save failed', message: err?.message ?? i18n.errors.generic, type: 'error' });
+      const fallbackTitle = editorOpen === 'create' ? i18n.dashboard.admin.addStudentFailed : 'Save failed';
+      const backendTitle: string = err?.response?.data?.message ?? err?.message ?? i18n.errors.generic;
+      const rawDetails: Array<{ path?: string; message?: string; received?: any; expected?: any }> | undefined = err?.response?.data?.details;
+      let details: string[] | null = null;
+      if (Array.isArray(rawDetails)) {
+        details = rawDetails.slice(0, 8).map((d: any) => {
+          const p = d?.path ? `${d.path}: ` : '';
+          const m = d?.message ?? 'Invalid value';
+          const r = d?.received !== undefined && String(d.received) !== '' ? ` (received: ${JSON.stringify(d.received)})` : '';
+          return `${p}${m}${r}`;
+        });
+        if (rawDetails.length > 8) details.push(`…and ${rawDetails.length - 8} more`);
+      }
+      setAlert({
+        isOpen: true,
+        title: backendTitle || fallbackTitle,
+        message: details && details.length > 0 ? 'Please correct the highlighted fields below.' : (backendTitle || fallbackTitle),
+        details,
+        type: 'error',
+      });
     } finally {
       setEditorSubmitting(false);
     }
@@ -349,11 +380,15 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [resetOpen, setResetOpen] = useState<StudentRow | null>(null);
   const [resetSubmitting, setResetSubmitting] = useState(false);
   const [tempPassword, setTempPassword] = useState<string | null>(null);
+  const [showResetPw, setShowResetPw] = useState(false);
+  const [copiedResetPw, setCopiedResetPw] = useState(false);
 
   const submitReset = async () => {
     if (!resetOpen) return;
     setResetSubmitting(true);
     setTempPassword(null);
+    setShowResetPw(false);
+    setCopiedResetPw(false);
     try {
       const res = await api.post<{ data: { temporaryPassword: string } }>(`/students/${resetOpen.id}/reset-password`);
       const tp = res.data?.data?.temporaryPassword;
@@ -363,6 +398,15 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     } finally {
       setResetSubmitting(false);
     }
+  };
+
+  const copyResetPw = async () => {
+    if (!tempPassword) return;
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      setCopiedResetPw(true);
+      setTimeout(() => setCopiedResetPw(false), 1500);
+    } catch (_) {}
   };
 
   // ---- set status --------------------------------------------------------
@@ -393,6 +437,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
 
   // ---- bulk upload -------------------------------------------------------
   const [bulkOpen, setBulkOpen] = useState(false);
+  bulkOpenRef.current = bulkOpen;
   const [bulkStep, setBulkStep] = useState<1 | 2 | 3>(1);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [bulkUploading, setBulkUploading] = useState(false);
@@ -438,9 +483,26 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     }
   };
 
+  const studentsTemplateUrl = (): string => {
+    const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
+    const token = localStorage.getItem('token') ?? '';
+    return `${base}/admin/students/template.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  };
+  const studentsTemplateXlsxUrl = (): string => {
+    const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
+    const token = localStorage.getItem('token') ?? '';
+    return `${base}/admin/students/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  };
+  const studentsErrorsUrl = (): string => {
+    if (!bulkStage?.uploadId) return '';
+    const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
+    const token = localStorage.getItem('token') ?? '';
+    return `${base}/admin/students/upload/${bulkStage.uploadId}/errors.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  };
   const downloadErrorsCsv = () => {
-    if (!bulkStage?.uploadId) return;
-    const w = window.open(`${api.defaults.baseURL}/admin/students/upload/${bulkStage.uploadId}/errors.csv?t=${Date.now()}`, '_blank', 'noopener,noreferrer');
+    const url = studentsErrorsUrl();
+    if (!url) return;
+    const w = window.open(url, '_blank', 'noopener,noreferrer');
     if (w) w.focus();
   };
 
@@ -477,41 +539,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   };
   const rerollPw = () => patchEditor({ password: generateStrongPassword() });
 
-  type Validity = 'idle' | 'ok' | 'warn' | 'err';
-  const borderFor = (validity: Validity): string => {
-    switch (validity) {
-      case 'ok': return 'border-green-400 focus:ring-green-500 focus:border-green-500';
-      case 'warn': return 'border-amber-400 focus:ring-amber-500 focus:border-amber-500';
-      case 'err': return 'border-red-400 focus:ring-red-500 focus:border-red-500';
-      default: return 'border-gray-300 focus:ring-blue-500 focus:border-blue-500';
-    }
-  };
-  const Field: React.FC<{
-    label: string;
-    hint?: string;
-    required?: boolean;
-    validity?: Validity;
-    children: React.ReactNode;
-  }> = ({ label, hint, required, validity = 'idle', children }) => {
-    const state = (editorValidityCheck > 0 || validity === 'ok') ? validity : 'idle';
-    return (
-      <div className="space-y-1">
-        <label className="flex items-center gap-1 text-[13px] font-semibold text-gray-800">
-          {label}
-          {required && <span className="text-red-500 leading-none">*</span>}
-          {state === 'ok' && <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />}
-          {state === 'warn' && <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />}
-          {state === 'err' && <XCircle className="w-3.5 h-3.5 text-red-600" />}
-        </label>
-        {children}
-        {hint && state !== 'err' && <p className="text-[11px] text-gray-500 leading-tight">{hint}</p>}
-      </div>
-    );
-  };
-  const baseInputCls = 'w-full px-3 py-2 rounded-lg border text-sm bg-white transition';
-  // String variant kept for legacy uses (filters table, bulk wizard) that don't pass validity.
-  // Use `validInput(validity)` inside the Add/Edit Student modal for colored borders.
-  const validInput = (validity?: Validity) => `${baseInputCls} ${borderFor(validity ?? 'idle')}`;
   const inputCls: string = validInput();
 
   const sectionHead = (title: string, icon: React.ReactNode, subtitle?: string) => (
@@ -564,14 +591,33 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
             <p className="text-gray-500 mt-1">{students.pageSubtitle}</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <button onClick={() => { setSearchParams({ view: 'create' }); }} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm">
-              {students.createButton}
-            </button>
-            {canBulk && (
-              <button onClick={() => { setSearchParams({ view: 'upload' }); }} className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-lg font-medium text-sm">
-                {students.uploadButton}
+            <div className="flex rounded-xl border border-gray-200 bg-white p-1.5 shadow-sm">
+              <button
+                onClick={() => setSearchParams({})}
+                className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+                  !viewMode || viewMode === 'list'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                📋 {students.pageTitle}
               </button>
-            )}
+              {canBulk && (
+                <button
+                  onClick={() => { setSearchParams({ view: 'upload' }); }}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+                    viewMode === 'upload'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  📦 {students.uploadButton}
+                </button>
+              )}
+            </div>
+            <button onClick={() => { setSearchParams({ view: 'create' }); }} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm shadow-sm">
+              ＋ {students.createButton}
+            </button>
           </div>
         </div>
 
@@ -593,15 +639,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
             <Field label={students.filterProgram}>
               <input className={inputCls} placeholder="B.Sc. Computer Science" value={query.program} onChange={(e) => setQuery({ ...query, program: e.target.value, page: '1' })} />
             </Field>
-            <Field label={students.filterLevel}>
-              <select className={inputCls} value={query.level} onChange={(e) => setQuery({ ...query, level: e.target.value, page: '1' })}>
-                <option value="">{students.filterAll}</option>
-                {[100, 200, 300, 400, 500, 600, 700, 800, 900, 1000].map((l) => <option key={l} value={String(l)}>{l} Level</option>)}
-              </select>
-            </Field>
-            <Field label={students.filterSession}>
-              <input className={inputCls} placeholder="2024/2025" value={query.session} onChange={(e) => setQuery({ ...query, session: e.target.value, page: '1' })} />
-            </Field>
             <Field label={students.filterStudentType}>
               <select className={inputCls} value={query.studentType} onChange={(e) => setQuery({ ...query, studentType: e.target.value, page: '1' })}>
                 <option value="">{students.filterAll}</option>
@@ -621,7 +658,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                 <option value="lastName">{students.sortLastName}</option>
                 <option value="email">{students.sortEmail}</option>
                 <option value="matricNumber">{students.sortMatricNumber}</option>
-                <option value="level">{students.sortLevel}</option>
               </select>
             </Field>
             <Field label={students.order}>
@@ -647,7 +683,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   {[
                     students.headerMatric, students.headerName, students.headerEmail, students.headerPhone,
                     students.headerCollege, students.headerDepartment, students.headerProgram,
-                    students.headerLevel, students.headerSession, students.headerStudentType,
+                    students.headerStudentType,
                     students.headerAccountStatus, students.headerWalletBalance, students.headerCreated,
                     students.headerActions,
                   ].map((h) => (
@@ -659,9 +695,9 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
                 {loading && !loadedOnceRef.current ? (
-                  <tr><td colSpan={14} className="px-4 py-12 text-center text-gray-500">Loading…</td></tr>
+                  <tr><td colSpan={12} className="px-4 py-12 text-center text-gray-500">Loading…</td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={14} className="px-4 py-12 text-center text-gray-500">{students.empty}</td></tr>
+                  <tr><td colSpan={12} className="px-4 py-12 text-center text-gray-500">{students.empty}</td></tr>
                 ) : rows.map((s) => (
                   <tr key={s.id} className="hover:bg-gray-50/60">
                     <td className="px-4 py-3 font-mono text-xs text-gray-800 whitespace-nowrap">{s.matricNumber ?? '—'}</td>
@@ -674,8 +710,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.college ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.department ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.program ?? '—'}</td>
-                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.level ?? '—'}</td>
-                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.academicSession ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{studentTypeLabel(s.studentType)}</td>
                     <td className="px-4 py-3 whitespace-nowrap"><StatusPill status={s.accountStatus} /></td>
                     <td className="px-4 py-3 text-gray-900 font-medium whitespace-nowrap">{walletBalance(s)}</td>
@@ -763,7 +797,38 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           )
         }
       >
-        <p className="text-gray-700 whitespace-pre-wrap break-words select-text">{alert.message}</p>
+        <div className="flex items-start gap-3">
+          <div
+          className={
+            'shrink-0 w-10 h-10 rounded-xl flex items-center justify-center ' +
+            (alert.type === 'success'
+              ? 'bg-emerald-50 text-emerald-600 border border-emerald-100'
+              : alert.type === 'error'
+              ? 'bg-red-50 text-red-600 border border-red-100'
+              : 'bg-blue-50 text-blue-600 border border-blue-100')
+          }
+        >
+          {alert.type === 'success' ? (
+            <CheckCircle2 className="w-5 h-5" />
+          ) : alert.type === 'error' ? (
+            <XCircle className="w-5 h-5" />
+          ) : (
+            <AlertTriangle className="w-5 h-5" />
+          )}
+        </div>
+          <div className="flex-1 min-w-0">
+          <p className="text-gray-700 whitespace-pre-wrap break-words select-text leading-relaxed">{alert.message}</p>
+          {alert.details && alert.details.length > 0 && (
+            <ul className="mt-3 space-y-1.5">
+              {alert.details.map((d, i) => (
+                <li key={i} className="text-xs leading-relaxed pl-3 border-l-2 border-black/10 ml-0.5">
+                  <span className="opacity-80">{d}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
       </Modal>
 
       {/* Create / Edit */}
@@ -803,30 +868,30 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           </div>
         }
       >
-        <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-1">
+        <div className="space-y-6">
           {/* SECTION 1: PERSONAL */}
           {sectionHead('Personal Information', <span className="text-lg">👤</span>, editorOpen === 'create' ? 'Core identifying details for the new student.' : 'Update student personal details.')}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label={students.fieldFirstName} required validity={textReq(editorState.firstName)}>
-              <input autoComplete="off" className={validInput(textReq(editorState.firstName))} value={editorState.firstName} onChange={(e) => patchEditor({ firstName: e.target.value })} placeholder="e.g. Adebayo" />
+            <Field label={students.fieldFirstName} required validity={textReq(editorState.firstName)} forceValidation={editorValidityCheck > 0}>
+              <input key="create-student-firstname" autoComplete="off" className={validInput(textReq(editorState.firstName))} value={editorState.firstName} onChange={(e) => patchEditor({ firstName: e.target.value })} placeholder="e.g. Adebayo" />
             </Field>
-            <Field label={students.fieldLastName} required validity={textReq(editorState.lastName)}>
-              <input autoComplete="off" className={validInput(textReq(editorState.lastName))} value={editorState.lastName} onChange={(e) => patchEditor({ lastName: e.target.value })} placeholder="e.g. Okafor" />
+            <Field label={students.fieldLastName} required validity={textReq(editorState.lastName)} forceValidation={editorValidityCheck > 0}>
+              <input key="create-student-lastname" autoComplete="off" className={validInput(textReq(editorState.lastName))} value={editorState.lastName} onChange={(e) => patchEditor({ lastName: e.target.value })} placeholder="e.g. Okafor" />
             </Field>
             <div className="sm:col-span-2">
               <Field label={students.fieldMiddleName} hint="Optional — will be omitted from receipts if blank.">
-                <input autoComplete="off" className={validInput()} value={editorState.middleName} onChange={(e) => patchEditor({ middleName: e.target.value })} placeholder="e.g. Chinedu (optional)" />
+                <input key="create-student-middlename" autoComplete="off" className={validInput()} value={editorState.middleName} onChange={(e) => patchEditor({ middleName: e.target.value })} placeholder="e.g. Chinedu (optional)" />
               </Field>
             </div>
-            <Field label={students.fieldEmail} required validity={emailValidity}>
-              <input type="email" autoComplete="off" className={validInput(emailValidity)} value={editorState.email} onChange={(e) => patchEditor({ email: e.target.value })} placeholder="student.name@university.edu.ng" />
+            <Field label={students.fieldEmail} required validity={emailValidity} forceValidation={editorValidityCheck > 0}>
+              <input key="create-student-email" type="email" autoComplete="off" className={validInput(emailValidity)} value={editorState.email} onChange={(e) => patchEditor({ email: e.target.value })} placeholder="student.name@university.edu.ng" />
             </Field>
             <Field label={students.fieldPhoneNumber} hint="Optional. Used for SMS notifications if configured.">
-              <input autoComplete="off" inputMode="tel" className={validInput()} value={editorState.phoneNumber} onChange={(e) => patchEditor({ phoneNumber: e.target.value })} placeholder="0801 234 5678" />
+              <input key="create-student-phone" autoComplete="off" inputMode="tel" className={validInput()} value={editorState.phoneNumber} onChange={(e) => patchEditor({ phoneNumber: e.target.value })} placeholder="0801 234 5678" />
             </Field>
             <div className="sm:col-span-2">
-              <Field label={students.fieldMatricNumber} required validity={textReq(editorState.matricNumber)} hint="Unique identifier. Used later by Bursary/Admin to issue DIRECT BILLS to this student.">
-                <input autoComplete="off" className={`${validInput(textReq(editorState.matricNumber))} font-mono tracking-wide`} value={editorState.matricNumber} onChange={(e) => patchEditor({ matricNumber: e.target.value })} placeholder="e.g. 2025/ENG/0001" />
+              <Field label={students.fieldMatricNumber} required validity={textReq(editorState.matricNumber)} forceValidation={editorValidityCheck > 0} hint="Unique identifier. Used later by Bursary/Admin to issue DIRECT BILLS to this student.">
+                <input key="create-student-matric" autoComplete="off" className={`${validInput(textReq(editorState.matricNumber))} font-mono tracking-wide`} value={editorState.matricNumber} onChange={(e) => patchEditor({ matricNumber: e.target.value })} placeholder="e.g. 2025/ENG/0001" />
               </Field>
             </div>
           </div>
@@ -835,7 +900,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           {sectionHead('Academic Placement', <GraduationCap className="w-4 h-4" />, editorOpen === 'create' ? 'Pick Programme — College & Department are auto-filled for you.' : 'Programme changes auto cascade to Department & College.')}
           {hierarchyLoading ? (
             <div className="flex items-center gap-2 text-sm text-gray-500 px-3 py-4 bg-gray-50 rounded-lg">
-              <Loader2 className="w-4 h-4 animate-spin" /> Loading programmes, levels and sessions…
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading programmes and sessions…
             </div>
           ) : hierarchyErr ? (
             <div className="flex items-start gap-2 text-sm text-red-700 px-3 py-4 bg-red-50 border border-red-200 rounded-lg">
@@ -852,14 +917,19 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
                   <div>
                     <div className="font-semibold">No programmes set up yet.</div>
-                    <div className="mt-0.5">Go to <span className="font-medium">ACADEMIC STRUCTURE → Programmes</span> to define at least one Programme (with a parent Department & Faculty). Then return here.</div>
+                    <div className="mt-0.5">Go to <span className="font-medium">ACADEMIC STRUCTURE → Programmes</span> to define at least one Programme (with a parent Department & College). Then return here.</div>
                   </div>
                 </div>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
-                  <Field label="Programme" required validity={textReq(editorState.programmeId)} hint="Once selected, Department and College are auto-inferred for you.">
-                    <select className={validInput(textReq(editorState.programmeId))} value={editorState.programmeId} onChange={(e) => patchEditor({ programmeId: e.target.value })}>
+                  <Field label="Programme" required validity={textReq(editorState.programmeId)} forceValidation={editorValidityCheck > 0} hint="Once selected, Department and College are auto-inferred for you.">
+                    <select
+                      key="create-student-programme"
+                      className={validInput(textReq(editorState.programmeId))}
+                      value={editorState.programmeId}
+                      onChange={(e) => patchEditor({ programmeId: e.target.value })}
+                    >
                       <option value="">— Select a Programme —</option>
                       {programmeOptions.map((p) => (
                         <option key={p.id} value={String(p.id)}>
@@ -883,35 +953,15 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   </div>
                 )}
 
-                <Field label={students.fieldLevel} required validity={textReq(editorState.levelId)}>
-                  <select className={validInput(textReq(editorState.levelId))} value={editorState.levelId} onChange={(e) => patchEditor({ levelId: e.target.value })}>
-                    <option value="">— Select Level —</option>
-                    {levelOptions.length > 0 ? levelOptions.map((l) => (
-                      <option key={l.id} value={String(l.id)}>{l.level} Level</option>
-                    )) : [100, 200, 300, 400, 500, 600].map((n) => (
-                      <option key={n} value="" disabled>{n} Level (add in Academic Structure first)</option>
-                    ))}
-                  </select>
-                </Field>
-
-                <Field label={students.fieldAcademicSession} required validity={textReq(editorState.academicSessionId)}>
-                  <select className={validInput(textReq(editorState.academicSessionId))} value={editorState.academicSessionId} onChange={(e) => patchEditor({ academicSessionId: e.target.value })}>
-                    <option value="">— Select Session —</option>
-                    {sessionOptions.map((s) => (
-                      <option key={s.id} value={String(s.id)}>{s.name}{s.isActive === false ? ' (inactive)' : ''}</option>
-                    ))}
-                  </select>
-                </Field>
-
                 <Field label={students.fieldStudentType}>
-                  <select className={validInput()} value={editorState.studentType} onChange={(e) => patchEditor({ studentType: e.target.value })}>
+                  <select key="create-student-type" className={validInput()} value={editorState.studentType} onChange={(e) => patchEditor({ studentType: e.target.value })}>
                     {STUDENT_TYPES.map((s) => <option key={s} value={s}>{studentTypeLabel(s)}</option>)}
                   </select>
                 </Field>
 
                 {editorOpen === 'edit' && (
                   <Field label={students.fieldAccountStatus}>
-                    <select className={validInput()} value={editorState.accountStatus} onChange={(e) => patchEditor({ accountStatus: e.target.value })}>
+                    <select key="create-student-status" className={validInput()} value={editorState.accountStatus} onChange={(e) => patchEditor({ accountStatus: e.target.value })}>
                       {STATUSES.map((s) => <option key={s} value={s}>{(statusLabels as any)[s]}</option>)}
                     </select>
                   </Field>
@@ -932,6 +982,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               >
                 <div className="relative">
                   <input
+                    key="create-student-password"
                     type={showPassword ? 'text' : 'password'}
                     readOnly={editorOpen === 'edit' && !editorState.password}
                     className={`${validInput(editorOpen === 'edit' ? 'idle' : (editorState.password.length >= 8 ? 'ok' : (editorValidityCheck > 0 ? 'err' : 'idle')))} font-mono tracking-wider pr-[120px]`}
@@ -979,12 +1030,22 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               {students.cancelButton}
             </button>
             {tempPassword ? (
-              <button
-                onClick={() => setResetOpen(null)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={submitReset}
+                  disabled={resetSubmitting}
+                  className="px-4 py-2 rounded-lg font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-200 disabled:opacity-50 inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-4 h-4 ${resetSubmitting ? 'animate-spin' : ''}`} />
+                  Regenerate
+                </button>
+                <button
+                  onClick={() => setResetOpen(null)}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2 rounded-lg font-bold shadow-sm"
+                >
+                  Done
+                </button>
+              </div>
             ) : (
               <button
                 onClick={submitReset}
@@ -998,14 +1059,94 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         }
       >
         {tempPassword ? (
-          <div>
-            <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
-              {students.tempPasswordReturned}
-            </p>
-            <div className="font-mono select-all px-4 py-3 border border-gray-200 bg-gray-50 rounded-lg text-lg break-all">{tempPassword}</div>
+          <div className="space-y-5">
+            <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+              <ShieldAlert className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                <div className="text-sm font-semibold text-amber-900">
+                  Temporary password issued
+                </div>
+                <div className="text-xs text-amber-800 leading-relaxed">
+                  This password will be shown ONLY ONCE — save or share it securely.
+                  On first login, the student <strong>must change it immediately</strong>.
+                </div>
+              </div>
+            </div>
+
+            <div className="p-5 bg-gradient-to-br from-indigo-50 via-blue-50 to-cyan-50 border border-indigo-100 rounded-2xl">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[11px] uppercase font-bold tracking-wider text-indigo-600">
+                  Temporary Password
+                </div>
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 text-[11px] font-semibold">
+                  <Key className="w-3 h-3" />
+                  14 chars · Strong
+                </div>
+              </div>
+
+              <div className="relative">
+                <input
+                  readOnly
+                  type={showResetPw ? 'text' : 'password'}
+                  value={tempPassword}
+                  className="w-full font-mono tracking-wider pr-[140px] pl-4 py-3.5 text-lg rounded-xl border border-indigo-200 bg-white text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                />
+                <div className="absolute inset-y-0 right-2 flex items-center gap-1.5 pr-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowResetPw((s) => !s)}
+                    title={showResetPw ? 'Hide' : 'Show'}
+                    className="p-1.5 rounded-lg hover:bg-indigo-100 text-indigo-600 transition"
+                  >
+                    {showResetPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={copyResetPw}
+                    title={copiedResetPw ? 'Copied!' : 'Copy to clipboard'}
+                    className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg font-semibold text-xs transition ${
+                      copiedResetPw
+                        ? 'bg-emerald-500 text-white shadow-sm'
+                        : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                    }`}
+                  >
+                    {copiedResetPw ? (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" /> Copy
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3 p-4 bg-gray-50 border border-gray-200 rounded-xl">
+              <Lock className="w-4 h-4 text-gray-500 mt-0.5 shrink-0" />
+              <div className="text-[12px] text-gray-600 leading-relaxed">
+                <div className="font-semibold text-gray-800 mb-0.5">Security guidance</div>
+                Share this password via an encrypted or in-person channel (never plain email/SMS).
+                The student's next login is blocked until they choose a NEW personal password.
+              </div>
+            </div>
           </div>
         ) : (
-          <p className="text-gray-700">{students.resetConfirm}</p>
+          <div className="space-y-3">
+            <p className="text-gray-700 leading-relaxed">{students.resetConfirm}</p>
+            {resetOpen && (
+              <div className="p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm">
+                <div className="font-semibold text-gray-800">
+                  {resetOpen.firstName} {resetOpen.middleName ? `${resetOpen.middleName} ` : ''}{resetOpen.lastName}
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5 font-mono">
+                  {resetOpen.matricNumber ?? `User #${resetOpen.id}`} · {resetOpen.email}
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </Modal>
 
@@ -1039,14 +1180,21 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         isOpen={bulkOpen}
         onClose={() => { setBulkOpen(false); setSearchParams({}); }}
         title={students.uploadTitle}
+        size="xl"
         footer={
-          <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex items-center gap-1 text-sm text-gray-500">
-              <span className={bulkStep >= 1 ? 'text-blue-700 font-semibold' : ''}>1. {students.uploadStep1}</span>
-              <span className="mx-2">›</span>
-              <span className={bulkStep >= 2 ? 'text-blue-700 font-semibold' : ''}>2. {students.uploadStep2}</span>
-              <span className="mx-2">›</span>
-              <span className={bulkStep >= 3 ? 'text-blue-700 font-semibold' : ''}>3. {students.uploadStep3}</span>
+          <div className="flex w-full flex-col-reverse md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ${bulkStep >= 1 ? 'bg-blue-100 text-blue-800 ring-1 ring-blue-200' : 'bg-gray-100 text-gray-500 ring-1 ring-gray-200'}`}>
+                {bulkStep > 1 ? '✓' : '1.'} {students.uploadStep1}
+              </span>
+              <span className="text-gray-300">→</span>
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ${bulkStep >= 2 ? 'bg-blue-100 text-blue-800 ring-1 ring-blue-200' : 'bg-gray-100 text-gray-500 ring-1 ring-gray-200'}`}>
+                {bulkStep > 2 ? '✓' : '2.'} {students.uploadStep2}
+              </span>
+              <span className="text-gray-300">→</span>
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ${bulkStep >= 3 ? 'bg-blue-100 text-blue-800 ring-1 ring-blue-200' : 'bg-gray-100 text-gray-500 ring-1 ring-gray-200'}`}>
+                3. {students.uploadStep3}
+              </span>
             </div>
             <div className="flex items-center gap-3">
               <button
@@ -1055,7 +1203,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   else if (bulkStep === 2) { resetBulk(); }
                   else { setBulkOpen(false); setSearchParams({}); loadStudents(); }
                 }}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
+                className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium rounded-lg border border-gray-200 hover:bg-gray-50"
               >
                 {bulkStep === 1 || bulkStep === 3 ? 'Close' : 'Start over'}
               </button>
@@ -1063,50 +1211,94 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                 <button
                   onClick={submitBulkFile}
                   disabled={!bulkFile || bulkUploading}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold disabled:opacity-50 inline-flex items-center gap-2"
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold disabled:opacity-50 inline-flex items-center gap-2 shadow-sm"
                 >
-                  {bulkUploading ? students.uploadSubmitting : 'Upload and preview'}
+                  {bulkUploading ? students.uploadSubmitting : 'Upload and preview →'}
                 </button>
               )}
               {bulkStep === 2 && (
                 <button
                   onClick={() => setBulkStep(3)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold"
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-sm"
                 >
-                  Continue
+                  Continue →
                 </button>
               )}
               {bulkStep === 3 && !bulkResult && (
                 <button
                   onClick={confirmBulk}
                   disabled={bulkConfirming}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-bold disabled:opacity-50 inline-flex items-center gap-2"
+                  className="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-lg font-bold disabled:opacity-50 inline-flex items-center gap-2 shadow-sm"
                 >
-                  {bulkConfirming ? students.uploadSubmitting : students.uploadSubmit}
+                  {bulkConfirming ? students.uploadSubmitting : '✓ ' + students.uploadSubmit}
+                </button>
+              )}
+              {bulkStep === 3 && bulkResult && (
+                <button
+                  onClick={() => { setBulkOpen(false); setSearchParams({}); loadStudents(); }}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-sm"
+                >
+                  Done →
                 </button>
               )}
             </div>
           </div>
         }
       >
-        <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
+        <div className="space-y-6">
           {bulkStep === 1 && (
-            <div>
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center rounded-2xl border border-blue-100 bg-blue-50/60 p-5">
+                <div className="flex-1">
+                  <h3 className="text-base font-bold text-gray-900 mb-1 flex items-center gap-2">
+                    📥 Before you start
+                  </h3>
+                  <p className="text-sm text-gray-700 max-w-2xl">
+                    Required columns: <span className="font-semibold">firstName, lastName, matricNumber, email, phoneNumber, programmeCode/ID</span>.
+                    Optional columns: college, department, programme, academicSession, password. College + Department are auto-populated from the selected Programme. Leave the password column blank to auto-generate temporary passwords for new students.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 shrink-0">
+                  <a
+                    href={studentsTemplateUrl()}
+                    download
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg text-sm font-semibold hover:bg-blue-50 shadow-sm"
+                  >
+                    📄 Download .CSV Template
+                  </a>
+                  <a
+                    href={studentsTemplateXlsxUrl()}
+                    download
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 border border-green-300 text-green-700 rounded-lg text-sm font-semibold hover:bg-green-100 shadow-sm"
+                  >
+                    📗 Download .XLSX Template (2 sheets)
+                  </a>
+                </div>
+              </div>
               <label className="block">
                 <div
                   onDragOver={(e) => { e.preventDefault(); }}
                   onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) pickFile(f); }}
-                  className="border-2 border-dashed border-gray-300 hover:border-blue-500 rounded-2xl p-8 text-center cursor-pointer bg-gray-50"
+                  className={`border-2 border-dashed rounded-3xl p-10 text-center cursor-pointer transition-colors ${
+                    bulkFile ? 'border-blue-400 bg-blue-50 shadow-inner' : 'border-gray-300 hover:border-blue-500 bg-gray-50 hover:bg-blue-50/40'
+                  }`}
                   onClick={() => (document.getElementById('bulk-file-input') as HTMLInputElement | null)?.click()}
                 >
-                  <p className="text-gray-700 font-medium mb-1">{students.uploadDropzone}</p>
-                  <p className="text-xs text-gray-500 mb-3">{students.uploadSizeLimit}</p>
+                  <div className="text-6xl mb-4 select-none">{bulkFile ? '✅' : '☁️'}</div>
+                  <p className="text-lg font-semibold text-gray-800 mb-1">
+                    {bulkFile ? 'File ready for upload' : students.uploadDropzone}
+                  </p>
+                  <p className="text-xs text-gray-500 mb-5">{students.uploadSizeLimit} — CSV, XLSX, or XLS accepted.</p>
                   {bulkFile ? (
-                    <div className="inline-flex items-center gap-2 px-3 py-2 bg-white rounded-lg border border-gray-200 text-sm text-gray-800">
-                      {bulkFile.name} — {(bulkFile.size / 1024).toFixed(1)} KB
+                    <div className="inline-flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3 bg-white rounded-xl border border-blue-200 text-sm text-gray-800 shadow-sm">
+                      <span className="font-semibold text-gray-900">{bulkFile.name}</span>
+                      <span className="text-gray-400 hidden sm:inline">·</span>
+                      <span className="text-gray-600">{(bulkFile.size / 1024).toFixed(1)} KB</span>
+                      <span className="text-gray-400 hidden sm:inline">·</span>
+                      <span className="text-xs text-blue-600 font-medium">Ready — click "Upload and preview" below</span>
                     </div>
                   ) : (
-                    <div className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">
+                    <div className="inline-flex items-center px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
                       Choose file
                     </div>
                   )}
@@ -1123,37 +1315,40 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           )}
 
           {bulkStep === 2 && bulkStage && (
-            <div>
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                <p className="text-sm font-semibold text-blue-900 mb-2">
-                  {students.uploadSummary} — {bulkStage.uploadId}
+            <div className="space-y-6">
+              <div className="bg-blue-50 border border-blue-200 rounded-2xl p-5">
+                <p className="text-base font-bold text-blue-900 mb-3 flex items-center gap-2">
+                  📊 {students.uploadSummary}
+                  <span className="text-xs font-mono bg-white px-2 py-0.5 rounded-md border border-blue-200 text-blue-700">
+                    {bulkStage.uploadId}
+                  </span>
                 </p>
-                <dl className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm">
-                  <div><dt className="text-gray-600">{students.uploadTotalRows}</dt><dd className="font-semibold text-gray-900">{bulkStage.totalRows ?? 0}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadValidRows}</dt><dd className="font-semibold text-green-700">{bulkStage.validCount ?? 0}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadProblemRows}</dt><dd className="font-semibold text-red-700">{bulkStage.problemCount ?? 0}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadMissingHeader}</dt><dd className="font-semibold text-gray-900">{(bulkStage.missingColumns ?? []).join(', ') || '—'}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadWithinFileDupes}</dt><dd className="font-semibold text-gray-900">{bulkStage.withinFileDuplicateCount ?? 0}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadDbDupes}</dt><dd className="font-semibold text-gray-900">{bulkStage.dbDuplicateCount ?? 0}</dd></div>
+                <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  <div className="bg-white rounded-xl px-3 py-3 border border-blue-100 text-center"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadTotalRows}</dt><dd className="text-xl font-bold text-gray-900">{bulkStage.totalRows ?? 0}</dd></div>
+                  <div className="bg-white rounded-xl px-3 py-3 border border-green-100 text-center"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadValidRows}</dt><dd className="text-xl font-bold text-green-700">{bulkStage.validCount ?? 0}</dd></div>
+                  <div className="bg-white rounded-xl px-3 py-3 border border-red-100 text-center"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadProblemRows}</dt><dd className="text-xl font-bold text-red-700">{bulkStage.problemCount ?? 0}</dd></div>
+                  <div className="bg-white rounded-xl px-3 py-3 border border-blue-100"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadMissingHeader}</dt><dd className="text-sm font-semibold text-gray-900">{(bulkStage.missingColumns ?? []).join(', ') || '—'}</dd></div>
+                  <div className="bg-white rounded-xl px-3 py-3 border border-blue-100"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadWithinFileDupes}</dt><dd className="text-sm font-semibold text-gray-900">{bulkStage.withinFileDuplicateCount ?? 0}</dd></div>
+                  <div className="bg-white rounded-xl px-3 py-3 border border-blue-100"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadDbDupes}</dt><dd className="text-sm font-semibold text-gray-900">{bulkStage.dbDuplicateCount ?? 0}</dd></div>
                 </dl>
                 {(bulkStage.problemCount ?? 0) > 0 && (
-                  <div className="mt-3">
-                    <button onClick={downloadErrorsCsv} className="text-sm underline text-blue-700 hover:text-blue-900 font-medium">
-                      {students.uploadErrorsCsv}
+                  <div className="mt-4">
+                    <button onClick={downloadErrorsCsv} className="text-sm font-semibold bg-white border border-red-200 text-red-700 hover:bg-red-50 px-3 py-2 rounded-lg shadow-sm inline-flex items-center gap-1.5">
+                      📥 {students.uploadErrorsCsv}
                     </button>
                   </div>
                 )}
               </div>
 
               {bulkStage.preview?.validSample?.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-sm font-semibold text-gray-900 mb-2">{students.uploadValidSample}</p>
-                  <div className="max-h-60 overflow-auto border border-gray-200 rounded-xl">
+                <div>
+                  <p className="text-sm font-bold text-gray-900 mb-2 flex items-center gap-2">✅ {students.uploadValidSample}</p>
+                  <div className="max-h-72 overflow-auto border border-gray-200 rounded-2xl shadow-sm">
                     <table className="min-w-full text-xs divide-y divide-gray-200">
-                      <thead className="bg-gray-50"><tr>{Object.keys(bulkStage.preview.validSample[0]).map((k) => <th key={k} className="px-3 py-2 text-left text-gray-700 whitespace-nowrap">{k}</th>)}</tr></thead>
+                      <thead className="bg-gray-50 sticky top-0 z-10"><tr>{Object.keys(bulkStage.preview.validSample[0]).map((k) => <th key={k} className="px-4 py-2.5 text-left text-gray-700 whitespace-nowrap bg-gray-50">{k}</th>)}</tr></thead>
                       <tbody className="divide-y divide-gray-100">
                         {bulkStage.preview.validSample.map((r: any, i: number) => (
-                          <tr key={i}>{Object.values(r).map((v, j) => <td key={j} className="px-3 py-1.5 whitespace-nowrap text-gray-800">{String(v ?? '')}</td>)}</tr>
+                          <tr key={i} className="hover:bg-gray-50">{Object.values(r).map((v, j) => <td key={j} className="px-4 py-2 whitespace-nowrap text-gray-800">{String(v ?? '')}</td>)}</tr>
                         ))}
                       </tbody>
                     </table>
@@ -1162,31 +1357,31 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               )}
 
               {bulkStage.preview?.problemSample?.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-sm font-semibold text-gray-900 mb-2">{students.uploadProblemSample}</p>
-                  <div className="max-h-60 overflow-auto border border-red-100 rounded-xl">
+                <div>
+                  <p className="text-sm font-bold text-red-700 mb-2 flex items-center gap-2">⚠️ {students.uploadProblemSample}</p>
+                  <div className="max-h-72 overflow-auto border border-red-100 rounded-2xl bg-red-50/20 shadow-sm">
                     <table className="min-w-full text-xs divide-y divide-red-100">
-                      <thead className="bg-red-50/60">
+                      <thead className="bg-red-50 sticky top-0 z-10">
                         <tr>
-                          <th className="px-3 py-2 text-left text-gray-700 whitespace-nowrap">row</th>
-                          <th className="px-3 py-2 text-left text-gray-700 whitespace-nowrap">errors</th>
-                          <th className="px-3 py-2 text-left text-gray-700 whitespace-nowrap">record</th>
+                          <th className="px-4 py-2.5 text-left text-gray-700 whitespace-nowrap bg-red-50">row</th>
+                          <th className="px-4 py-2.5 text-left text-gray-700 whitespace-nowrap bg-red-50">errors</th>
+                          <th className="px-4 py-2.5 text-left text-gray-700 whitespace-nowrap bg-red-50">record</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-gray-100">
+                      <tbody className="divide-y divide-red-50">
                         {(bulkStage.preview.problemSample as any[]).map((pr: any, i: number) => (
-                          <tr key={i} className="bg-red-50/30">
-                            <td className="px-3 py-1.5 whitespace-nowrap">{pr.row}</td>
-                            <td className="px-3 py-1.5 whitespace-nowrap text-red-700">
+                          <tr key={i} className="bg-red-50/40 hover:bg-red-50/60">
+                            <td className="px-4 py-2 whitespace-nowrap font-mono text-xs">{pr.row}</td>
+                            <td className="px-4 py-2 whitespace-nowrap text-red-700">
                               {(pr.errors ?? []).map((e: any, k: number) => (
-                                <span key={k} className="inline-block mr-2 text-xs">
-                                  <span className="font-semibold">{e.code}</span>{e.message ? `: ${e.message}` : ''}
+                                <span key={k} className="inline-block mr-2 text-xs bg-white rounded-md px-2 py-0.5 border border-red-200 my-0.5">
+                                  <span className="font-bold">{e.code}</span>{e.message ? `: ${e.message}` : ''}
                                 </span>
                               ))}
                             </td>
-                            <td className="px-3 py-1.5 whitespace-nowrap text-gray-800">
+                            <td className="px-4 py-2 whitespace-nowrap text-gray-800">
                               {Object.entries(pr.record ?? {}).map(([kk, vv]) => (
-                                <span key={kk} className="mr-2"><span className="text-gray-500">{kk}=</span>{String(vv ?? '')}</span>
+                                <span key={kk} className="inline-block mr-2 my-0.5 text-xs bg-white rounded-md px-2 py-0.5 border border-gray-200"><span className="text-gray-500">{kk}=</span>{String(vv ?? '')}</span>
                               ))}
                             </td>
                           </tr>
@@ -1200,40 +1395,53 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           )}
 
           {bulkStep === 3 && !bulkResult && (
-            <div>
-              <div className="space-y-3">
-                <div>
-                  <p className="font-semibold text-gray-900 mb-1">{students.uploadStrategyTitle}</p>
-                  <p className="text-sm text-gray-600 mb-2">{students.uploadStrategyDesc}</p>
-                  <div className="space-y-2">
-                    {(['SKIP', 'UPDATE', 'CANCEL'] as const).map((s) => {
-                      const labelMap = { SKIP: students.uploadStrategySkip, UPDATE: students.uploadStrategyUpdate, CANCEL: students.uploadStrategyCancel };
-                      return (
-                        <label key={s} className={`flex items-start gap-3 p-3 border rounded-lg cursor-pointer ${bulkStrategy === s ? 'bg-blue-50 border-blue-300' : 'bg-white border-gray-200'}`}>
-                          <input type="radio" className="mt-0.5" checked={bulkStrategy === s} onChange={() => setBulkStrategy(s)} />
-                          <div className="text-sm text-gray-800">{labelMap[s]}</div>
-                        </label>
-                      );
-                    })}
-                  </div>
+            <div className="space-y-5">
+              <div>
+                <p className="text-base font-bold text-gray-900 mb-1 flex items-center gap-2">⚖️ {students.uploadStrategyTitle}</p>
+                <p className="text-sm text-gray-600 mb-3">{students.uploadStrategyDesc}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {(['SKIP', 'UPDATE', 'CANCEL'] as const).map((s) => {
+                    const labelMap = { SKIP: students.uploadStrategySkip, UPDATE: students.uploadStrategyUpdate, CANCEL: students.uploadStrategyCancel };
+                    const descMap = {
+                      SKIP: 'Keep existing, only add truly new students.',
+                      UPDATE: 'Update existing records with newer data from this sheet.',
+                      CANCEL: 'Abort entirely — do nothing — if any duplicates exist.',
+                    };
+                    const color = { SKIP: 'blue', UPDATE: 'amber', CANCEL: 'red' }[s];
+                    return (
+                      <label key={s} className={`flex items-start gap-3 p-4 border-2 rounded-2xl cursor-pointer transition-all ${
+                        bulkStrategy === s
+                          ? color === 'blue' ? 'bg-blue-50 border-blue-400 ring-2 ring-blue-100 shadow-md'
+                            : color === 'amber' ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-100 shadow-md'
+                            : 'bg-red-50 border-red-400 ring-2 ring-red-100 shadow-md'
+                          : 'bg-white border-gray-200 hover:bg-gray-50'
+                      }`}>
+                        <input type="radio" className="mt-1" checked={bulkStrategy === s} onChange={() => setBulkStrategy(s)} />
+                        <div>
+                            <div className="text-sm font-bold text-gray-900">{labelMap[s]}</div>
+                            <div className="text-xs text-gray-500 mt-1">{descMap[s] ?? ''}</div>
+                          </div>
+                      </label>
+                    );
+                  })}
                 </div>
-                <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm text-gray-700">
-                  {students.uploadConfirmDesc(bulkStage?.validCount ?? 0, bulkStage?.problemCount ?? 0, bulkStrategy)}
-                </div>
+              </div>
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 text-sm text-gray-700 shadow-inner">
+                {students.uploadConfirmDesc(bulkStage?.validCount ?? 0, bulkStage?.problemCount ?? 0, bulkStrategy)}
               </div>
             </div>
           )}
 
           {bulkStep === 3 && bulkResult && (
             <div>
-              <div className="bg-green-50 border border-green-200 rounded-xl p-4">
-                <p className="text-sm font-semibold text-green-900 mb-2">{students.uploadDone}</p>
-                <dl className="grid grid-cols-3 gap-2 text-sm">
-                  <div><dt className="text-gray-600">{students.uploadSuccessCreated}</dt><dd className="font-semibold text-green-700">{bulkResult.created}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadSuccessSkipped}</dt><dd className="font-semibold text-gray-700">{bulkResult.skipped}</dd></div>
-                  <div><dt className="text-gray-600">{students.uploadSuccessFailed}</dt><dd className="font-semibold text-red-700">{bulkResult.failed}</dd></div>
+              <div className="bg-green-50 border-2 border-green-200 rounded-2xl p-6">
+                <p className="text-base font-bold text-green-900 mb-3 flex items-center gap-2">🎉 {students.uploadDone}</p>
+                <dl className="grid grid-cols-3 gap-4 mb-3">
+                  <div className="bg-white rounded-xl px-4 py-4 border border-green-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessCreated}</dt><dd className="text-2xl font-bold text-green-700">{bulkResult.created}</dd></div>
+                  <div className="bg-white rounded-xl px-4 py-4 border border-gray-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessSkipped}</dt><dd className="text-2xl font-bold text-gray-700">{bulkResult.skipped}</dd></div>
+                  <div className="bg-white rounded-xl px-4 py-4 border border-red-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessFailed}</dt><dd className="text-2xl font-bold text-red-700">{bulkResult.failed}</dd></div>
                 </dl>
-                <p className="mt-2 text-sm text-green-800">{students.uploadDoneMessage(bulkResult.created, bulkResult.skipped, bulkResult.failed)}</p>
+                <p className="text-sm text-green-800 font-medium">{students.uploadDoneMessage(bulkResult.created, bulkResult.skipped, bulkResult.failed)}</p>
               </div>
             </div>
           )}

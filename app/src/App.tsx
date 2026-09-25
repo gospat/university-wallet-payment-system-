@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
+import ForcePasswordChangeGate from './components/ForcePasswordChangeGate';
 import StudentLogin from './pages/auth/StudentLogin';
 import AdminLogin from './pages/auth/AdminLogin';
 import BursaryLogin from './pages/auth/BursaryLogin';
@@ -28,8 +29,6 @@ import { navCounters, NavCounters } from './services/api';
 import FacultiesPage from './pages/admin/academic/Faculties';
 import DepartmentsPage from './pages/admin/academic/Departments';
 import ProgrammesPage from './pages/admin/academic/Programmes';
-import LevelsPage from './pages/admin/academic/Levels';
-import AcademicSessionsPage from './pages/admin/academic/AcademicSessions';
 import UsersPage from './pages/admin/Users';
 import RolesPage from './pages/admin/Roles';
 import PermissionsPage from './pages/admin/Permissions';
@@ -40,7 +39,7 @@ import AdminReceiptsPage from './pages/admin/Receipts';
 import BursaryPaymentsPage from './pages/bursary/Payments';
 import BursaryReceiptsPage from './pages/bursary/Receipts';
 import StudentMyReceiptsPage from './pages/student/MyReceipts';
-import { BursaryDirectBillingWrapped } from './pages/bursary/DirectBilling';
+import { AdminDirectBillingWrapped, BursaryDirectBillingWrapped } from './pages/bursary/DirectBilling';
 
 const UnauthorizedPage: React.FC = () => {
   const location = useLocation();
@@ -213,7 +212,8 @@ const App: React.FC = () => {
   return (
     <Router>
       <AuthProvider>
-        <Routes>
+        <ForcePasswordChangeGate>
+          <Routes>
           <Route path="/" element={<PortalChooser />} />
 
           <Route path="/public/verify-receipt" element={<PublicVerifyReceiptPage />} />
@@ -375,8 +375,6 @@ const App: React.FC = () => {
             <Route path="/admin/academic/faculties" element={<FacultiesPage />} />
             <Route path="/admin/academic/departments" element={<DepartmentsPage />} />
             <Route path="/admin/academic/programmes" element={<ProgrammesPage />} />
-            <Route path="/admin/academic/levels" element={<LevelsPage />} />
-            <Route path="/admin/academic/sessions" element={<AcademicSessionsPage />} />
 
             <Route path="/admin/payments" element={<AdminPaymentsWrapped />} />
             <Route path="/admin/receipts" element={<AdminReceiptsWrapped />} />
@@ -386,14 +384,11 @@ const App: React.FC = () => {
             <Route path="/admin/reports/monthly" element={
               <PlaceholderPage role="ADMIN" activePath="/admin/reports/monthly" title="Monthly Reports" subtitle="Monthly financial summaries" />
             } />
-            <Route path="/admin/reports/session" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/session" title="Session Reports" subtitle="Session-wise reporting" />
-            } />
             <Route path="/admin/reports/fee" element={
               <PlaceholderPage role="ADMIN" activePath="/admin/reports/fee" title="Fee Reports" subtitle="Fee structure analysis" />
             } />
             <Route path="/admin/reports/faculty" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/faculty" title="Faculty Reports" subtitle="Faculty-level reporting" />
+              <PlaceholderPage role="ADMIN" activePath="/admin/reports/faculty" title="College Reports" subtitle="College-level reporting" />
             } />
             <Route path="/admin/reports/department" element={
               <PlaceholderPage role="ADMIN" activePath="/admin/reports/department" title="Department Reports" subtitle="Department-level reporting" />
@@ -404,6 +399,9 @@ const App: React.FC = () => {
             <Route path="/admin/reports/student" element={
               <PlaceholderPage role="ADMIN" activePath="/admin/reports/student" title="Student Reports" subtitle="Per-student reporting" />
             } />
+
+            <Route path="/admin/direct-billing" element={<AdminDirectBillingWrapped />} />
+            <Route path="/admin/direct-billing/:tab" element={<AdminDirectBillingWrapped />} />
           </Route>
 
           <Route element={<PrivateRoute roles={['BURSARY', 'ADMIN']} />}>
@@ -423,14 +421,11 @@ const App: React.FC = () => {
             <Route path="/bursary/reports/monthly" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/reports/monthly" title="Monthly Reports" subtitle="Monthly financial summaries" />
             } />
-            <Route path="/bursary/reports/session" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/reports/session" title="Session Reports" subtitle="Session-wise reporting" />
-            } />
             <Route path="/bursary/reports/fee" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/reports/fee" title="Fee Reports" subtitle="Fee structure analysis" />
             } />
             <Route path="/bursary/reports/faculty" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/reports/faculty" title="Faculty Reports" subtitle="Faculty-level reporting" />
+              <PlaceholderPage role="BURSARY" activePath="/bursary/reports/faculty" title="College Reports" subtitle="College-level reporting" />
             } />
             <Route path="/bursary/reports/department" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/reports/department" title="Department Reports" subtitle="Department-level reporting" />
@@ -454,16 +449,11 @@ const App: React.FC = () => {
             <Route path="/bursary/academic/programmes" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/academic/programmes" title="Programmes" subtitle="Academic programmes (Admin-managed)" />
             } />
-            <Route path="/bursary/academic/levels" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/academic/levels" title="Levels" subtitle="Academic levels (Admin-managed)" />
-            } />
-            <Route path="/bursary/academic/sessions" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/academic/sessions" title="Academic Sessions" subtitle="Academic sessions (Admin-managed)" />
-            } />
           </Route>
 
           <Route path="*" element={<Navigate to="/404" replace />} />
-        </Routes>
+          </Routes>
+        </ForcePasswordChangeGate>
       </AuthProvider>
     </Router>
   );

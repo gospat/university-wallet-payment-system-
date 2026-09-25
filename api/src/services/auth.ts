@@ -1,18 +1,36 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { User, Role, AccountStatus } from '@prisma/client';
+import { Role, AccountStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
+import { randomHex } from '../utils/security';
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 
-const signToken = (id: number, role: Role, permissions: string[]) => {
-  const expiresIn: string = process.env.JWT_EXPIRES_IN || '24h';
+const ACCESS_EXPIRES_IN: string = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
+const REFRESH_EXPIRES_IN: string = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+const ACCESS_EXPIRES_MS: number = 15 * 60 * 1000;
+const REFRESH_EXPIRES_MS: number = 7 * 24 * 60 * 60 * 1000;
+
+const getRefreshSecret = (): string => {
+  if (process.env.JWT_REFRESH_SECRET) return process.env.JWT_REFRESH_SECRET;
+  return (process.env.JWT_SECRET as string) + '-refresh';
+};
+
+const signAccessToken = (id: number, role: Role, permissions: string[]) => {
   return jwt.sign(
-    { id, role, permissions },
+    { id, role, permissions, type: 'access' },
     process.env.JWT_SECRET as string,
-    { expiresIn: expiresIn as any }
+    { expiresIn: ACCESS_EXPIRES_IN as any }
+  );
+};
+
+const signRefreshToken = (userId: number, jti: string) => {
+  return jwt.sign(
+    { userId, jti, type: 'refresh' },
+    getRefreshSecret(),
+    { expiresIn: REFRESH_EXPIRES_IN as any }
   );
 };
 
@@ -30,12 +48,156 @@ const safeUserSelect = {
   level: true,
   academicSession: true,
   accountStatus: true,
+  mustChangePassword: true,
   createdAt: true,
   updatedAt: true,
 } as const;
 
+interface AuthResult {
+  user: any;
+  token: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresInMs: number;
+}
+
 export class AuthService {
-  static async signup(data: any) {
+  private static async buildTokensForUser(
+    userId: number,
+    role: Role,
+    permissions: string[],
+    ipAddress?: string,
+    userAgent?: string
+  ): Promise<{ accessToken: string; refreshToken: string; expiresInMs: number }> {
+    const accessToken = signAccessToken(userId, role, permissions);
+    const { refreshJWT } = await AuthService.generateRefreshToken(userId, ipAddress, userAgent);
+    return {
+      accessToken,
+      refreshToken: refreshJWT,
+      expiresInMs: ACCESS_EXPIRES_MS,
+    };
+  }
+
+  static async generateRefreshToken(userId: number, ipAddress?: string, userAgent?: string) {
+    const tokenHex = randomHex(64);
+    const expiresAt = new Date(Date.now() + REFRESH_EXPIRES_MS);
+
+    await prisma.refreshToken.create({
+      data: {
+        userId,
+        token: tokenHex,
+        expiresAt,
+        ipAddress,
+        userAgent,
+      },
+    });
+
+    const jti = tokenHex;
+    const refreshJWT = signRefreshToken(userId, jti);
+
+    return { tokenHex, refreshJWT };
+  }
+
+  static async refreshSession(refreshJWT: string, ipAddress?: string, userAgent?: string) {
+    let decoded: any;
+    try {
+      decoded = jwt.verify(refreshJWT, getRefreshSecret());
+    } catch (err) {
+      throw new AppError('Invalid refresh token. Please log in again.', 401);
+    }
+
+    if (typeof decoded !== 'object' || !decoded || typeof decoded.userId !== 'number' || typeof decoded.jti !== 'string') {
+      throw new AppError('Invalid refresh token. Please log in again.', 401);
+    }
+
+    if (decoded.type && decoded.type !== 'refresh') {
+      throw new AppError('Invalid token type. Please use a refresh token.', 401);
+    }
+
+    const tokenHex = decoded.jti;
+    const refreshRow = await prisma.refreshToken.findUnique({
+      where: { token: tokenHex },
+      include: { user: true },
+    });
+
+    if (!refreshRow) {
+      throw new AppError('Refresh token not found. Please log in again.', 401);
+    }
+
+    if (refreshRow.revokedAt) {
+      throw new AppError('Refresh token has been revoked. Please log in again.', 401);
+    }
+
+    if (refreshRow.expiresAt < new Date()) {
+      throw new AppError('Refresh token has expired. Please log in again.', 401);
+    }
+
+    const user = refreshRow.user;
+
+    if (user.accountStatus !== AccountStatus.ACTIVE) {
+      throw new AppError('This account is no longer active.', 403);
+    }
+
+    const permRows = await prisma.rolePermission.findMany({
+      where: { role: user.role },
+      select: { permission: { select: { key: true } } },
+    });
+    const permissions: string[] = permRows.map((rp: any) => rp.permission.key);
+
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.refreshToken.update({
+        where: { id: refreshRow.id },
+        data: {
+          revokedAt: new Date(),
+          lastUsedAt: new Date(),
+        },
+      });
+
+      const newTokenHex = randomHex(64);
+      const newExpiresAt = new Date(Date.now() + REFRESH_EXPIRES_MS);
+
+      await tx.refreshToken.create({
+        data: {
+          userId: user.id,
+          token: newTokenHex,
+          expiresAt: newExpiresAt,
+          ipAddress,
+          userAgent,
+        },
+      });
+
+      const newAccessToken = signAccessToken(user.id, user.role, permissions);
+      const newRefreshJWT = signRefreshToken(user.id, newTokenHex);
+
+      return { newAccessToken, newRefreshJWT };
+    });
+
+    const safeUser = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: safeUserSelect,
+    });
+
+    return {
+      user: safeUser,
+      accessToken: result.newAccessToken,
+      refreshToken: result.newRefreshJWT,
+      expiresInMs: ACCESS_EXPIRES_MS,
+    };
+  }
+
+  static async revokeAll(userId: number) {
+    await prisma.refreshToken.updateMany({
+      where: {
+        userId,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+      },
+    });
+  }
+
+  static async signup(data: any): Promise<AuthResult> {
     const { email, password, firstName, lastName, matricNumber } = data;
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -78,12 +240,18 @@ export class AuthService {
       return newUser;
     });
 
-    const token = signToken(result.id, result.role, []);
+    const tokens = await AuthService.buildTokensForUser(result.id, result.role, []);
 
-    return { user: result, token };
+    return {
+      user: result,
+      token: tokens.accessToken,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresInMs: tokens.expiresInMs,
+    };
   }
 
-  static async login(data: any, ipAddress?: string, userAgent?: string) {
+  static async login(data: any, ipAddress?: string, userAgent?: string): Promise<AuthResult> {
     const { email, password } = data;
 
     if (!email || !password) {
@@ -181,9 +349,15 @@ export class AuthService {
       },
     });
 
-    const token = signToken(user.id, user.role, permissions);
+    const tokens = await AuthService.buildTokensForUser(user.id, user.role, permissions, ipAddress, userAgent);
 
-    return { user, token };
+    return {
+      user,
+      token: tokens.accessToken,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresInMs: tokens.expiresInMs,
+    };
   }
 
   static async me(userId: number) {
@@ -214,7 +388,7 @@ export class AuthService {
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
-    await prisma.user.update({ where: { id: userId }, data: { password: hash } });
+    await prisma.user.update({ where: { id: userId }, data: { password: hash, mustChangePassword: false } });
 
     await prisma.auditLog.create({
       data: {

@@ -23,13 +23,13 @@ type ReqLike = {
 export const RequestRefundSchema = z.object({
   originalTransactionId: z.coerce.number().int().positive(),
   requestedAmount: z.coerce.number().positive().finite(),
-  reason: z.string().min(5, 'Refund reason must be at least 5 characters'),
+  reason: z.string().min(5, 'Refund reason must be at least 5 characters').trim().max(2000),
 });
 
 export const ApproveRefundSchema = z.object({}).strict().optional();
 
 export const RejectRefundSchema = z.object({
-  notes: z.string().min(3, 'Rejection notes are required and must be at least 3 characters'),
+  notes: z.string().min(3, 'Rejection notes are required and must be at least 3 characters').trim().max(2000),
 });
 
 export const ListRefundsSchema = z.object({

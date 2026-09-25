@@ -49,6 +49,14 @@ export const updateFeeAssignment = [
   }),
 ];
 
+export const deleteFeeAssignment = [
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response) => {
+    const result = await FeeAssignmentService.remove(Number(req.params.id), req);
+    res.status(200).json({ status: 'success', data: result });
+  }),
+];
+
 export const generateInvoices = [
   validateParams(IdParam),
   validateQuery(GenerateInvoiceSchema),

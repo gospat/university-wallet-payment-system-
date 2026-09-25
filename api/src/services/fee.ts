@@ -69,16 +69,83 @@ const FEE_CATEGORY_DEFAULTS: Array<{ code: string; name: string; description?: s
 // -----------------------------------------------------------------------------
 // Zod schemas
 // -----------------------------------------------------------------------------
-const CODE_RE = /^[A-Z0-9][A-Z0-9_-]{1,30}$/;
+const CODE_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,30}$/;
 const SESSION_RE = /^\d{4}\/\d{4}$/;
 const AMOUNT_RE = /^\d+(\.\d{1,2})?$/;
 
-export const CreateFeeCategorySchema = z.object({
+const optStr = (max: number) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : v === null || v === undefined ? undefined : String(v).trim() || undefined),
+    z.string().max(max).trim().optional(),
+  );
+
+const optEnum = <T extends [string, ...string[]]>(t: T) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+    z.enum(t).optional(),
+  );
+
+const optBool = z.preprocess(
+  (v) => {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+      if (s === 'false' || s === '0' || s === 'off' || s === 'no' || s === '') return false;
+    }
+    return v;
+  },
+  z.boolean().optional(),
+);
+
+function normalizeCode(raw: string, max = 32) {
+  let s = raw.trim().toUpperCase();
+  s = s.replace(/[^A-Z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return s.slice(0, max);
+}
+
+function slugifyShort(raw: string, max = 20) {
+  let s = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return s.slice(0, max);
+}
+
+function currentAcademicSession() {
+  const now = new Date();
+  const y = now.getFullYear();
+  // Nigeria academic year typically starts September/October. Use Sept as the cut.
+  const cutover = new Date(y, 8, 1); // September 1st
+  const start = now >= cutover ? y : y - 1;
+  return `${start}/${start + 1}`;
+}
+
+const _CreateFeeCategoryBase = z.object({
   name: z.string().min(2).max(120).trim(),
-  code: z.string().min(2).max(32).trim().regex(CODE_RE, 'Category code must be uppercase letters, numbers, underscore or hyphen (2-32 chars).'),
-  description: z.string().min(3).max(500).trim().optional(),
+  code: z.preprocess(
+    (v) => {
+      if (typeof v === 'string' && v.trim() === '') return undefined;
+      return v;
+    },
+    z.string().min(2).max(32).trim().regex(CODE_RE, 'Category code must be uppercase letters, numbers, underscore or hyphen (2-32 chars).').optional()
+  ),
+  description: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().min(3).max(500).trim().optional()
+  ),
+}).superRefine((val, ctx) => {
+  if (!val.code) {
+    const slug = (val.name || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').slice(0, 28);
+    const generated = slug.length >= 2 ? `CAT-${slug}` : `CAT-${Date.now().toString(36).toUpperCase()}`;
+    (val as any).code = generated;
+  }
 });
-export const UpdateFeeCategorySchema = CreateFeeCategorySchema.partial();
+
+export const CreateFeeCategorySchema = _CreateFeeCategoryBase;
+export const UpdateFeeCategorySchema = _CreateFeeCategoryBase.innerType().partial();
 export type CreateFeeCategoryInput = z.infer<typeof CreateFeeCategorySchema>;
 export type UpdateFeeCategoryInput = z.infer<typeof UpdateFeeCategorySchema>;
 
@@ -102,48 +169,97 @@ export const FeeQuerySchema = z.object({
 export type FeeQueryInput = z.infer<typeof FeeQuerySchema>;
 
 export const CreateFeeSchema = z.object({
-  feeCode: z.string().min(2).max(32).trim().regex(CODE_RE, 'Fee code must be uppercase letters, numbers, underscore or hyphen (2-32 chars).'),
-  name: z.string().min(3).max(200).trim(),
-  description: z.string().max(2000).trim().optional(),
-  categoryId: z.number().int().positive(),
+  feeCode: z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return undefined;
+      const s = v.trim();
+      return s.length === 0 ? undefined : s;
+    },
+    z.string().min(2).max(32).trim().regex(CODE_RE, 'Fee code must be 2-32 letters, numbers, underscore or hyphen.').optional(),
+  ),
+  name: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()),
+    z.string().min(3).max(200),
+  ),
+  description: optStr(2000),
+  categoryId: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : Number(v)) : v),
+    z.number().int().positive(),
+  ),
   amount: z.union([
     z.coerce.number().positive().max(999_999_999.99),
     z.string().trim().regex(AMOUNT_RE).transform(Number),
   ]),
-  currency: z.string().toUpperCase().length(3).default('NGN').optional(),
-  academicSession: z.string().trim().regex(SESSION_RE, 'Academic session must be YYYY/YYYY (e.g. 2025/2026).'),
-  semester: z.enum(['FIRST', 'SECOND']).optional(),
-  college: z.string().max(120).trim().optional(),
-  department: z.string().max(120).trim().optional(),
-  program: z.string().max(120).trim().optional(),
-  level: z.coerce.number().int().positive().max(1000).optional(),
-  studentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional(),
-  isMandatory: z.boolean().default(true).optional(),
-  paymentDeadline: z.coerce.date().optional(),
-  isActive: z.boolean().default(true).optional(),
+  currency: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() ? v.trim() : undefined),
+    z.string().toUpperCase().length(3).default('NGN').optional(),
+  ),
+  academicSession: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+    z.string().trim().regex(SESSION_RE, 'Academic session must be YYYY/YYYY (e.g. 2025/2026).').optional(),
+  ),
+  semester: optEnum(['FIRST', 'SECOND']),
+  college: optStr(120),
+  department: optStr(120),
+  program: optStr(120),
+  level: z.preprocess(
+    (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : Number(v)),
+    z.number().int().positive().max(1000).optional(),
+  ),
+  studentType: optEnum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']),
+  isMandatory: optBool,
+  paymentDeadline: z.preprocess(
+    (v) => {
+      if (v === null || v === undefined) return undefined;
+      if (typeof v === 'string') {
+        if (v.trim() === '') return undefined;
+        const d = new Date(v);
+        return Number.isNaN(+d) ? undefined : d;
+      }
+      return v instanceof Date ? v : new Date(String(v));
+    },
+    z.date().optional(),
+  ),
+  isActive: optBool,
 });
 export type CreateFeeInput = z.infer<typeof CreateFeeSchema>;
 
-export const UpdateFeeSchema = CreateFeeSchema.partial().omit({
-  amount: true,
-  categoryId: true,
-}).extend({
-  amount: z.union([
-    z.coerce.number().positive().max(999_999_999.99),
-    z.string().trim().regex(AMOUNT_RE).transform(Number),
-  ]).optional(),
-  categoryId: z.number().int().positive().optional(),
-});
+export const UpdateFeeSchema = z.object({}).passthrough().and(
+  CreateFeeSchema.partial().omit({ amount: true, categoryId: true }).extend({
+    amount: z.union([
+      z.coerce.number().positive().max(999_999_999.99),
+      z.string().trim().regex(AMOUNT_RE).transform(Number),
+    ]).optional(),
+    categoryId: z.preprocess(
+      (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : Number(v)) : v),
+      z.number().int().positive().optional(),
+    ),
+  }),
+);
 export type UpdateFeeInput = z.infer<typeof UpdateFeeSchema>;
 
 export const CloneFeeSchema = z.object({
-  academicSession: z.string().trim().regex(SESSION_RE),
-  feeCode: z.string().min(2).max(32).trim().regex(CODE_RE).optional(),
-  semester: z.enum(['FIRST', 'SECOND']).optional(),
-  program: z.string().max(120).trim().optional(),
-  level: z.coerce.number().int().positive().max(1000).optional(),
-  college: z.string().max(120).trim().optional(),
-  department: z.string().max(120).trim().optional(),
+  academicSession: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+    z.string().trim().regex(SESSION_RE).optional(),
+  ),
+  feeCode: z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return undefined;
+      const s = v.trim();
+      return s.length === 0 ? undefined : s;
+    },
+    z.string().min(2).max(32).trim().regex(CODE_RE).optional(),
+  ),
+  semester: optEnum(['FIRST', 'SECOND']),
+  program: optStr(120),
+  level: z.preprocess(
+    (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : Number(v)),
+    z.number().int().positive().max(1000).optional(),
+  ),
+  college: optStr(120),
+  department: optStr(120),
+  studentType: optEnum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']),
   amount: z.union([
     z.coerce.number().positive().max(999_999_999.99),
     z.string().trim().regex(AMOUNT_RE).transform(Number),
@@ -234,12 +350,16 @@ export class FeeCategoryService {
 
   static async create(input: CreateFeeCategoryInput, req?: ReqLike) {
     await this.ensureDefaultCategories();
-    const exists = await prisma.feeCategory.findFirst({ where: { code: input.code }, select: { id: true } });
+    const code: string = (input.code || '').trim() || (() => {
+      const slug = (input.name || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').slice(0, 28);
+      return slug.length >= 2 ? `CAT-${slug}` : `CAT-${Date.now().toString(36).toUpperCase()}`;
+    })();
+    const exists = await prisma.feeCategory.findFirst({ where: { code }, select: { id: true } });
     if (exists) throw new AppError(i18n.errors.fee.categoryExists, 400, [{ path: ['code'], message: i18n.errors.fee.categoryExists }]);
 
     const data: Prisma.FeeCategoryCreateInput = {
       name: input.name,
-      code: input.code.toUpperCase(),
+      code: code.toUpperCase(),
       description: input.description ?? null,
     };
     const userId = (req as any)?.user?.id ?? null;
@@ -372,11 +492,40 @@ export class FeeService {
   }
 
   static async create(input: CreateFeeInput, req?: ReqLike) {
-    // code+session+program+level uniqueness (per schema @@unique).
+    const category = await prisma.feeCategory.findFirst({ where: { id: input.categoryId }, select: { id: true, code: true, name: true } });
+    if (!category) throw new AppError(i18n.errors.fee.notFound, 400);
+
+    const academicSession = input.academicSession ?? null;
+
+    let feeCode: string;
+    if (input.feeCode && String(input.feeCode).trim()) {
+      feeCode = normalizeCode(input.feeCode, 32);
+      if (feeCode.length < 2) throw new AppError('Fee code must be at least 2 characters after cleaning.', 400);
+    } else {
+      const slug = slugifyShort(input.name, 18) || 'fee';
+      const base = `FEE-${normalizeCode(category.code || category.name, 8)}-${slug.toUpperCase()}`;
+      let candidate = base.slice(0, 28);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const exists = await prisma.fee.findFirst({
+          where: {
+            feeCode: candidate,
+            academicSession: academicSession ?? undefined,
+            program: input.program ?? null,
+            level: input.level ?? null,
+          },
+          select: { id: true },
+        });
+        if (!exists) break;
+        const suf = Math.random().toString(36).toUpperCase().slice(2, 6);
+        candidate = `${base.slice(0, 22)}-${suf}`;
+      }
+      feeCode = candidate;
+    }
+
     const dup = await prisma.fee.findFirst({
       where: {
-        feeCode: input.feeCode,
-        academicSession: input.academicSession,
+        feeCode,
+        academicSession: academicSession ?? undefined,
         program: input.program ?? null,
         level: input.level ?? null,
       },
@@ -384,25 +533,22 @@ export class FeeService {
     });
     if (dup) throw new AppError(i18n.errors.fee.codeExists, 400);
 
-    const category = await prisma.feeCategory.findFirst({ where: { id: input.categoryId }, select: { id: true } });
-    if (!category) throw new AppError(i18n.errors.fee.notFound, 400);
-
     const userId = (req as any)?.user?.id ?? null;
     if (!userId) throw new AppError(i18n.errors.auth.notPermitted, 401);
 
     const data: Prisma.FeeCreateInput = {
-      feeCode: input.feeCode.toUpperCase(),
+      feeCode,
       name: input.name,
       description: input.description ?? null,
       amount: new Prisma.Decimal(String(input.amount)),
       currency: input.currency ?? 'NGN',
-      academicSession: input.academicSession,
-      semester: input.semester ?? null,
+      academicSession: academicSession ?? "",
+      semester: (input.semester ?? null) as any,
       college: input.college ?? null,
       department: input.department ?? null,
       program: input.program ?? null,
       level: input.level ?? null,
-      studentType: input.studentType ?? null,
+      studentType: (input.studentType ?? null) as any,
       isMandatory: input.isMandatory ?? true,
       paymentDeadline: input.paymentDeadline ?? null,
       isActive: input.isActive ?? true,
@@ -445,12 +591,12 @@ export class FeeService {
     if (patch.amount !== undefined) data.amount = new Prisma.Decimal(String(patch.amount));
     if (patch.currency !== undefined) data.currency = patch.currency;
     if (patch.academicSession !== undefined) data.academicSession = patch.academicSession;
-    if (patch.semester !== undefined) data.semester = patch.semester ?? null;
+    if (patch.semester !== undefined) data.semester = (patch.semester ?? null) as any;
     if (patch.college !== undefined) data.college = patch.college ?? null;
     if (patch.department !== undefined) data.department = patch.department ?? null;
     if (patch.program !== undefined) data.program = patch.program ?? null;
     if (patch.level !== undefined) data.level = patch.level ?? null;
-    if (patch.studentType !== undefined) data.studentType = patch.studentType ?? null;
+    if (patch.studentType !== undefined) data.studentType = (patch.studentType ?? null) as any;
     if (patch.isMandatory !== undefined) data.isMandatory = patch.isMandatory;
     if (patch.paymentDeadline !== undefined) data.paymentDeadline = patch.paymentDeadline ?? null;
     if (patch.isActive !== undefined) data.isActive = patch.isActive;
@@ -465,15 +611,21 @@ export class FeeService {
     if (!existing) throw new AppError(i18n.errors.fee.notFound, 404);
     const ex = existing as any;
 
-    let feeCode = body.feeCode ?? ex.feeCode;
-    // De-dup code with suffix if collision.
+    const newAcademicSession = body.academicSession ?? null;
+    let feeCode: string;
+    if (body.feeCode) {
+      feeCode = normalizeCode(body.feeCode, 32);
+    } else {
+      const base = normalizeCode(ex.feeCode, 26);
+      feeCode = base;
+    }
     let attempt = 0;
     for (;;) {
-      const code = attempt === 0 ? feeCode : `${feeCode.slice(0, 28)}_V${attempt + 1}`;
+      const code = attempt === 0 ? feeCode : `${feeCode.slice(0, 26)}-V${attempt + 1}`;
       const d = await prisma.fee.findFirst({
         where: {
           feeCode: code,
-          academicSession: body.academicSession,
+          academicSession: newAcademicSession ?? undefined,
           program: (body.program ?? ex.program) as any,
           level: (body.level ?? ex.level) as any,
         },
@@ -491,7 +643,7 @@ export class FeeService {
       categoryId: ex.categoryId,
       amount: body.amount ?? Number(ex.amount),
       currency: ex.currency,
-      academicSession: body.academicSession,
+      academicSession: newAcademicSession ?? undefined,
       semester: (body.semester ?? ex.semester) as any,
       college: (body.college ?? ex.college) as any,
       department: (body.department ?? ex.department) as any,
@@ -509,6 +661,33 @@ export class FeeService {
 
   static async setActive(id: number, isActive: boolean, req?: ReqLike) {
     return this.update(id, { isActive } as any, req);
+  }
+
+  static async remove(id: number, req?: ReqLike) {
+    const existing = await prisma.fee.findFirst({ where: { id } });
+    if (!existing) throw new AppError(i18n.errors.fee.notFound, 404);
+
+    const [assignmentCount, invoiceCount, paidTransactionCount] = await Promise.all([
+      prisma.feeAssignment.count({ where: { feeId: id } }),
+      prisma.invoice.count({ where: { feeId: id } }),
+      prisma.transaction.count({
+        where: {
+          invoice: { feeId: id },
+          status: { in: ['SUCCESS', 'PENDING'] },
+        },
+      }),
+    ]);
+
+    if (assignmentCount > 0 || invoiceCount > 0 || paidTransactionCount > 0) {
+      throw new AppError(
+        `Cannot delete this fee (bill catalogue). It is referenced by: ${assignmentCount} assignment(s), ${invoiceCount} invoice(s), ${paidTransactionCount} paid transaction(s). Deactivate instead to prevent new usage while keeping history intact.`,
+        409,
+      );
+    }
+
+    await prisma.fee.delete({ where: { id } });
+    await writeAudit(req, { action: auditActions.feeDeleted, entityType: 'FEE', entityId: id, oldValue: existing });
+    return { deleted: { id, name: existing.name, feeCode: existing.feeCode } };
   }
 }
 

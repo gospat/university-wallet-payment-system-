@@ -126,6 +126,7 @@ model User {
   lastLoginAt         DateTime?
   failedLoginAttempts Int            @default(0)
   lockedUntil         DateTime?
+  mustChangePassword  Boolean        @default(false)
   studentImportId     Int?
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
@@ -143,6 +144,7 @@ model User {
   voidedReceipts      Receipt[]      @relation("ReceiptVoidedBy")
   feeCategoriesCreated FeeCategory[] @relation("FeeCategoryCreator")
   adminNotificationsRead AdminNotification[] @relation("AdminNotifReader")
+  refreshTokens       RefreshToken[]
 
   @@index([accountStatus])
   @@index([college, department, program, level])
@@ -268,6 +270,7 @@ model FeeAssignment {
   targetStudentType StudentType?
   overrideAmount   Decimal?             @db.Decimal(15, 2)
   overrideDeadline DateTime?
+  noteToStudent    String?              @db.VarChar(2000)
   assignedById     Int
   assignedAt       DateTime             @default(now())
   isActive         Boolean              @default(true)
@@ -442,8 +445,8 @@ model Programme {
 model Level {
   id           Int       @id @default(autoincrement())
   level        String    @db.VarChar(20)
-  programmeId  Int
-  programme    Programme @relation(fields: [programmeId], references: [id], onDelete: Restrict)
+  programmeId  Int?
+  programme    Programme? @relation(fields: [programmeId], references: [id], onDelete: SetNull)
   isActive     Boolean   @default(true)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -516,4 +519,22 @@ model SystemSettings {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   updatedById           Int?
+}
+
+model RefreshToken {
+  id          BigInt    @id @default(autoincrement())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token       String    @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }

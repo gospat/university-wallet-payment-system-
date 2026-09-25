@@ -47,6 +47,7 @@ export type FeeAssignmentOut = {
   targetStudentType: string | null;
   overrideAmount: number | string | null;
   overrideDeadline: string | null;
+  noteToStudent?: string | null;
   assignedById: number | null;
   assignedAt: string;
   isActive: boolean;
@@ -102,17 +103,17 @@ export type AssignmentQuery = {
   targetSession?: string;
   targetLevel?: number;
   targetStudentType?: string;
-  isActive?: boolean;
+  isActive?: boolean | 'all';
   page?: number;
   pageSize?: number;
 };
 
 export type CreateFeeInput = {
-  feeCode: string;
+  feeCode?: string;
   name: string;
   description?: string;
   categoryId: number;
-  academicSession: string;
+  academicSession?: string;
   college?: string;
   department?: string;
   program?: string;
@@ -123,18 +124,19 @@ export type CreateFeeInput = {
   isActive?: boolean;
   amount: number | string;
   paymentDeadline?: string;
+  studentTypeHint?: string;
 };
 export type UpdateFeeInput = Partial<CreateFeeInput>;
 export type CloneFeeInput = {
-  academicSession: string;
+  academicSession?: string;
   feeCode?: string;
   amount?: number | string;
   paymentDeadline?: string;
   college?: string;
   department?: string;
   program?: string;
-  level?: number;
   semester?: string;
+  studentType?: string;
 };
 
 export type CreateCategoryInput = { code: string; name: string; description?: string; };
@@ -152,6 +154,7 @@ export type CreateAssignmentInput = {
   targetStudentType?: string;
   overrideAmount?: number | string;
   overrideDeadline?: string;
+  noteToStudent?: string;
   isActive?: boolean;
 };
 export type UpdateAssignmentInput = Partial<Omit<CreateAssignmentInput, 'feeId' | 'assignmentType'>>;
@@ -227,19 +230,22 @@ export const feeApi = {
     return api.get(`/fees/${id}`).then((r) => unwrap(r));
   },
   createFee(body: CreateFeeInput): Promise<{ fee: FeeOut }> {
-    return api.post('/fees', body).then((r) => unwrap(r));
+    return api.post('/fees', sanitizeCreateFeeBody(body)).then((r) => unwrap(r));
   },
   updateFee(id: number, body: UpdateFeeInput): Promise<{ fee: FeeOut }> {
-    return api.patch(`/fees/${id}`, body).then((r) => unwrap(r));
+    return api.patch(`/fees/${id}`, sanitizeCreateFeeBody(body as any)).then((r) => unwrap(r));
   },
   cloneFee(id: number, body: CloneFeeInput): Promise<{ fee: FeeOut }> {
-    return api.post(`/fees/${id}/clone`, body).then((r) => unwrap(r));
+    return api.post(`/fees/${id}/clone`, sanitizeCloneFeeBody(body)).then((r) => unwrap(r));
   },
   activateFee(id: number): Promise<{ fee: FeeOut }> {
     return api.post(`/fees/${id}/activate`).then((r) => unwrap(r));
   },
   disableFee(id: number): Promise<{ fee: FeeOut }> {
     return api.post(`/fees/${id}/disable`).then((r) => unwrap(r));
+  },
+  deleteFee(id: number): Promise<{ deleted: { id: number; name?: string | null; feeCode?: string | null } }> {
+    return api.delete(`/fees/${id}`).then((r) => unwrap(r));
   },
   // assignments
   listAssignments(q: AssignmentQuery = {}): Promise<AssignmentListResp> {
@@ -253,6 +259,15 @@ export const feeApi = {
   },
   updateAssignment(id: number, body: UpdateAssignmentInput): Promise<{ assignment: FeeAssignmentOut }> {
     return api.patch(`/fee-assignments/${id}`, body).then((r) => unwrap(r));
+  },
+  disableAssignment(id: number): Promise<{ assignment: FeeAssignmentOut }> {
+    return api.patch(`/fee-assignments/${id}`, { isActive: false }).then((r) => unwrap(r));
+  },
+  enableAssignment(id: number): Promise<{ assignment: FeeAssignmentOut }> {
+    return api.patch(`/fee-assignments/${id}`, { isActive: true }).then((r) => unwrap(r));
+  },
+  deleteAssignment(id: number): Promise<{ deleted: { id: number } }> {
+    return api.delete(`/fee-assignments/${id}`).then((r) => unwrap(r));
   },
   generateInvoices(id: number, force = false): Promise<GenerateResp> {
     return api.post(`/fee-assignments/${id}/generate-invoices`, null, { params: { force: force ? 'true' : 'false' } }).then((r) => unwrap(r));
@@ -273,6 +288,14 @@ export const feeApi = {
     const token = localStorage.getItem('token') ?? '';
     return `${API_BASE_URL}/fees/bulk-upload/${stageId}/errors.csv?access_token=${encodeURIComponent(token)}`;
   },
+  feesTemplateUrl() {
+    const token = localStorage.getItem('token') ?? '';
+    return `${API_BASE_URL}/fees/template.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  },
+  feesTemplateXlsxUrl() {
+    const token = localStorage.getItem('token') ?? '';
+    return `${API_BASE_URL}/fees/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  },
 
   getStudentByMatric(matric: string): Promise<{ student: MatricStudentResp }> {
     const safe = encodeURIComponent(matric.trim());
@@ -281,9 +304,12 @@ export const feeApi = {
 
   createDirectStudentBill(
     body: CreateDirectStudentBillInput,
+    opts?: { idempotencyKey?: string },
   ): Promise<DirectStudentBillSuccessResp> {
+    const headers: Record<string, string> = {};
+    if (opts?.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey.slice(0, 128);
     return api
-      .post('/fee-assignments/student-bill', body)
+      .post('/fee-assignments/student-bill', sanitizeDirectBillBody(body), { headers: Object.keys(headers).length ? headers : undefined })
       .then((r) => {
         const raw: any = unwrap(r);
         const assignment = raw.assignment;
@@ -308,5 +334,39 @@ export const feeApi = {
       });
   },
 };
+
+function sanitizeCreateFeeBody(body: CreateFeeInput): CreateFeeInput {
+  const out: any = { ...body };
+  for (const k of ['feeCode', 'academicSession', 'college', 'department', 'program', 'studentType', 'semester', 'description', 'paymentDeadline'] as const) {
+    if (typeof out[k] === 'string' && out[k].trim() === '') delete out[k];
+  }
+  if (out.amount === 0 || out.amount === '0' || out.amount === '' || out.amount === null || out.amount === undefined) {
+    if (out.amount === '' || out.amount === null || out.amount === undefined) delete out.amount;
+  }
+  if (out.level === null || out.level === undefined || out.level === 0 || (typeof out.level === 'string' && out.level.trim() === '')) delete out.level;
+  if (out.categoryId === 0 || out.categoryId === '' || out.categoryId === null || out.categoryId === undefined) delete out.categoryId;
+  return out;
+}
+
+function sanitizeCloneFeeBody(body: CloneFeeInput): CloneFeeInput {
+  const out: any = { ...body };
+  for (const k of ['feeCode', 'academicSession', 'college', 'department', 'program', 'studentType', 'semester'] as const) {
+    if (typeof out[k] === 'string' && out[k].trim() === '') delete out[k];
+  }
+  if (out.amount === 0 || out.amount === '0' || out.amount === '' || out.amount === null || out.amount === undefined) {
+    if (out.amount !== 0 && out.amount !== '0') delete out.amount;
+  }
+  return out;
+}
+
+function sanitizeDirectBillBody(body: CreateDirectStudentBillInput): CreateDirectStudentBillInput {
+  const out: any = { ...body };
+  for (const k of ['overrideDeadline', 'noteToStudent', 'adhocFeeCategory', 'matricNumber'] as const) {
+    if (typeof out[k] === 'string' && out[k].trim() === '') delete out[k];
+  }
+  if ((out as any).feeId === '' || (out as any).feeId === 0 || (out as any).feeId === null || (out as any).feeId === undefined) delete (out as any).feeId;
+  if (out.overrideAmount === '' || out.overrideAmount === null || out.overrideAmount === undefined) delete out.overrideAmount;
+  return out;
+}
 
 export default feeApi;

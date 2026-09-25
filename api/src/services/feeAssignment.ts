@@ -37,36 +37,95 @@ const SESSION_FIELDS: Record<AssignmentTargetType, (keyof z.infer<typeof CreateF
   STUDENT_TYPE: ['targetStudentType'],
 };
 
-export const CreateFeeAssignmentSchema = z.object({
-  feeId: z.coerce.number().int().positive(),
-  assignmentType: z.enum(ASSIGNMENT_TYPES),
-  targetStudentId: z.coerce.number().int().positive().optional(),
-  targetProgramme: z.string().max(120).trim().optional(),
-  targetDepartment: z.string().max(120).trim().optional(),
-  targetFaculty: z.string().max(120).trim().optional(),
-  targetLevel: z.coerce.number().int().positive().max(1000).optional(),
-  targetSession: z.string().max(20).trim().regex(SESSION_RE).optional(),
-  targetStudentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional(),
-  overrideAmount: z.union([
+// --- tolerant zod wrappers (mirrors fee.ts / academic.ts patterns) ---
+const optStr = (max: number) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : v === null || v === undefined ? undefined : String(v).trim() || undefined),
+    z.string().max(max).optional(),
+  );
+const optEnum = <T extends [string, ...string[]]>(t: T) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+    z.enum(t).optional(),
+  );
+const optSession = z.preprocess(
+  (v) => {
+    if (typeof v !== 'string') return undefined;
+    const s = v.trim();
+    return s.length === 0 ? undefined : s;
+  },
+  z.string().max(20).regex(SESSION_RE).optional(),
+);
+const optAmount = z.union([
+  z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
     z.coerce.number().positive().max(999_999_999.99),
-    z.string().trim().regex(AMOUNT_RE).transform(Number),
-  ]).optional(),
-  overrideDeadline: z.coerce.date().optional(),
-  isActive: z.boolean().default(true).optional(),
+  ),
+  z.string().trim().regex(AMOUNT_RE).transform(Number),
+]).optional();
+const optDeadline = z.preprocess(
+  (v) => {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v === 'string') {
+      if (v.trim() === '') return undefined;
+      const d = new Date(v);
+      return Number.isNaN(+d) ? undefined : d;
+    }
+    return v instanceof Date ? v : new Date(String(v));
+  },
+  z.date().optional(),
+);
+const posIntOpt = z.preprocess(
+  (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : Number(v)),
+  z.number().int().positive().optional(),
+);
+const optBool = z.preprocess(
+  (v) => {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+      if (s === 'false' || s === '0' || s === 'off' || s === 'no' || s === '') return false;
+    }
+    return v;
+  },
+  z.boolean().optional(),
+);
+
+export const CreateFeeAssignmentSchema = z.object({
+  feeId: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : Number(v)) : v),
+    z.number().int().positive(),
+  ),
+  assignmentType: z.enum(ASSIGNMENT_TYPES),
+  targetStudentId: posIntOpt,
+  targetProgramme: optStr(120),
+  targetDepartment: optStr(120),
+  targetFaculty: optStr(120),
+  targetLevel: posIntOpt,
+  targetSession: optSession,
+  targetStudentType: optEnum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']),
+  overrideAmount: optAmount,
+  overrideDeadline: optDeadline,
+  noteToStudent: optStr(2000),
+  isActive: optBool,
 });
 
 export const UpdateFeeAssignmentSchema = CreateFeeAssignmentSchema.partial().omit({ feeId: true, assignmentType: true }).extend({
-  isActive: z.boolean().optional(),
+  isActive: optBool,
 });
 
 export const FeeAssignmentQuerySchema = z.object({
-  q: z.string().max(200).trim().optional(),
+  q: optStr(200),
   assignmentType: z.enum(ASSIGNMENT_TYPES).optional(),
-  feeId: z.coerce.number().int().positive().optional(),
-  targetSession: z.string().max(20).trim().optional(),
-  targetLevel: z.coerce.number().int().positive().max(1000).optional(),
-  targetStudentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional(),
-  isActive: z.union([z.boolean(), z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1')]).optional(),
+  feeId: posIntOpt,
+  targetSession: optStr(20),
+  targetLevel: posIntOpt,
+  targetStudentType: optEnum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']),
+  isActive: z.union([z.boolean(), z.enum(['true', 'false', 'all', '1', '0']).transform((v) => {
+    if (v === 'all' || v === undefined) return undefined;
+    return v === 'true' || v === '1';
+  })]).optional(),
   page: z.coerce.number().int().positive().default(1).optional(),
   pageSize: z.coerce.number().int().positive().max(500).default(25).optional(),
   sort: z.enum(['assignedAt', 'id']).default('assignedAt').optional(),
@@ -78,32 +137,52 @@ export const GenerateInvoiceSchema = z.object({
 });
 
 export const ManualInvoiceSchema = z.object({
-  feeId: z.coerce.number().int().positive(),
-  studentId: z.coerce.number().int().positive(),
-  overrideAmount: z.union([
-    z.coerce.number().positive().max(999_999_999.99),
-    z.string().trim().regex(AMOUNT_RE).transform(Number),
-  ]).optional(),
-  overrideDeadline: z.coerce.date().optional(),
+  feeId: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : Number(v)) : v),
+    z.number().int().positive(),
+  ),
+  studentId: z.preprocess(
+    (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : Number(v)) : v),
+    z.number().int().positive(),
+  ),
+  overrideAmount: optAmount,
+  overrideDeadline: optDeadline,
 });
 
 export const DirectStudentBillSchema = z
   .object({
-    matricNumber: z.string().trim().min(1, i18n.errors.assignment.directBillMatric).max(80),
-    feeId: z.coerce.number().int().positive().optional(),
-    adhocFeeName: z.string().trim().min(1, i18n.errors.assignment.directBillAdhocName).max(160).optional(),
-    adhocFeeDescription: z.string().trim().max(1000).optional(),
-    adhocFeeCategory: z.string().trim().max(60).optional().default('OTHER'),
-    adhocFeeSession: z.string().trim().max(20).optional(),
-    overrideAmount: z.union([
-      z.coerce.number().positive().max(999_999_999.99, i18n.errors.assignment.directBillAdhocAmount),
-      z.string().trim().regex(AMOUNT_RE, i18n.errors.assignment.directBillAdhocAmount).transform(Number),
-    ]).optional(),
-    overrideDeadline: z.coerce.date().optional(),
-    noteToStudent: z.string().trim().max(2000).optional(),
+    matricNumber: z.preprocess(
+      (v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()),
+      z.string().min(1, i18n.errors.assignment.directBillMatric).max(80),
+    ),
+    feeId: posIntOpt,
+    adhocFeeName: z.preprocess(
+      (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+      z.string().min(1, i18n.errors.assignment.directBillAdhocName).max(160).optional(),
+    ),
+    adhocFeeDescription: optStr(1000),
+    adhocFeeCategory: z.preprocess(
+      (v) => (typeof v === 'string' ? (v.trim().length === 0 ? 'OTHER' : v.trim()) : 'OTHER'),
+      z.string().max(60).default('OTHER').optional(),
+    ),
+    adhocFeeSession: optStr(20),
+    overrideAmount: optAmount,
+    overrideDeadline: optDeadline,
+    noteToStudent: optStr(2000),
+    idempotencyKey: z.preprocess(
+      (v) => (typeof v === 'string' ? (v.trim().length === 0 ? undefined : v.trim()) : undefined),
+      z.string().min(12, 'Idempotency-Key must be at least 12 chars').max(128).optional(),
+    ),
   })
   .strict()
-  .refine((v) => (!!v.feeId && !(v.adhocFeeName || v.overrideAmount)) || (!v.feeId && !!v.adhocFeeName && v.overrideAmount !== undefined), {
+  .refine((v) => {
+    const isCatalogue = !!v.feeId;
+    const isAdhoc = !!v.adhocFeeName;
+    if (isCatalogue && isAdhoc) return false;
+    if (!isCatalogue && !isAdhoc) return false;
+    if (isAdhoc && v.overrideAmount === undefined) return false;
+    return true;
+  }, {
     message: i18n.errors.assignment.directBillFeeOrAdhoc,
     path: ['feeId'],
   });
@@ -122,7 +201,7 @@ const ASSIGNMENT_SELECT = {
   id: true, feeId: true, assignmentType: true,
   targetStudentId: true, targetProgramme: true, targetDepartment: true,
   targetFaculty: true, targetLevel: true, targetSession: true, targetStudentType: true,
-  overrideAmount: true, overrideDeadline: true, assignedById: true, assignedAt: true, isActive: true,
+  overrideAmount: true, overrideDeadline: true, noteToStudent: true, assignedById: true, assignedAt: true, isActive: true,
   fee: { select: { id: true, feeCode: true, name: true, amount: true, academicSession: true, paymentDeadline: true } },
   assignedBy: { select: { id: true, email: true, firstName: true, lastName: true } },
   targetStudent: { select: { id: true, matricNumber: true, firstName: true, lastName: true } },
@@ -229,9 +308,10 @@ export class FeeAssignmentService {
       targetFaculty: input.targetFaculty ?? null,
       targetLevel: input.targetLevel ?? null,
       targetSession: input.targetSession ?? null,
-      targetStudentType: input.targetStudentType ?? null,
+      targetStudentType: (input.targetStudentType ?? null) as any,
       overrideAmount: input.overrideAmount !== undefined ? new Prisma.Decimal(String(input.overrideAmount)) : undefined,
       overrideDeadline: input.overrideDeadline ?? null,
+      noteToStudent: (input as any).noteToStudent ?? null,
       assignedBy: { connect: { id: userId } },
       isActive: input.isActive ?? true,
     };
@@ -250,17 +330,50 @@ export class FeeAssignmentService {
     if (patch.targetFaculty !== undefined) data.targetFaculty = patch.targetFaculty ?? null;
     if (patch.targetLevel !== undefined) data.targetLevel = patch.targetLevel ?? null;
     if (patch.targetSession !== undefined) data.targetSession = patch.targetSession ?? null;
-    if (patch.targetStudentType !== undefined) data.targetStudentType = patch.targetStudentType ?? null;
+    if (patch.targetStudentType !== undefined) data.targetStudentType = (patch.targetStudentType ?? null) as any;
     if (patch.targetStudentId !== undefined) {
       data.targetStudent = patch.targetStudentId === null ? { disconnect: true } : { connect: { id: patch.targetStudentId } };
     }
     if (patch.overrideAmount !== undefined) data.overrideAmount = new Prisma.Decimal(String(patch.overrideAmount));
     if (patch.overrideDeadline !== undefined) data.overrideDeadline = patch.overrideDeadline ?? null;
+    if (patch.noteToStudent !== undefined) data.noteToStudent = patch.noteToStudent ?? null;
     if (patch.isActive !== undefined) data.isActive = patch.isActive;
 
     const updated = await prisma.feeAssignment.update({ where: { id }, data, select: ASSIGNMENT_SELECT as any });
     await writeAudit(req, { action: auditActions.feeAssignmentUpdated, entityType: 'FEE_ASSIGNMENT', entityId: id, oldValue: existing, newValue: updated });
     return updated;
+  }
+
+  static async remove(id: number, req?: ReqLike) {
+    const existing = await prisma.feeAssignment.findFirst({ where: { id }, include: { fee: true } });
+    if (!existing) throw new AppError(i18n.errors.assignment.assignmentNotFound, 404);
+
+    const txResult = await prisma.$transaction(async (tx) => {
+      const hasPaidTx = await tx.transaction.findFirst({
+        where: {
+          invoice: {
+            studentId: existing.targetStudentId ?? undefined,
+            feeId: existing.feeId,
+          },
+          status: { in: ['SUCCESS', 'PENDING'] as any },
+        },
+        select: { id: true },
+      });
+      if (hasPaidTx) {
+        throw new AppError('Cannot delete this direct bill: it has a SUCCESS or PENDING transaction. Use Disable instead.', 409);
+      }
+      await tx.invoice.deleteMany({
+        where: {
+          studentId: existing.targetStudentId ?? -1,
+          feeId: existing.feeId,
+          status: { in: ['UNPAID', 'FAILED', 'CANCELLED', 'EXPIRED'] as any },
+        },
+      });
+      const deleted = await tx.feeAssignment.delete({ where: { id }, select: { id: true, feeId: true, targetStudentId: true, assignedAt: true } });
+      await writeAudit(req, { action: auditActions.feeAssignmentDeleted, entityType: 'FEE_ASSIGNMENT', entityId: id, oldValue: existing });
+      return { deleted };
+    });
+    return txResult;
   }
 
   /**
@@ -345,40 +458,39 @@ export class FeeAssignmentService {
       const overrideAmount = input.overrideAmount !== undefined ? new Prisma.Decimal(String(input.overrideAmount)) : null;
       const overrideDeadline = input.overrideDeadline ?? null;
 
-      // Step 4 — Business idempotency: active STUDENT FeeAssignment for same (studentId, feeId) → skip recreate
-      const existingAssignment = await tx.feeAssignment.findFirst({
-        where: { targetStudentId: student.id, feeId, isActive: true, assignmentType: AssignmentTargetType.STUDENT },
+      // Step 4 — ALWAYS CREATE a NEW FeeAssignment per bill request.
+      // Same-student, same-fee, same-category MULTIPLE bills are supported per user requirement.
+      // HTTP-level idempotency (to catch accidental double-submit within 2 seconds) is handled
+      // by Idempotency-Key header middleware elsewhere — NOT by business-dedupe here.
+      let assignmentCreated = true;
+      const assignment = await tx.feeAssignment.create({
+        data: {
+          fee: { connect: { id: feeId } },
+          assignmentType: AssignmentTargetType.STUDENT,
+          targetStudent: { connect: { id: student.id } },
+          overrideAmount: overrideAmount ?? undefined,
+          overrideDeadline: overrideDeadline ?? undefined,
+          noteToStudent: input.noteToStudent ?? null,
+          assignedBy: { connect: { id: actorUserId } },
+          isActive: true,
+        },
         select: ASSIGNMENT_SELECT as any,
       });
 
-      let assignment: any = existingAssignment;
-      let assignmentCreated = false;
-      if (!existingAssignment) {
-        assignment = await tx.feeAssignment.create({
-          data: {
-            fee: { connect: { id: feeId } },
-            assignmentType: AssignmentTargetType.STUDENT,
-            targetStudent: { connect: { id: student.id } },
-            overrideAmount: overrideAmount ?? undefined,
-            overrideDeadline: overrideDeadline ?? undefined,
-            assignedBy: { connect: { id: actorUserId } },
-            isActive: true,
-          },
-          select: ASSIGNMENT_SELECT as any,
-        });
-        assignmentCreated = true;
-      }
-
-      // Step 5 — idempotent invoice creation (manualInvoice logic), re-using (studentId,feeId,session) unique check.
+      // Step 5 — ALWAYS CREATE a new UNPAID Invoice per direct bill posting.
+      // Multiple direct bills = multiple separate invoice rows. Each has unique reference + idempotencyKey fingerprint.
       const academicSession: string = fee.academicSession || (()=>{ const y=new Date().getFullYear(); return `${y}/${y+1}`; })();
-      let invoice = await tx.invoice.findFirst({
-        where: { studentId: student.id, feeId: fee.id, session: academicSession },
+      const idemKey = ((input as any).idempotencyKey || (req as any)?.headers?.['idempotency-key'] || '') as string;
+
+      // Safety: if idemKey is supplied and matches an existing invoice (replay), return that one instead of double-creating
+      let invoice: any = idemKey ? await tx.invoice.findFirst({
+        where: { idempotencyKey: String(idemKey).slice(0, 128) },
         select: { id: true, invoiceNumber: true, status: true, amountDue: true, dueDate: true, session: true, studentId: true, feeId: true, createdAt: true },
-      });
+      }) : null;
       let invoiceCreated = false;
       if (!invoice) {
-        const baseRow: any = await tx.$queryRawUnsafe<Array<{ next_id: number }>>(
-          'SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE'
+        const baseRow: any = await tx.$queryRaw<Array<{ next_id: number }>>(
+          Prisma.sql`SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE`
         );
         const nextId = Number(baseRow?.[0]?.next_id ?? 1);
         const ref = generateInvoiceReference(nextId, academicSession?.split('/')[0] ?? undefined);
@@ -395,6 +507,7 @@ export class FeeAssignmentService {
             dueDate: deadline,
             session: academicSession,
             semester: fee.semester as Semester | null,
+            idempotencyKey: idemKey ? String(idemKey).slice(0, 128) : null,
           },
           select: { id: true, invoiceNumber: true, status: true, amountDue: true, dueDate: true, session: true, studentId: true, feeId: true, createdAt: true },
         });
@@ -496,9 +609,8 @@ export class InvoiceEngine {
     const studentWhere = this.buildStudentWhere(a);
     const students = await prisma.user.findMany({ where: studentWhere, select: { id: true } });
 
-    // For idempotency: find existing invoices (studentId, feeId, session)
     const existingInvoices = await prisma.invoice.findMany({
-      where: { feeId: a.feeId, session, studentId: { in: students.map((s) => s.id) } },
+      where: { feeId: a.feeId, studentId: { in: students.map((s) => s.id) } },
       select: { studentId: true },
     });
     const existingSet = new Set(existingInvoices.map((i) => i.studentId));
@@ -522,8 +634,8 @@ export class InvoiceEngine {
     // MAX(id) within the tx to guarantee order within the session.
     const result = await prisma.$transaction(async (tx) => {
       // Reserve a stable numeric base so INV refs are sequential within the batch.
-      const baseRow: any = await tx.$queryRawUnsafe<Array<{ next_id: number }>>(
-        'SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE'
+      const baseRow: any = await tx.$queryRaw<Array<{ next_id: number }>>(
+        Prisma.sql`SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE`
       );
       let nextId = Number(baseRow?.[0]?.next_id ?? 0);
       if (Number.isNaN(nextId)) nextId = 1;
@@ -585,21 +697,12 @@ export class InvoiceEngine {
     if (!student) throw new AppError(i18n.errors.auth.userNotFound, 400);
     if (student.accountStatus !== 'ACTIVE') throw new AppError(i18n.errors.auth.accountInactive, 400);
 
-    const existing = await prisma.invoice.findFirst({
-      where: { feeId: fee.id, studentId: student.id, session: fee.academicSession },
-      select: { id: true, invoiceNumber: true, status: true, amountDue: true },
-    });
-    if (existing) {
-      // Idempotent manual assignment returns the existing row.
-      return { invoice: existing, created: false };
-    }
-
     const amount = input.overrideAmount ? new Prisma.Decimal(String(input.overrideAmount)) : new Prisma.Decimal(String(fee.amount));
     const deadline = input.overrideDeadline ?? fee.paymentDeadline ?? null;
 
     const row = await prisma.$transaction(async (tx) => {
-      const baseRow: any = await tx.$queryRawUnsafe<Array<{ next_id: number }>>(
-        'SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE'
+      const baseRow: any = await tx.$queryRaw<Array<{ next_id: number }>>(
+        Prisma.sql`SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE`
       );
       const nextId = Number(baseRow?.[0]?.next_id ?? 1);
       const ref = generateInvoiceReference(nextId, fee.academicSession?.split('/')[0] ?? undefined);
