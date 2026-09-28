@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import * as XLSX from './xlsxAdapter';
 
 export interface TwoSheetTemplate {
   filename: string;
@@ -12,14 +12,14 @@ export interface ColumnNote {
   note: string;
 }
 
-export function buildTwoSheetWorkbook(params: {
+export async function buildTwoSheetWorkbook(params: {
   title: string;
   instructionRows: string[][];
   templateHeader: string[];
   templateSamples: string[][];
   colWidths: number[];
   columnNotes?: ColumnNote[];
-}): TwoSheetTemplate {
+}): Promise<TwoSheetTemplate> {
   const { title, instructionRows, templateHeader, templateSamples, colWidths, columnNotes } = params;
 
   const wb = XLSX.utils.book_new();
@@ -68,7 +68,7 @@ export function buildTwoSheetWorkbook(params: {
 
   XLSX.utils.book_append_sheet(wb, templateWs, 'Template');
 
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const buffer = (await XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })) as Buffer;
 
   return {
     filename: 'template.xlsx',

@@ -214,7 +214,7 @@ router.get('/template.xlsx', catchAsync(async (req: Request, res: Response) => {
     { header: 'isActive', required: false, note: 'TRUE/FALSE — default TRUE if blank.' },
     { header: 'description', required: false, note: 'Free-form notes about the fee.' },
   ];
-  const xlsx = buildTwoSheetWorkbook({
+  const xlsx = await buildTwoSheetWorkbook({
     title: 'Fee Catalogue — Bulk Import Template',
     instructionRows,
     templateHeader,

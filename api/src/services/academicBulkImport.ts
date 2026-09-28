@@ -1,5 +1,5 @@
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
+import * as XLSX from '../utils/xlsxAdapter';
 import path from 'path';
 import fs from 'fs';
 import prisma from '../config/database';
@@ -108,7 +108,7 @@ export async function parseCsvOrXlsx(filePath: string, fileName: string): Promis
 
   if (ext === '.xlsx' || ext === '.xls') {
     const buf = await fs.promises.readFile(filePath);
-    const wb = XLSX.read(buf, { type: 'buffer', cellDates: true });
+    const wb = await XLSX.read(buf, { type: 'buffer', cellDates: true });
     const sheetName = wb.SheetNames[0];
     const sheet = wb.Sheets[sheetName];
     const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: true }) as any[];
@@ -164,7 +164,7 @@ export function downloadTemplateCsv(kind: BulkKind): {
   };
 }
 
-export function downloadTemplateXlsx(kind: BulkKind): TwoSheetTemplate & { filename: string } {
+export async function downloadTemplateXlsx(kind: BulkKind): Promise<TwoSheetTemplate & { filename: string }> {
   let templateHeader: string[] = [];
   let templateSamples: string[][] = [];
   let colWidths: number[] = [];
@@ -242,7 +242,7 @@ export function downloadTemplateXlsx(kind: BulkKind): TwoSheetTemplate & { filen
     ];
   }
 
-  const result = buildTwoSheetWorkbook({
+  const result = await buildTwoSheetWorkbook({
     title,
     instructionRows,
     templateHeader,

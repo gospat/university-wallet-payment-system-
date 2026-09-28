@@ -135,7 +135,8 @@ async function render(html: string) {
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 60000 });
+    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await new Promise(res => setTimeout(res, 350));
     const pdfBuffer = await page.pdf({
       format: 'A4',
       printBackground: true,

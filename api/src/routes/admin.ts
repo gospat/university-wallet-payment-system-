@@ -190,7 +190,7 @@ router.get('/students/template.xlsx', catchAsync(async (req: Request, res: Respo
     { header: 'jambNumber', required: false, note: 'JAMB/UTME registration number if applicable.' },
     { header: 'address', required: false, note: 'Residential or contact address. Max 500 chars.' },
   ];
-  const xlsx = buildTwoSheetWorkbook({
+  const xlsx = await buildTwoSheetWorkbook({
     title: 'Student Directory — Bulk Import Template',
     instructionRows,
     templateHeader,

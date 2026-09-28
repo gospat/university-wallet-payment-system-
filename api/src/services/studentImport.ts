@@ -20,7 +20,7 @@
 import path from 'path';
 import fs from 'fs';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
+import * as XLSX from '../utils/xlsxAdapter';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
@@ -191,7 +191,7 @@ async function parseCsvOrXlsx(filePath: string, fileName: string): Promise<Recor
     });
   } else if (ext === '.xlsx' || ext === '.xls') {
     const buf = await fs.promises.readFile(filePath);
-    const wb = XLSX.read(buf, { type: 'buffer', cellDates: true });
+    const wb = await XLSX.read(buf, { type: 'buffer', cellDates: true });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     return XLSX.utils.sheet_to_json(sheet, { defval: '', raw: true }) as any[];
   }

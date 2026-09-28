@@ -187,7 +187,7 @@ router.get(
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
-    const t = downloadTemplateXlsx('college');
+    const t = await downloadTemplateXlsx('college');
     res.attachment(t.filename);
     res.setHeader('Content-Type', t.mimeType);
     res.setHeader('Cache-Control', 'public, max-age=60');
@@ -218,7 +218,7 @@ router.get(
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
-    const t = downloadTemplateXlsx('department');
+    const t = await downloadTemplateXlsx('department');
     res.attachment(t.filename);
     res.setHeader('Content-Type', t.mimeType);
     res.setHeader('Cache-Control', 'public, max-age=60');
@@ -249,7 +249,7 @@ router.get(
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
-    const t = downloadTemplateXlsx('programme');
+    const t = await downloadTemplateXlsx('programme');
     res.attachment(t.filename);
     res.setHeader('Content-Type', t.mimeType);
     res.setHeader('Cache-Control', 'public, max-age=60');
