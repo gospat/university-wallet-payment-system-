@@ -1,6 +1,9 @@
 @import "tailwindcss";
 
 :root {
+  --brand-primary: #0e74cc;
+  --brand-primary-hover: #0b64b0;
+  --brand-primary-contrast: #ffffff;
   --color-primary: #007bff;
   --color-secondary: #6c757d;
   --color-success: #28a745;
@@ -8,6 +11,13 @@
   --color-warning: #ffc107;
   --color-dark: #343a40;
   --color-light: #f8f9fa;
+  --focus-ring: 0 0 0 3px rgba(14, 116, 204, 0.25);
+}
+
+*:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: var(--brand-primary);
 }
 
 body {

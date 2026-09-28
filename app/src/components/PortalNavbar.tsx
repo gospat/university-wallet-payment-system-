@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import UniversityLogo from './ui/UniversityLogo';
 
 type PortalNavbarProps = {
   brand: string;
@@ -12,9 +13,14 @@ const PortalNavbar: React.FC<PortalNavbarProps> = ({ brand, userText, onLogout, 
   return (
     <nav className="bg-white border-b border-gray-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between md:h-16 gap-0 md:gap-4 pt-3 md:pt-0">
-          <div className="flex items-center h-12 md:h-16 shrink-0">
-            <span className="text-xl font-bold text-blue-600">{brand}</span>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between md:h-20 gap-0 md:gap-4 pt-3 md:pt-0">
+          <div className="flex items-center h-14 md:h-20 shrink-0 min-w-0">
+            <Link to="/student/dashboard" className="flex items-center gap-3 min-w-0">
+              <UniversityLogo size="sm" />
+              <span className="text-lg font-bold text-[var(--brand-primary,#0e74cc)] truncate">
+                {brand}
+              </span>
+            </Link>
           </div>
           {tabs && tabs.length > 0 && (
             <div className="flex items-center gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 pb-2 md:pb-0">

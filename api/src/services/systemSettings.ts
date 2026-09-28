@@ -9,13 +9,13 @@ export type SystemSettingsPatch = Partial<
 >;
 
 const SEED_DATA: SystemSettingsPatch = {
-  universityName: 'University Payment Platform',
-  universityLogoUrl: null,
-  universityFaviconUrl: null,
-  universityAddress: null,
-  universityPhone: null,
-  universityEmail: null,
-  universityWebsite: null,
+  universityName: 'Bells University of Technology',
+  universityLogoUrl: '/branding/logo.png',
+  universityFaviconUrl: '/favicon.ico',
+  universityAddress: 'KM 1 Ota-Idiroko Road, Bells Campus, Ogun State, Nigeria',
+  universityPhone: '+234 800 000 0000',
+  universityEmail: 'info@bellsuniversity.edu.ng',
+  universityWebsite: 'https://www.bellsuniversity.edu.ng',
   paystackLiveEnabled: false,
   activePaymentGateway: PaymentGateway.ALATPAY,
   largePaymentThreshold: new Prisma.Decimal(500000),
@@ -26,6 +26,7 @@ const SEED_DATA: SystemSettingsPatch = {
   receiptBursarSignatureUrl: null,
   receiptPrefix: 'REC',
   paymentRefPrefix: 'PAY',
+  emailProviderForceSmtp: false,
   updatedById: null,
 };
 
@@ -72,6 +73,7 @@ export class SystemSettingsService {
           receiptFooterText: SEED_DATA.receiptFooterText ?? undefined,
           receiptPrefix: SEED_DATA.receiptPrefix!,
           paymentRefPrefix: SEED_DATA.paymentRefPrefix!,
+          emailProviderForceSmtp: SEED_DATA.emailProviderForceSmtp,
         },
       });
     }

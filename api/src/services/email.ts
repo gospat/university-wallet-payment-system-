@@ -1,6 +1,8 @@
 import nodemailer, { Transporter } from 'nodemailer';
 import { getDefaultEmailDomain } from '../utils/alatpay';
 import { brandingEnvOnly } from '../utils/branding';
+import { selectEmailProvider } from './emailProviders';
+import type { MailArgs } from './emailProviders';
 
 const envBranding = brandingEnvOnly();
 
@@ -58,14 +60,20 @@ function checkForSecrets(content: string): void {
   }
 }
 
-function buttonLink(url: string, label: string): { html: string; text: string } {
+export function buttonLink(url: string, label: string, accentHex?: string): { html: string; text: string } {
+  const color = accentHex && /^#?[0-9a-fA-F]{3,8}$/.test(accentHex.trim())
+    ? (accentHex.startsWith('#') ? accentHex : `#${accentHex}`)
+    : emailStrings.roles.studentBlue;
   return {
-    html: `<a href="${url}" style="display:inline-block;background:${emailStrings.roles.studentBlue};color:#ffffff;padding:10px 20px;text-decoration:none;font-weight:bold;">${label}</a>`,
+    html: `<a href="${url}" style="display:inline-block;background:${color};color:#ffffff;padding:10px 20px;text-decoration:none;font-weight:bold;">${label}</a>`,
     text: `${label}: ${url}`,
   };
 }
 
-function wrapEmail(bodyHtml: string, bodyText: string): { html: string; text: string } {
+export function wrapEmail(bodyHtml: string, bodyText: string, accentHex?: string): { html: string; text: string } {
+  const headerAccent = accentHex && /^#?[0-9a-fA-F]{3,8}$/.test(accentHex.trim())
+    ? (accentHex.startsWith('#') ? accentHex : `#${accentHex}`)
+    : emailStrings.roles.studentBlue;
   const html = `
 <!DOCTYPE html>
 <html>
@@ -79,7 +87,7 @@ function wrapEmail(bodyHtml: string, bodyText: string): { html: string; text: st
 <td align="center">
 <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;">
 <tr>
-<td style="padding:20px 30px;background:${emailStrings.roles.studentBlue};color:#ffffff;">
+<td style="padding:20px 30px;background:${headerAccent};color:#ffffff;">
 <h1 style="margin:0;font-size:20px;">${emailStrings.universityName}</h1>
 </td>
 </tr>
@@ -136,49 +144,43 @@ export async function sendEmail({
   to,
   rendered,
   bcc,
+  forceSmtp,
+  fromOverride,
 }: {
   to: string;
   rendered: RenderedEmail;
   bcc?: string;
-}): Promise<{ success: boolean; messageId?: string; info?: any }> {
+  forceSmtp?: boolean;
+  fromOverride?: { name: string; address: string };
+  replyToOverride?: string;
+}): Promise<{ success: boolean; messageId?: string; provider?: 'resend' | 'smtp' | 'mock'; error?: string; info?: any }> {
   const combined = rendered.subject + rendered.html + rendered.text;
   checkForSecrets(combined);
 
-  const fromName = process.env.EMAIL_FROM_NAME || 'University Bursary';
+  const fromName = fromOverride?.name || process.env.EMAIL_FROM_NAME || 'University Bursary';
   const defaultDomain = getDefaultEmailDomain();
-  const fromAddress = process.env.EMAIL_FROM_ADDRESS || `no-reply@${defaultDomain}`;
-  const replyTo = process.env.EMAIL_REPLY_TO_ADDRESS || fromAddress;
+  const fromAddress = fromOverride?.address || process.env.EMAIL_FROM_ADDRESS || `no-reply@${defaultDomain}`;
+  const replyTo = (arguments[0] as any)?.replyToOverride || process.env.EMAIL_REPLY_TO_ADDRESS || fromAddress;
 
-  const transport = createTransport();
-  const mailOptions = {
-    from: `"${fromName}" <${fromAddress}>`,
-    replyTo,
+  const provider = selectEmailProvider(forceSmtp);
+  const mail: MailArgs = {
+    from: { name: fromName, address: fromAddress },
     to,
     bcc,
+    replyTo,
     subject: rendered.subject,
     html: rendered.html,
     text: rendered.text,
   };
 
-  try {
-    const info = await transport.sendMail(mailOptions);
-    sentCaptures.push({ to, subject: rendered.subject, info, at: new Date().toISOString() });
-    return {
-      success: true,
-      messageId: info.messageId,
-      info,
-    };
-  } catch (err: any) {
-    const isJsonTransport = (_transport as any)?.options?.jsonTransport === true;
-    if (isJsonTransport) {
-      const info = { error: err?.message, jsonTransport: true };
-      sentCaptures.push({ to, subject: rendered.subject, info, at: new Date().toISOString() });
-      return { success: true, info };
-    }
-    // eslint-disable-next-line no-console
-    console.warn('[email] send failed:', err?.message || err);
-    throw err;
-  }
+  const result = await provider.send(mail);
+  return {
+    success: result.success,
+    messageId: result.messageId,
+    provider: result.provider,
+    error: result.error,
+    info: { provider: result.provider, messageId: result.messageId, error: result.error },
+  };
 }
 
 export function renderPaymentSuccessful({
@@ -446,6 +448,30 @@ export function renderStudentAccountCreated({
     subject: 'Your Student Account has been created',
     html: wrapped.html,
     text: wrapped.text,
+  };
+}
+
+export async function renderStudentAccountCreatedConfigurable(
+  args: {
+    studentName: string;
+    matricNumber: string;
+    email: string;
+    temporaryPassword: string;
+  },
+  opts?: { templateKey?: string },
+): Promise<{ rendered: RenderedEmail; senderName: string; senderAddress: string; replyToAddress?: string | null }> {
+  // Dynamically import to avoid circular imports with emailTemplate.ts
+  const { renderStudentCredentialEmailHtmlText, getResolvedTemplateByKey } = await import('./emailTemplate');
+  const key = opts?.templateKey || 'student_credentials';
+  const [renderResult, config] = await Promise.all([
+    renderStudentCredentialEmailHtmlText(args, { templateKey: key }),
+    getResolvedTemplateByKey(key),
+  ]);
+  return {
+    rendered: renderResult.rendered,
+    senderName: config.senderName,
+    senderAddress: config.senderAddress,
+    replyToAddress: config.replyToAddress,
   };
 }
 

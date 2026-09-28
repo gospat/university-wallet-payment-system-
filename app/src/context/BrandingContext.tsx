@@ -38,14 +38,24 @@ function getApiBase(): string {
 }
 
 function setFavicon(faviconUrl: string | null | undefined) {
-  let link: HTMLLinkElement | null = document.querySelector('link[rel="icon"]');
-  if (!link) {
-    link = document.createElement('link');
-    link.rel = 'icon';
-    link.type = 'image/svg+xml';
-    document.head.appendChild(link);
+  const prefer = faviconUrl && faviconUrl.trim().length ? faviconUrl.trim() : '/favicon.ico';
+  const isIco = prefer.toLowerCase().endsWith('.ico');
+  let existingAny = document.querySelector<HTMLLinkElement>('link[rel="icon"][sizes="any"]');
+  let existingPng = document.querySelector<HTMLLinkElement>('link[rel="icon"][type="image/png"]');
+  if (!existingAny) {
+    existingAny = document.createElement('link');
+    existingAny.rel = 'icon';
+    existingAny.setAttribute('sizes', 'any');
+    document.head.appendChild(existingAny);
   }
-  link.href = faviconUrl && faviconUrl.trim().length ? faviconUrl : '/vite.svg';
+  if (!existingPng) {
+    existingPng = document.createElement('link');
+    existingPng.rel = 'icon';
+    existingPng.type = 'image/png';
+    document.head.appendChild(existingPng);
+  }
+  existingAny.href = isIco ? prefer : '/favicon.ico';
+  existingPng.href = isIco ? '/branding/favicon-32.png' : prefer;
 }
 
 function setAppTitle(name: string | null | undefined) {

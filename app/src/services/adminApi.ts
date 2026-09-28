@@ -181,3 +181,127 @@ export const paymentConfigApi = {
   save: (activeGateway: 'PAYSTACK' | 'ALATPAY') =>
     api.patch<{ data: PaymentConfigOut }>('/admin/payment-config', { activeGateway }).then(unwrapData<PaymentConfigOut>),
 };
+
+export type EmailTypeKey =
+  | 'STUDENT_CREDENTIALS'
+  | 'PASSWORD_RESET'
+  | 'PAYMENT_SUCCESSFUL'
+  | 'FEE_ASSIGNED'
+  | 'BILL_CREATED'
+  | 'REFUND_REQUESTED'
+  | 'REFUND_APPROVED'
+  | 'REFUND_REJECTED'
+  | 'OTHER';
+export type EmailProviderTypeKey = 'RESEND' | 'SMTP' | 'MOCK';
+export type EmailDeliveryStatusKey = 'PENDING' | 'SENT' | 'FAILED' | 'RETRIED';
+
+export interface EmailTemplateConfigOut {
+  templateKey: string;
+  senderName: string;
+  senderAddress: string;
+  replyToAddress?: string | null;
+  portalLoginUrl: string;
+  subjectLine: string;
+  greeting: string;
+  paragraph: string;
+  buttonLabel: string;
+  forceChangeNotice: string;
+  closing: string;
+  accentColor?: string | null;
+  updatedById?: number | null;
+}
+
+export type EmailTemplateConfigPatch = Partial<Omit<EmailTemplateConfigOut, 'templateKey' | 'updatedById'>>;
+
+export interface EmailDeliveryLogOut {
+  id: string;
+  emailType: EmailTypeKey;
+  toAddress: string;
+  recipientId?: number | null;
+  recipient?: {
+    id: number;
+    email?: string;
+    firstName?: string;
+    lastName?: string;
+    matricNumber?: string | null;
+  } | null;
+  triggeredByAdminId?: number | null;
+  triggeredByAdmin?: {
+    id: number;
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    role: string;
+  } | null;
+  studentImportId?: number | null;
+  studentImport?: {
+    id: number;
+    importNumber: string;
+    fileName: string;
+    createdAt: string;
+    totalRecords?: number;
+    successfulRecords?: number;
+  } | null;
+  idempotencyKey?: string;
+  provider: EmailProviderTypeKey;
+  status: EmailDeliveryStatusKey;
+  resendMessageId?: string | null;
+  smtpMessageId?: string | null;
+  attempts: number;
+  lastError?: string | null;
+  retryAfter?: string | null;
+  payloadSummary?: any;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface EmailDeliveryListOut {
+  rows: EmailDeliveryLogOut[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  hasNext: boolean;
+}
+
+export interface EmailDeliveryListParams {
+  page?: number;
+  pageSize?: number;
+  emailType?: EmailTypeKey;
+  status?: EmailDeliveryStatusKey;
+  toAddressContains?: string;
+  recipientId?: number;
+  studentImportId?: number;
+}
+
+export const emailTemplatesApi = {
+  get: (templateKey: string) =>
+    api.get<{ data: EmailTemplateConfigOut }>(`/admin/email-templates/${encodeURIComponent(templateKey)}`).then(unwrapData<EmailTemplateConfigOut>),
+  patch: (templateKey: string, patch: EmailTemplateConfigPatch) =>
+    api.patch<{ data: EmailTemplateConfigOut }>(`/admin/email-templates/${encodeURIComponent(templateKey)}`, patch).then(unwrapData<EmailTemplateConfigOut>),
+};
+
+export const emailDeliveryLogsApi = {
+  list: (params?: EmailDeliveryListParams) => {
+    const search = new URLSearchParams();
+    const p = params || {};
+    if (p.page) search.set('page', String(p.page));
+    if (p.pageSize) search.set('pageSize', String(p.pageSize));
+    if (p.emailType) search.set('emailType', p.emailType);
+    if (p.status) search.set('status', p.status);
+    if (p.toAddressContains) search.set('toAddressContains', p.toAddressContains);
+    if (p.recipientId) search.set('recipientId', String(p.recipientId));
+    if (p.studentImportId) search.set('studentImportId', String(p.studentImportId));
+    const qs = search.toString();
+    return api
+      .get<{ data: EmailDeliveryListOut }>(`/admin/email-delivery-logs${qs ? `?${qs}` : ''}`)
+      .then(unwrapData<EmailDeliveryListOut>);
+  },
+  get: (id: string | number) =>
+    api.get<{ data: EmailDeliveryLogOut }>(`/admin/email-delivery-logs/${encodeURIComponent(String(id))}`).then(unwrapData<EmailDeliveryLogOut>),
+};
+
+export const emailResendCredentialsApi = {
+  resend: (userId: number) =>
+    api.post<{ data: { deliveryLogId: string | null; queued: boolean; message: string } }>(`/admin/users/${userId}/resend-credentials`).then(unwrapData<{ deliveryLogId: string | null; queued: boolean; message: string }>),
+};

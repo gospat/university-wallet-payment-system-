@@ -5,6 +5,8 @@ import ForcePasswordChangeGate from './components/ForcePasswordChangeGate';
 import StudentLogin from './pages/auth/StudentLogin';
 import AdminLogin from './pages/auth/AdminLogin';
 import BursaryLogin from './pages/auth/BursaryLogin';
+import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
+import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import StudentDashboard from './pages/student/Dashboard';
 import AdminDashboard from './pages/admin/Dashboard';
 import AdminRefunds from './pages/admin/Refunds';
@@ -224,6 +226,8 @@ const App: React.FC = () => {
           <Route path="/student/login" element={<StudentLogin />} />
           <Route path="/admin/login" element={<AdminLogin />} />
           <Route path="/bursary/login" element={<BursaryLogin />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
 
           <Route path="/unauthorized" element={<UnauthorizedPage />} />
           <Route path="/404" element={<NotFoundPage />} />

@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer';
 import QRCode from 'qrcode';
 import { AppError } from '../utils/AppError';
-import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding } from '../utils/branding';
+import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding, BELLS_LOGO_DATA_URI } from '../utils/branding';
 import prisma from '../config/database';
 
 type ReceiptData = {
@@ -62,6 +62,15 @@ function conditionalTermLine1(b: Branding): string {
 function logoImgHtml(b: Branding, sizePx = 54): string {
   if (!b.logoUrl) return '';
   return `<div class="logo-img"><img src="${escapeHtml(b.logoUrl)}" alt="logo" style="max-height:${sizePx}px; max-width:${sizePx * 1.6}px; object-fit:contain;" onerror="this.parentNode.style.display='none'" /></div>`;
+}
+
+function logoImgHtmlProfessional(sizePx = 58): string {
+  const BUOT_FALLBACK_SVG =
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${sizePx}" height="${sizePx}" viewBox="0 0 120 120"><circle cx="60" cy="60" r="56" fill="#0e74cc" stroke="#fff" stroke-width="2"/><text x="60" y="68" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="34" font-weight="800" fill="#fff">BUoT</text></svg>`
+    );
+  return `<div class="logo-img"><img src="${BELLS_LOGO_DATA_URI}" alt="Bells University of Technology Crest" style="height:${sizePx}px; width:${sizePx}px; object-fit:contain;" onerror="this.onerror=null;this.src='${BUOT_FALLBACK_SVG}'" /></div>`;
 }
 
 async function getBranding(): Promise<Branding> {
@@ -174,7 +183,11 @@ export class ReceiptService {
 <style>
 @page { size: A4; margin: 0; }
 body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; color: #222; background: #fff; }
-.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; }
+.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; overflow: hidden; isolation: isolate; background: #fff; }
+.page-content { position: relative; z-index: 2; }
+.watermark-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 220px 220px; background-repeat: repeat; opacity: 0.055; transform: rotate(-38deg); }
+.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 88px; color: rgba(10, 61, 145, 0.045); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
 .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 18px; margin-bottom: 24px; }
 .logo { text-align: left; }
 .logo h1 { margin: 0; color: #0a3d91; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
@@ -218,9 +231,14 @@ ${chargeSourceCss()}
 </head>
 <body>
 <div class="container">
+  <div class="watermark-layer">
+    <div class="wm-tile"></div>
+    <div class="wm-text">OFFICIAL STATEMENT</div>
+  </div>
+  <div class="page-content">
   <div class="header">
     <div class="logo-wrap">
-      ${logoImgHtml(branding, 56)}
+      ${logoImgHtmlProfessional(56)}
       <div class="logo">
         <h1>${escapeHtml(branding.name)}</h1>
         <p>Official Account Statement</p>
@@ -260,6 +278,7 @@ ${chargeSourceCss()}
     <p>${hasBrandingSignature(branding) ? 'This is an official document authenticated by the Bursary signatory above.' : 'This is a computer-generated document and requires no signature.'}</p>
     <p>For any discrepancies, please contact the University Bursary Department immediately.${branding.phone ? ` Tel: ${escapeHtml(branding.phone)}` : ''}${branding.website ? ` • ${escapeHtml(branding.website)}` : ''}</p>
   </div>
+  </div>
 </div>
 </body>
 </html>`;
@@ -284,13 +303,17 @@ ${chargeSourceCss()}
 <style>
 @page { size: A4; margin: 0; }
 body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; color: #222; background: #fff; }
-.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; }
+.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; overflow: hidden; isolation: isolate; background: #fff; }
+.page-content { position: relative; z-index: 2; }
+.watermark-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 220px 220px; background-repeat: repeat; opacity: 0.055; transform: rotate(-38deg); }
+.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 88px; color: rgba(10, 61, 145, 0.045); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
 .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 18px; margin-bottom: 28px; }
 .logo h1 { margin: 0; color: #0a3d91; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
 .logo p { margin: 5px 0 0; font-size: 12px; color: #555; }
 .title h2 { margin: 0; font-size: 30px; color: #222; text-align: right; }
 .title p { margin: 5px 0 0; color: #777; font-size: 13px; text-align: right; }
-.badge { position: absolute; top: 180px; right: 40px; padding: 10px 20px; font-weight: 800; font-size: 18px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; }
+.badge { position: absolute; top: 180px; right: 40px; padding: 10px 20px; font-weight: 800; font-size: 18px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; z-index: 3; }
 .badge-paid { border: 2px solid #0a7a2f; color: #0a7a2f; }
 .badge-voided { border: 2px solid #b42318; color: #b42318; }
 .amount { background: #f6f8fc; padding: 24px; border-radius: 8px; text-align: center; margin: 18px 0 28px; border: 1px solid #e6ecf6; }
@@ -311,7 +334,6 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
 .qr { text-align: center; }
 .qr img { width: 108px; height: 108px; border: 1px solid #eef1f7; border-radius: 6px; padding: 4px; background: #fff; }
 .qr .label { font-size: 10px; color: #666; margin-top: 6px; }
-.watermark { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 96px; color: rgba(10, 61, 145, 0.05); z-index: -1; white-space: nowrap; font-weight: 800; letter-spacing: 6px; }
 .logo-wrap { display: flex; align-items: flex-start; gap: 14px; }
 .logo-img { display: inline-flex; align-items: center; justify-content: center; }
 .signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; padding: 20px 0 0; }
@@ -334,10 +356,14 @@ ${chargeSourceCss()}
 </head>
 <body>
 <div class="container">
-  <div class="watermark">${escapeHtml(branding.name)} OFFICIAL</div>
+  <div class="watermark-layer">
+    <div class="wm-tile"></div>
+    <div class="wm-text">OFFICIAL RECEIPT</div>
+  </div>
+  <div class="page-content">
   <div class="header">
     <div class="logo-wrap">
-      ${logoImgHtml(branding, 58)}
+      ${logoImgHtmlProfessional(58)}
       <div class="logo">
         <h1>${escapeHtml(branding.name)}</h1>
         <p>Official Payment Receipt — Bursary Department</p>
@@ -402,6 +428,7 @@ ${chargeSourceCss()}
       <div class="label">Scan / open URL to verify</div>
     </div>
   </div>
+  </div>
 </div>
 </body>
 </html>`;
@@ -422,13 +449,17 @@ ${chargeSourceCss()}
 <style>
 @page { size: A4; margin: 0; }
 body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; color: #222; background: #fff; }
-.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; }
+.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; overflow: hidden; isolation: isolate; background: #fff; }
+.page-content { position: relative; z-index: 2; }
+.watermark-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 220px 220px; background-repeat: repeat; opacity: 0.055; transform: rotate(-38deg); }
+.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 88px; color: rgba(10, 61, 145, 0.045); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
 .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 18px; margin-bottom: 28px; }
 .logo h1 { margin: 0; color: #0a3d91; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
 .logo p { margin: 5px 0 0; font-size: 12px; color: #555; }
 .title h2 { margin: 0; font-size: 30px; color: #222; text-align: right; }
 .title p { margin: 5px 0 0; color: #777; font-size: 13px; text-align: right; }
-.badge { position: absolute; top: 180px; right: 40px; padding: 10px 20px; font-weight: 800; font-size: 18px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; }
+.badge { position: absolute; top: 180px; right: 40px; padding: 10px 20px; font-weight: 800; font-size: 18px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; z-index: 3; }
 .badge-paid { border: 2px solid #0a7a2f; color: #0a7a2f; }
 .badge-voided { border: 2px solid #b42318; color: #b42318; }
 .amount { background: #f6f8fc; padding: 24px; border-radius: 8px; text-align: center; margin: 18px 0 28px; border: 1px solid #e6ecf6; }
@@ -448,7 +479,6 @@ body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40p
 .qr { text-align: center; }
 .qr img { width: 108px; height: 108px; border: 1px solid #eef1f7; border-radius: 6px; padding: 4px; background: #fff; }
 .qr .label { font-size: 10px; color: #666; margin-top: 6px; }
-.watermark { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 96px; color: rgba(10, 61, 145, 0.05); z-index: -1; white-space: nowrap; font-weight: 800; letter-spacing: 6px; }
 .logo-wrap { display: flex; align-items: flex-start; gap: 14px; }
 .logo-img { display: inline-flex; align-items: center; justify-content: center; }
 .signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; padding: 20px 0 0; }
@@ -471,10 +501,14 @@ ${chargeSourceCss()}
 </head>
 <body>
 <div class="container">
-  <div class="watermark">${escapeHtml(branding.name)} OFFICIAL</div>
+  <div class="watermark-layer">
+    <div class="wm-tile"></div>
+    <div class="wm-text">OFFICIAL RECEIPT</div>
+  </div>
+  <div class="page-content">
   <div class="header">
     <div class="logo-wrap">
-      ${logoImgHtml(branding, 58)}
+      ${logoImgHtmlProfessional(58)}
       <div class="logo">
         <h1>${escapeHtml(branding.name)}</h1>
         <p>Official Payment Receipt — Bursary Department</p>
@@ -538,6 +572,7 @@ ${chargeSourceCss()}
       <img src="${qrCodeImage}" alt="Verify receipt" />
       <div class="label">Scan / open URL to verify</div>
     </div>
+  </div>
   </div>
 </div>
 </body>

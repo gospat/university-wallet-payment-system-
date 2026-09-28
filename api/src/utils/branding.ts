@@ -1,4 +1,8 @@
 import { SystemSettingsService } from '../services/systemSettings';
+import { BELLS_LOGO_BASE64 } from './_bellsLogoBase64.generated';
+
+export { BELLS_LOGO_BASE64 };
+export const BELLS_LOGO_DATA_URI: string = BELLS_LOGO_BASE64;
 
 export type Branding = {
   name: string;

@@ -4,7 +4,8 @@ import PortalShell from '../../components/PortalShell';
 import { useAuth } from '../../context/AuthContext';
 import { i18n } from '../../i18n/en';
 import api from '../../services/api';
-import { KeyRound, User, Save, BookOpen, GraduationCap, Mail, Phone, MapPin, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
+import { KeyRound, User, Save, BookOpen, GraduationCap, Mail, Phone, MapPin, CheckCircle2, AlertTriangle, Loader2, XCircle } from 'lucide-react';
+import PasswordInput, { scorePassword } from '../../components/ui/PasswordInput';
 
 type StudentProfileResponse = {
   data?: {
@@ -211,42 +212,45 @@ const ProfilePage: React.FC = () => {
                 <p className="text-sm text-gray-500 mt-1">{t.passwordHint}</p>
               </header>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <label className="block">
-                  <span className="text-sm font-medium text-gray-700 mb-1 block">{t.currentPasswordLabel}</span>
-                  <input
-                    type="password"
-                    value={currentPw}
-                    onChange={(e) => setCurrentPw(e.target.value)}
-                    autoComplete="current-password"
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-gray-700 mb-1 block">{t.newPasswordLabel}</span>
-                  <input
-                    type="password"
-                    value={newPw}
-                    onChange={(e) => setNewPw(e.target.value)}
-                    autoComplete="new-password"
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-gray-700 mb-1 block">{t.confirmPasswordLabel}</span>
-                  <input
-                    type="password"
-                    value={confirmPw}
-                    onChange={(e) => setConfirmPw(e.target.value)}
-                    autoComplete="new-password"
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </label>
+                <PasswordInput
+                  label={t.currentPasswordLabel}
+                  value={currentPw}
+                  onChange={(e) => setCurrentPw(e.target.value)}
+                  autoComplete="current-password"
+                  inputClassName="px-3 py-2"
+                />
+                <PasswordInput
+                  label={t.newPasswordLabel}
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  autoComplete="new-password"
+                  strength={scorePassword(newPw).level}
+                  showStrengthBar
+                  strengthHint={scorePassword(newPw).hint ?? null}
+                  inputClassName="px-3 py-2"
+                />
+                <PasswordInput
+                  label={t.confirmPasswordLabel}
+                  value={confirmPw}
+                  onChange={(e) => setConfirmPw(e.target.value)}
+                  autoComplete="new-password"
+                  matchOk={!!confirmPw && confirmPw === newPw}
+                  mismatch={!!confirmPw && confirmPw !== newPw}
+                  strengthHint={
+                    !!confirmPw
+                      ? confirmPw === newPw
+                        ? undefined
+                        : 'Passwords do not match.'
+                      : null
+                  }
+                  inputClassName="px-3 py-2"
+                />
               </div>
               <div className="mt-5 flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={onChangePassword}
-                  disabled={changing}
+                  disabled={changing || (!!confirmPw && confirmPw !== newPw)}
                   className="inline-flex items-center gap-2 bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white font-semibold px-5 py-2.5 rounded-lg shadow-sm"
                 >
                   {changing ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
@@ -254,7 +258,7 @@ const ProfilePage: React.FC = () => {
                 </button>
                 {pwToast && (
                   <span className={`inline-flex items-center gap-1.5 text-sm ${pwToast.type === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
-                    {pwToast.type === 'ok' ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+                    {pwToast.type === 'ok' ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
                     {pwToast.text}
                   </span>
                 )}

@@ -95,6 +95,31 @@ enum AssignmentTargetType {
   STUDENT_TYPE
 }
 
+enum EmailType {
+  STUDENT_CREDENTIALS
+  PASSWORD_RESET
+  PAYMENT_SUCCESSFUL
+  FEE_ASSIGNED
+  BILL_CREATED
+  REFUND_REQUESTED
+  REFUND_APPROVED
+  REFUND_REJECTED
+  OTHER
+}
+
+enum EmailProviderType {
+  RESEND
+  SMTP
+  MOCK
+}
+
+enum EmailDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  RETRIED
+}
+
 model User {
   id                  Int            @id @default(autoincrement())
   email               String         @unique
@@ -145,6 +170,9 @@ model User {
   feeCategoriesCreated FeeCategory[] @relation("FeeCategoryCreator")
   adminNotificationsRead AdminNotification[] @relation("AdminNotifReader")
   refreshTokens       RefreshToken[]
+  emailTemplateConfigUpdates EmailTemplateConfig[] @relation("EmailConfigUpdater")
+  emailRecipientOf    EmailDeliveryLog[] @relation("EmailDeliveryRecipient")
+  emailTriggeredByMe  EmailDeliveryLog[] @relation("EmailDeliveryTriggeredBy")
 
   @@index([accountStatus])
   @@index([college, department, program, level])
@@ -372,6 +400,7 @@ model StudentImport {
   createdAt        DateTime @default(now())
 
   uploadedBy       User     @relation("ImportCreator", fields: [uploadedById], references: [id])
+  deliveryLogs     EmailDeliveryLog[]
 
   @@index([createdAt])
   @@map("student_imports")
@@ -516,6 +545,7 @@ model SystemSettings {
   receiptBursarSignatureUrl String?  @db.VarChar(500)
   receiptPrefix         String   @default("REC") @db.VarChar(10)
   paymentRefPrefix      String   @default("PAY") @db.VarChar(10)
+  emailProviderForceSmtp Boolean? @default(false)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   updatedById           Int?
@@ -537,4 +567,56 @@ model RefreshToken {
   @@index([token])
   @@index([expiresAt])
   @@map("refresh_tokens")
+}
+
+model EmailTemplateConfig {
+  id                Int      @id @default(autoincrement())
+  templateKey       String   @unique @db.VarChar(80)
+  senderName        String   @default("University Bursary") @db.VarChar(120)
+  senderAddress     String   @default("noreply@university.edu.ng") @db.VarChar(254)
+  replyToAddress    String?  @db.VarChar(254)
+  portalLoginUrl    String   @default("https://portal.university.edu.ng/login") @db.VarChar(500)
+  subjectLine       String   @default("Your University Account Has Been Created") @db.VarChar(200)
+  greeting          String   @default("Dear {{studentName}},") @db.VarChar(200)
+  paragraph         String   @db.MediumText
+  buttonLabel       String   @default("Access Student Portal") @db.VarChar(60)
+  forceChangeNotice String   @db.MediumText
+  closing           String   @db.MediumText
+  accentColor       String?  @db.VarChar(9)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  updatedById       Int?
+  updatedBy         User?    @relation("EmailConfigUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([templateKey])
+  @@map("email_template_configs")
+}
+
+model EmailDeliveryLog {
+  id                   BigInt               @id @default(autoincrement())
+  emailType            EmailType
+  toAddress            String               @db.VarChar(254)
+  recipientId          Int?
+  recipient            User?                @relation("EmailDeliveryRecipient", fields: [recipientId], references: [id], onDelete: SetNull)
+  triggeredByAdminId   Int?
+  triggeredByAdmin     User?                @relation("EmailDeliveryTriggeredBy", fields: [triggeredByAdminId], references: [id], onDelete: SetNull)
+  studentImportId      Int?
+  studentImport        StudentImport?       @relation(fields: [studentImportId], references: [id], onDelete: SetNull)
+  idempotencyKey       String               @unique @db.VarChar(128)
+  provider             EmailProviderType
+  status               EmailDeliveryStatus  @default(PENDING)
+  resendMessageId      String?              @unique @db.VarChar(120)
+  smtpMessageId        String?              @db.VarChar(400)
+  attempts             Int                  @default(0)
+  lastError            String?              @db.VarChar(2000)
+  retryAfter           DateTime?
+  payloadSummary       Json?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  @@index([emailType, createdAt])
+  @@index([status, createdAt])
+  @@index([recipientId, createdAt])
+  @@index([studentImportId])
+  @@map("email_delivery_logs")
 }

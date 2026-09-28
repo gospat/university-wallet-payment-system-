@@ -1,8 +1,10 @@
 import express from 'express';
-import { signup, login, refresh, logoutAll, me, changePassword } from '../controllers/auth';
+import rateLimit from 'express-rate-limit';
+import { signup, login, refresh, logoutAll, me, changePassword, forgotPassword, resetPassword } from '../controllers/auth';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
 import { protect } from '../middlewares/auth';
+import { reqIp } from '../utils/http';
 
 const router = express.Router();
 
@@ -19,9 +21,40 @@ const loginSchema = z.object({
   password: z.string().min(1).max(128).trim(),
 });
 
+const forgotPasswordSchema = z.object({
+  email: z.string().trim().max(255).email(),
+});
+
+const forgotLimiterByEmail = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const e = String((req as any).body?.email || 'unknown').trim().toLowerCase();
+    return `forgot-by-email:${e}`;
+  },
+  skipFailedRequests: false,
+  skipSuccessfulRequests: false,
+  message: { status: 'fail', message: 'Too many password reset requests for this email. Please try again in 15 minutes.' },
+});
+
+const forgotLimiterByIp = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `forgot-by-ip:${reqIp(req as any) || 'anon'}`,
+  skipFailedRequests: false,
+  skipSuccessfulRequests: false,
+  message: { status: 'fail', message: 'Too many password reset requests from this IP. Please try again in an hour.' },
+});
+
 router.post('/signup', validateBody(signupSchema), signup);
 router.post('/login', validateBody(loginSchema), login);
 router.post('/refresh', ...(refresh as any[]));
+router.post('/forgot-password', forgotLimiterByIp, forgotLimiterByEmail, validateBody(forgotPasswordSchema), forgotPassword);
+router.post('/reset-password', resetPassword as any[]);
 
 router.use(protect);
 router.get('/me', me);

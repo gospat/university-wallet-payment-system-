@@ -7,8 +7,9 @@ import api, { navCounters, NavCounters } from '../../services/api';
 import type { AxiosRequestConfig } from 'axios';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Copy, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap, ShieldAlert, Key, Lock } from 'lucide-react';
+import { Copy, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap, ShieldAlert, Key, Lock, Send } from 'lucide-react';
 import { programmesApi } from '../../services/academicApi';
+import { emailResendCredentialsApi } from '../../services/adminApi';
 
 type ProgrammeOption = {
   id: number;
@@ -413,6 +414,32 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [setStatusStudent, setSetStatusStudent] = useState<{ student: StudentRow; status: typeof STATUSES[number] } | null>(null);
   const [setStatusSubmitting, setSetStatusSubmitting] = useState(false);
 
+  // ---- resend credentials ------------------------------------------------
+  const [resendStudent, setResendStudent] = useState<StudentRow | null>(null);
+  const [resendSubmitting, setResendSubmitting] = useState(false);
+
+  const submitResendCredentials = async () => {
+    if (!resendStudent) return;
+    setResendSubmitting(true);
+    try {
+      const resp = await emailResendCredentialsApi.resend(resendStudent.id);
+      const deliveryLogId = resp?.deliveryLogId;
+      const message = resp?.message || 'Credentials email queued for delivery.';
+      setResendStudent(null);
+      setAlert({
+        isOpen: true,
+        title: 'Credentials Email Queued',
+        message: `${message}${deliveryLogId ? ` (Delivery log ID: ${String(deliveryLogId).slice(0, 12)}…)` : ''} The student will receive a NEW temporary password via email.`,
+        type: 'success',
+      });
+      loadStudents();
+    } catch (err: any) {
+      setAlert({ isOpen: true, title: 'Failed to queue credentials email', message: err?.message ?? i18n.errors.generic, type: 'error' });
+    } finally {
+      setResendSubmitting(false);
+    }
+  };
+
   const submitSetStatus = async (payload: { reason?: string }) => {
     if (!setStatusStudent) return;
     setSetStatusSubmitting(true);
@@ -718,6 +745,13 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                       <div className="flex items-center gap-2 flex-wrap">
                         <button className="text-blue-600 hover:text-blue-800 text-sm font-medium" onClick={() => openEdit(s)}>{students.editAction}</button>
                         <button className="text-amber-700 hover:text-amber-900 text-sm font-medium" onClick={() => { setTempPassword(null); setResetOpen(s); }}>{students.resetPasswordAction}</button>
+                        <button
+                          className="inline-flex items-center gap-1 text-indigo-700 hover:text-indigo-900 text-sm font-medium"
+                          onClick={() => setResendStudent(s)}
+                          title="Force reset password & resend credentials email"
+                        >
+                          <Send className="w-3.5 h-3.5" /> Resend Creds
+                        </button>
                         <select
                           className="border border-gray-300 rounded-md text-xs px-2 py-1 bg-white"
                           defaultValue=""
@@ -1173,6 +1207,24 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         confirmVariant={setStatusStudent && statusIsDestructive(setStatusStudent.status) ? 'danger' : 'warning'}
         confirmLabel={students.setStatusSubmit}
         loading={setStatusSubmitting}
+      />
+
+      {/* Resend Credentials Confirmation */}
+      <ConfirmAction
+        isOpen={resendStudent !== null}
+        onClose={() => !resendSubmitting && setResendStudent(null)}
+        onConfirm={() => submitResendCredentials()}
+        title="Force Resend Credentials Email?"
+        description="This will RESET the student's current password to a new random temporary one and send the new password via email to the address on file. The student will be required to choose a new password on next login."
+        resourceLabel={
+          resendStudent
+            ? `Student: ${resendStudent.firstName} ${resendStudent.lastName}${resendStudent.matricNumber ? ` (${resendStudent.matricNumber})` : ''} → ${resendStudent.email}`
+            : ''
+        }
+        confirmLabel="Yes — Reset Password & Email New Credentials"
+        confirmVariant="warning"
+        cancelLabel="Cancel"
+        loading={resendSubmitting}
       />
 
       {/* Bulk Upload Wizard */}

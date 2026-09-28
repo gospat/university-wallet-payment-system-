@@ -4,14 +4,14 @@ import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
-import { CreateStudentSchema } from '../services/student';
+import { CreateStudentSchema, StudentService } from '../services/student';
 import {
   confirmStudentUpload,
   downloadErrorCsv,
   previewStudentUpload,
   stageStudentUpload,
 } from '../controllers/bulkUpload';
-import { Role, Prisma, AccountStatus, PaymentGateway } from '@prisma/client';
+import { Role, Prisma, AccountStatus, PaymentGateway, EmailType, EmailDeliveryStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { RefundService } from '../services/refund';
 import { adminListRefunds, adminApproveRefund, adminRejectRefund } from '../controllers/refunds';
@@ -25,6 +25,11 @@ import bcrypt from 'bcrypt';
 import { reqIp, reqUa } from '../utils/http';
 import { buildTwoSheetWorkbook } from '../utils/xlsxTemplate';
 import { csvLineSafe, appendCsvIntegrityTrailer } from '../utils/security';
+import rateLimit from 'express-rate-limit';
+import {
+  EmailTemplateService,
+  EmailTemplateConfigPatchSchema,
+} from '../services/emailTemplate';
 
 const router = express.Router();
 
@@ -200,7 +205,29 @@ router.get('/students/template.xlsx', catchAsync(async (req: Request, res: Respo
 }));
 
 router.use(protect);
-router.use(restrictTo('ADMIN'));
+
+// Selective access: Non-email endpoints remain ADMIN-only.
+// Email delivery log list/detail: ADMIN or BURSARY (PII is automatically masked per viewerRole).
+// Email template edit + resend credentials: ADMIN-only.
+router.use((req, res, next) => {
+  const isEmailDeliveryLogRead =
+    req.method === 'GET' &&
+    (/^\/email-delivery-logs(\/|$)/.test(req.path));
+  const isEmailTemplate = /^\/email-templates(\/|$)/.test(req.path);
+  const isResendCredentials = /\/resend-credentials$/.test(req.path);
+  const role = String((req as any).user?.role || '');
+
+  if (isEmailDeliveryLogRead) {
+    if (role === 'ADMIN' || role === 'BURSARY') return next();
+    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN or BURSARY role' });
+  }
+  if (isEmailTemplate || isResendCredentials) {
+    if (role === 'ADMIN') return next();
+    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN role' });
+  }
+  // Default: all other routes remain strict ADMIN-only
+  return restrictTo('ADMIN')(req, res, next);
+});
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
@@ -1338,5 +1365,236 @@ router.get(
     });
   }),
 );
+
+// -----------------------------------------------------------------------------
+// EMAIL: Templates configuration + delivery logs + resend credentials
+// (mounted after protect/restrictTo(ADMIN))
+// -----------------------------------------------------------------------------
+
+const resendCredentialsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: (req: Request) => {
+    const id = (req.params as any).id;
+    void id;
+    return 5;
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => {
+    const uid = (req as any).user?.id ?? 'anon';
+    const targetId = (req.params as any).id ?? 'all';
+    return `resend-creds:${uid}:${targetId}`;
+  },
+  message: { status: 'fail', message: 'Too many credential resend requests. Please try again in 15 minutes.' },
+});
+
+const emailTypeValues: readonly string[] = Object.values(EmailType);
+const emailStatusValues: readonly string[] = Object.values(EmailDeliveryStatus);
+
+// 1. GET template by key (ADMIN)
+router.get('/email-templates/:templateKey', catchAsync(async (req: Request, res: Response) => {
+  const key = String((req.params as any).templateKey || '').trim();
+  if (!key) return res.status(400).json({ status: 'fail', message: 'templateKey required' });
+  const data = await EmailTemplateService.getByKey(key);
+  res.json({ status: 'success', data });
+}));
+
+// 2. PATCH template by key (ADMIN)
+router.patch('/email-templates/:templateKey', validateBody(EmailTemplateConfigPatchSchema), catchAsync(async (req: Request, res: Response) => {
+  const key = String((req.params as any).templateKey || '').trim();
+  if (!key) return res.status(400).json({ status: 'fail', message: 'templateKey required' });
+  const actorId = Number((req as any).user?.id);
+  const before = await EmailTemplateService.getByKey(key);
+  const updated = await EmailTemplateService.updateByKey(key, req.body as any, { updatedById: Number.isFinite(actorId) ? actorId : undefined });
+
+  const actor = Number.isFinite(actorId) ? actorId : null;
+  try {
+    await prisma.auditLog.create({
+      data: {
+        action: 'EMAIL_TEMPLATE_UPDATED',
+        entityType: 'EMAIL_TEMPLATE',
+        entityId: key,
+        userId: actor,
+        oldValue: { before: { subject: before.subjectLine, greeting: before.greeting, buttonLabel: before.buttonLabel } } as any,
+        newValue: { updatedFields: Object.keys(req.body || {}) } as any,
+        details: { templateKey: key, changedFields: Object.keys(req.body || {}) } as any,
+        ipAddress: reqIp(req),
+        userAgent: reqUa(req),
+      },
+    });
+  } catch { /* ignore */ }
+  const data = await EmailTemplateService.getByKey(key);
+  void updated;
+  res.json({ status: 'success', data });
+}));
+
+// Helpers for BigInt JSON serialization (Prisma BIGINT primary keys cannot serialize to JSON)
+function stringifyBigintsDeep(v: any): any {
+  if (typeof v === 'bigint') return v.toString();
+  if (v === null || v === undefined) return v;
+  if (typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(stringifyBigintsDeep);
+  const out: any = {};
+  for (const k of Object.keys(v)) out[k] = stringifyBigintsDeep((v as any)[k]);
+  return out;
+}
+
+// Middleware-like allow-list guard: specific email endpoints accessible to ADMIN *or* BURSARY
+// (must run before the global restrictTo('ADMIN'))
+function allowAdminOrBursary(req: Request, res: Response, next: any) {
+  const role = String((req as any).user?.role || '');
+  if (role !== 'ADMIN' && role !== 'BURSARY') {
+    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN or BURSARY role' });
+  }
+  next();
+}
+function allowAdminOnly(req: Request, res: Response, next: any) {
+  const role = String((req as any).user?.role || '');
+  if (role !== 'ADMIN') {
+    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN role' });
+  }
+  next();
+}
+
+// Helpers for PII mask
+function maskEmail(emailLike: string): string {
+  const s = String(emailLike || '');
+  const at = s.lastIndexOf('@');
+  if (at <= 1) return s.length ? '*'.repeat(Math.max(1, s.length)) : s;
+  const first = s[0];
+  const user = s.slice(1, at);
+  const domain = s.slice(at);
+  return `${first}${'*'.repeat(Math.max(1, user.length))}${domain}`;
+}
+function maskMatric(matric: string | null | undefined): string | null {
+  if (!matric) return matric ?? null;
+  const s = String(matric);
+  if (s.length <= 3) return '*'.repeat(s.length);
+  return `...${s.slice(-3)}`;
+}
+function maskDeliveryLogRow(row: any, viewerRole: string) {
+  let r: any = stringifyBigintsDeep(row);
+  if (viewerRole !== 'ADMIN') {
+    r.toAddress = maskEmail(r.toAddress);
+    if (r.recipient && typeof r.recipient === 'object' && r.recipient !== null) {
+      const rec = { ...r.recipient };
+      rec.matricNumber = maskMatric(rec.matricNumber);
+      if (rec.email) rec.email = maskEmail(rec.email);
+      if (rec.firstName) rec.firstName = viewerRole === 'BURSARY' ? rec.firstName : '*'.repeat(String(rec.firstName).length);
+      r.recipient = rec;
+    }
+  }
+  return r;
+}
+
+// 3. GET delivery logs list (ADMIN; Bursary sees masked PII)
+const emailDeliveryLogsListSchema = z.object({
+  page: z.coerce.number().int().min(1).max(1000000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(200).default(25),
+  emailType: z.string().optional(),
+  status: z.string().optional(),
+  toAddressContains: z.string().max(254).optional(),
+  recipientId: z.coerce.number().int().optional(),
+  studentImportId: z.coerce.number().int().optional(),
+});
+router.get('/email-delivery-logs', validateQuery(emailDeliveryLogsListSchema), catchAsync(async (req: Request, res: Response) => {
+  const q = (req.query as any);
+  const page = Number(q.page) || 1;
+  const pageSize = Math.min(200, Math.max(1, Number(q.pageSize) || 25));
+  const skip = (page - 1) * pageSize;
+  const viewerRole = String((req as any).user?.role || '');
+
+  const where: any = {};
+  if (q.emailType && emailTypeValues.includes(String(q.emailType).toUpperCase())) {
+    where.emailType = String(q.emailType).toUpperCase();
+  }
+  if (q.status && emailStatusValues.includes(String(q.status).toUpperCase())) {
+    where.status = String(q.status).toUpperCase();
+  }
+  if (typeof q.toAddressContains === 'string' && q.toAddressContains.trim().length) {
+    where.toAddress = { contains: q.toAddressContains.trim(), mode: 'insensitive' };
+  }
+  if (Number.isFinite(Number(q.recipientId))) {
+    where.recipientId = Number(q.recipientId);
+  }
+  if (Number.isFinite(Number(q.studentImportId))) {
+    where.studentImportId = Number(q.studentImportId);
+  }
+
+  const [total, rows] = await Promise.all([
+    prisma.emailDeliveryLog.count({ where }),
+    prisma.emailDeliveryLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: pageSize,
+      include: {
+        recipient: { select: { id: true, email: true, firstName: true, lastName: true, matricNumber: true } },
+        triggeredByAdmin: { select: { id: true, email: true, firstName: true, lastName: true, role: true } },
+        studentImport: { select: { id: true, importNumber: true, fileName: true, createdAt: true } },
+      },
+    }),
+  ]);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const mapped = rows.map(r => maskDeliveryLogRow(r, viewerRole));
+  res.json({
+    status: 'success',
+    data: {
+      rows: mapped,
+      total,
+      page,
+      pageSize,
+      totalPages,
+      hasNext: page < totalPages,
+    },
+  });
+}));
+
+// 4. GET single delivery log detail (ADMIN; Bursary sees PII masked)
+router.get('/email-delivery-logs/:id', validateParams(z.object({ id: z.union([z.coerce.string().min(1), z.coerce.number().int().min(1)]) })), catchAsync(async (req: Request, res: Response) => {
+  const rawId = (req.params as any).id;
+  let id: bigint;
+  try {
+    id = BigInt(String(rawId));
+    if (id <= 0n) throw new Error('non-positive');
+  } catch {
+    return res.status(400).json({ status: 'fail', message: 'Invalid delivery log id' });
+  }
+  const viewerRole = String((req as any).user?.role || '');
+  const row = await prisma.emailDeliveryLog.findUnique({
+    where: { id },
+    include: {
+      recipient: { select: { id: true, email: true, firstName: true, lastName: true, matricNumber: true } },
+      triggeredByAdmin: { select: { id: true, email: true, firstName: true, lastName: true, role: true } },
+      studentImport: { select: { id: true, importNumber: true, fileName: true, createdAt: true, totalRecords: true, successfulRecords: true } },
+    },
+  });
+  if (!row) return res.status(404).json({ status: 'fail', message: 'Delivery log not found' });
+  res.json({ status: 'success', data: maskDeliveryLogRow(row, viewerRole) });
+}));
+
+// 5. POST resend credentials (ADMIN, 5/15m per target user per admin)
+router.post('/users/:id/resend-credentials', resendCredentialsLimiter, validateParams(z.object({ id: z.coerce.number().int().min(1) })), catchAsync(async (req: Request, res: Response) => {
+  const targetId = Number((req.params as any).id);
+  const actorId = Number((req as any).user?.id);
+  const ip = reqIp(req);
+  const ua = reqUa(req);
+  if (!Number.isFinite(actorId)) return res.status(401).json({ status: 'fail', message: 'Unauthorized' });
+  await StudentService.sendCredentialEmail(targetId, actorId, { forcePasswordReset: true, ip, userAgent: ua });
+  // Most recent delivery log for this user is PENDING in DB; return 202.
+  const lastLog = await prisma.emailDeliveryLog.findFirst({
+    where: { recipientId: targetId, emailType: EmailType.STUDENT_CREDENTIALS },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, status: true, attempts: true, createdAt: true },
+  });
+  res.status(202).json({
+    status: 'success',
+    data: {
+      deliveryLogId: lastLog?.id ? String(lastLog.id) : null,
+      queued: true,
+      message: 'A new temporary password has been generated and the credentials email queued for delivery.',
+    },
+  });
+}));
 
 export default router;

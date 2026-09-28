@@ -17,6 +17,7 @@ import { AccountStatus, Role, User, Prisma } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { z } from 'zod';
+import { dispatchEmail } from '../queues/emailQueue';
 
 // ---------------------------------------------------------------------------
 // Secure password generator — parity with frontend create-student widget.
@@ -314,11 +315,11 @@ export class StudentService {
   // ---------------------------------------------------------------------------
   // Create
   // ---------------------------------------------------------------------------
-  static async create(
+  static async create<T extends { ip?: string; userAgent?: string; importId?: number; sendCredentialEmail?: boolean; returnPlaintextPassword?: boolean }>(
     input: CreateStudentInput,
     actorId: number,
-    opts?: { ip?: string; userAgent?: string; importId?: number },
-  ): Promise<Selected> {
+    opts?: T,
+  ): Promise<T['returnPlaintextPassword'] extends true ? { user: Selected; temporaryPasswordPlaintext: string } : Selected> {
     const duplicate = await prisma.user.findFirst({
       where: {
         OR: [{ email: input.email }, { matricNumber: input.matricNumber }],
@@ -408,7 +409,40 @@ export class StudentService {
       return user;
     });
 
-    return created as Selected;
+    if (opts?.sendCredentialEmail !== false) {
+      try {
+        const firstName = (created as any).firstName || '';
+        const lastName = (created as any).lastName || '';
+        const studentName = `${firstName} ${lastName}`.trim() || 'Student';
+        void dispatchEmail({
+          emailType: 'student_credentials',
+          recipientId: (created as any).id,
+          reference: `user:${(created as any).id}`,
+          to: (created as any).email,
+          triggeredByAdminId: actorId,
+          studentImportId: opts?.importId,
+          idempotencyKey: `student-credentials:userId:${(created as any).id}:${Date.now()}`,
+          payload: {
+            userId: (created as any).id,
+            firstName,
+            lastName,
+            studentName,
+            matricNumber: (created as any).matricNumber || '',
+            email: (created as any).email,
+            temporaryPassword: pwd,
+          },
+        });
+      } catch (dispatchErr: any) {
+        try {
+          console.warn('[StudentService.create] credential email dispatch failed (non-fatal):', dispatchErr?.message?.slice(0, 200));
+        } catch { /* mute */ }
+      }
+    }
+
+    if (opts?.returnPlaintextPassword === true) {
+      return { user: created as Selected, temporaryPasswordPlaintext: pwd } as any;
+    }
+    return created as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -672,6 +706,57 @@ export class StudentService {
     });
 
     return { temporaryPassword };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Send credential email (with optional password reset) — ADMIN resend flow
+  // If forcePasswordReset=true → resets password first, MUST be set MUST_CHANGE=true
+  // Always dispatches student_credentials email; returns non-throwing dispatcher.
+  // ---------------------------------------------------------------------------
+  static async sendCredentialEmail(
+    id: number,
+    actorId: number,
+    opts?: { forcePasswordReset?: boolean; ip?: string; userAgent?: string },
+  ): Promise<{ id: number; temporaryPassword: string }> {
+    let temporaryPassword: string;
+    const existing = await prisma.user.findFirst({
+      where: { id, role: Role.STUDENT },
+      select: { id: true, email: true, matricNumber: true, firstName: true, lastName: true },
+    });
+    if (!existing) throw new AppError(i18n.errors.auth.userNotFound, 404);
+    if (opts?.forcePasswordReset !== false) {
+      const r = await this.resetPassword(id, actorId, { ip: opts?.ip, userAgent: opts?.userAgent });
+      temporaryPassword = r.temporaryPassword;
+    } else {
+      // Not resetting — we don't know the existing hash, so still reset defensively.
+      // Passwords can never be recovered from bcrypt hash, so a reset is mandatory for resend.
+      const r = await this.resetPassword(id, actorId, { ip: opts?.ip, userAgent: opts?.userAgent });
+      temporaryPassword = r.temporaryPassword;
+    }
+    try {
+      const user = existing;
+      const studentName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Student';
+      void dispatchEmail({
+        emailType: 'student_credentials',
+        recipientId: id,
+        reference: `user:${id}:resend`,
+        to: user.email || '',
+        triggeredByAdminId: actorId,
+        idempotencyKey: `student-credentials:userId:${id}:resend:${Date.now()}`,
+        payload: {
+          userId: id,
+          firstName: user.firstName || '',
+          lastName: user.lastName || '',
+          studentName,
+          matricNumber: user.matricNumber || '',
+          email: user.email || '',
+          temporaryPassword,
+        },
+      });
+    } catch (e: any) {
+      try { console.warn('[StudentService.sendCredentialEmail] dispatch failed (non-fatal):', e?.message?.slice(0, 200)); } catch {}
+    }
+    return { id, temporaryPassword };
   }
 
   // ---------------------------------------------------------------------------
