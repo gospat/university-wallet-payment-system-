@@ -92,6 +92,12 @@ export const downloadFormalReceipt = catchAsync(async (req: Request, res: Respon
     return next(new AppError('This receipt has been voided', 410));
   }
 
+  const publicFrontend =
+    process.env.PUBLIC_URL ||
+    process.env.FRONTEND_BASE_URL ||
+    process.env.APP_BASE_URL ||
+    'https://payment.bellsuniversity.edu.ng';
+  const defaultVerifyUrl = `${publicFrontend.replace(/\/+$/, '')}/public/verify-receipt/${row.verificationToken}`;
   const pdfBuffer = await ReceiptService.generateFormalReceipt({
     receiptNumber: row.receiptNumber,
     paidAmount: Number(row.paidAmount),
@@ -101,7 +107,7 @@ export const downloadFormalReceipt = catchAsync(async (req: Request, res: Respon
     paymentChannel: row.paymentChannel,
     paymentMethodDetail: row.paymentMethodDetail,
     paystackReference: row.paystackReference,
-    qrUrl: row.qrCodeData || `${process.env.APP_BASE_URL || 'http://localhost:3001'}/public/verify-receipt/${row.verificationToken}`,
+    qrUrl: row.qrCodeData || defaultVerifyUrl,
     student: row.student as any,
     invoice: row.invoice ? {
       invoiceNumber: (row.invoice as any).invoiceNumber || null,

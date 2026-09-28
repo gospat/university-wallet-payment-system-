@@ -3,6 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
+import { RedisStore } from 'rate-limit-redis';
+import { getRedis } from './config/redis';
 import { globalErrorHandler } from './middlewares/error';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
@@ -25,8 +27,26 @@ import { buildBranding, brandingEnvOnly } from './utils/branding';
 const app = express();
 
 // NOTE: If app runs behind nginx/ngrok/k8s ingress, preserve client IP (for rate limit + audit logs).
-// Value `1` means "trust a single hop of X-Forwarded-For" — matches ngrok, single nginx, or 1-tier ingress.
-app.set('trust proxy', 1);
+// Default 1 means "trust a single hop of X-Forwarded-For" — matches single nginx on the VPS.
+// Override via TRUST_PROXY_HOPS=N env var if Bells IT ever puts Cloudflare / AWS ALB in front (+1 hop).
+const trustProxyHops = parseInt(process.env.TRUST_PROXY_HOPS ?? '1', 10);
+app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 1 ? trustProxyHops : 1);
+
+// 2.1 Rate Limit Redis-backed shared store (cluster-safe, survives PM2 reloads & restarts)
+//    Falls back to the default in-memory MemoryStore only if Redis is temporarily unavailable.
+function buildRateLimitStore(prefix: string) {
+  try {
+    const redis = getRedis();
+    return new RedisStore({
+      sendCommand: async (...args: string[]) => (redis as any).call(...args),
+      prefix,
+    });
+  } catch (err) {
+    console.warn('[rate-limit] Redis unavailable — falling back to in-memory MemoryStore', String(err));
+    // rate-limit uses MemoryStore implicitly when no store supplied
+    return undefined;
+  }
+}
 
 // Force HTTPS redirect (skip in dev; allow /health endpoints over HTTP for k8s probes)
 app.use((req, res, next) => {
@@ -120,9 +140,12 @@ app.use(
 
 // 3. Rate Limiting (Prevent Brute Force & DDoS)
 // Reasonable thresholds: not so tight that legitimate usage breaks, but brutal on abuse.
-// In-memory store; if Redis is available later, swap for cluster-safe store.
+// Redis-backed store: shared across PM2 cluster workers, survives reloads/restarts so
+// credential-stuffing attackers can't bypass by targeting a different worker or waiting
+// for a hot-code reload. Each limit has its own Redis key prefix so counters stay independent.
 const generalLimiter = rateLimit({
-  max: 200, // down from 300 — 200 reads / 15 mins = ~13/min, fine for users, blocks bot scrapers
+  store: buildRateLimitStore('rl:general:'),
+  max: 200,
   windowMs: 15 * 60 * 1000,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
@@ -132,7 +155,8 @@ const generalLimiter = rateLimit({
 // Auth: login/signup/forgot-password endpoints — strictest setting to stop credential stuffing.
 // 12 attempts/15 mins/IP = ~48/hour = 1152/day. Combined with per-user 5-attempts lockout → safe.
 const authLimiter = rateLimit({
-  max: 12, // down from 40
+  store: buildRateLimitStore('rl:auth:'),
+  max: 12,
   windowMs: 15 * 60 * 1000,
   message: 'Too many auth attempts, please try again later.',
   standardHeaders: true,
@@ -141,6 +165,7 @@ const authLimiter = rateLimit({
 
 // Password change / reset: short window strict limit to stop forced rotations.
 const authChangePwLimiter = rateLimit({
+  store: buildRateLimitStore('rl:auth-chpw:'),
   max: 5,
   windowMs: 60 * 60 * 1000,
   message: 'Too many password change attempts, please try again in an hour.',
@@ -150,7 +175,8 @@ const authChangePwLimiter = rateLimit({
 
 // Payment initiation / verification: per-IP 15/15 mins = 1/min avg (blocks carder enumeration).
 const paymentLimiter = rateLimit({
-  max: 15, // down from 30
+  store: buildRateLimitStore('rl:payment:'),
+  max: 15,
   windowMs: 15 * 60 * 1000,
   message: 'Too many payment requests, please try again later.',
   standardHeaders: true,
@@ -159,6 +185,7 @@ const paymentLimiter = rateLimit({
 
 // Admin mutations (POST/PATCH/DELETE) and bulk uploads.
 const adminMutationLimiter = rateLimit({
+  store: buildRateLimitStore('rl:admin-mut:'),
   max: 80,
   windowMs: 15 * 60 * 1000,
   message: 'Too many admin mutation requests, please try again later.',
@@ -168,6 +195,7 @@ const adminMutationLimiter = rateLimit({
 
 // Webhooks: providers may call frequently, keep generous.
 const webhookLimiter = rateLimit({
+  store: buildRateLimitStore('rl:webhook:'),
   max: 200,
   windowMs: 60 * 1000,
   message: 'Too many webhook requests, please try again later.',
@@ -187,7 +215,17 @@ app.use('/api/v1/webhooks', webhookLimiter);
 app.use(/^\/api\/v1\/(admin|academic|fees)\/.*\/(bulk-import|upload|confirm)$/i, adminMutationLimiter);
 
 // 4. Logging
-app.use(morgan('dev'));
+//    - development: morgan('dev') → short colored human-readable logs
+//    - production : morgan('combined') → standard Apache/NCSA format, good for log parsers
+//    - Always skip /health and /ready probes so 10s monitoring pings don't spam the logs.
+morgan.token('realip', (req: any) => req.headers['x-forwarded-for']?.toString().split(',')[0].trim() ?? req.ip ?? '-');
+const isProd = process.env.NODE_ENV === 'production';
+app.use(morgan(isProd ? ':realip - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent"' : 'dev', {
+  skip: (req) => {
+    const p = req.baseUrl || req.path;
+    return p === '/api/v1/health' || p === '/api/v1/ready' || p === '/health' || p === '/ready';
+  },
+}));
 
 // Capture raw body for Paystack webhook verification (Idempotency & Security).
 // Cap body size at 1MB — prevents oversized request DoS.
