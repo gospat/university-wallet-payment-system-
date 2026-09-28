@@ -18,7 +18,7 @@ REQUIRED_NPM_MAJOR=9
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="$REPO_ROOT/api"
 APP_DIR="$REPO_ROOT/app"
-STATIC_WEBROOT="/var/www/portal.bellsuniversity.edu.ng/html"
+STATIC_WEBROOT="/var/www/payment.bellsuniversity.edu.ng/html"
 LOG_DIR="/var/log/bells-payment"
 
 log "Starting Bells University Payment Portal deploy — $(date -u '+%FT%TZ')"
@@ -47,7 +47,7 @@ mkdir -p "$LOG_DIR" || warn "Cannot create $LOG_DIR — running under non-root? 
 # 2) Env file presence check (NEVER bake secrets into repo!)
 ###############################################################################
 [ -f "$API_DIR/.env" ] || warn "⚠️  $API_DIR/.env missing — copy .env.example and fill in production secrets BEFORE starting"
-[ -f "$APP_DIR/.env.local" ] || warn "⚠️  $APP_DIR/.env.local missing — set VITE_API_BASE_URL=https://api.bellsuniversity.edu.ng/api/v1 BEFORE building frontend"
+[ -f "$APP_DIR/.env.local" ] || warn "⚠️  $APP_DIR/.env.local missing — set VITE_API_BASE_URL=https://paymentapi.bellsuniversity.edu.ng/api/v1 BEFORE building frontend"
 
 ###############################################################################
 # 3) Pull latest from origin/main
@@ -81,7 +81,7 @@ log "=== Frontend (app/) — Vite production build ==="
 cd "$APP_DIR"
 npm ci --no-audit --no-fund --loglevel=error
 if [ ! -f "$APP_DIR/.env.local" ]; then
-  warn "Frontend built with DEFAULT (dev) API URL! Press Ctrl+C NOW if wrong, then create $APP_DIR/.env.local with VITE_API_BASE_URL=https://api.bellsuniversity.edu.ng/api/v1"
+  warn "Frontend built with DEFAULT (dev) API URL! Press Ctrl+C NOW if wrong, then create $APP_DIR/.env.local with VITE_API_BASE_URL=https://paymentapi.bellsuniversity.edu.ng/api/v1"
   sleep 5
 fi
 log "Building React SPA with bundled API URL baked in …"
@@ -145,8 +145,8 @@ done
 
 log ""
 log "✅ DEPLOY COMPLETE — $(date -u '+%FT%TZ')"
-log "   Frontend:  https://portal.bellsuniversity.edu.ng  (run certbot once if no SSL yet)"
-log "   Backend:   https://api.bellsuniversity.edu.ng/api/v1/health"
+log "   Frontend:  https://payment.bellsuniversity.edu.ng  (run certbot once if no SSL yet)"
+log "   Backend:   https://paymentapi.bellsuniversity.edu.ng/api/v1/health"
 log "   PM2 logs:  pm2 logs bells-api --lines 100"
 log "   DB backup: pg_dump -U bells_payment_user bells_payment_db | gzip > /var/backups/bells-db-$(date +%F).sql.gz"
 log ""

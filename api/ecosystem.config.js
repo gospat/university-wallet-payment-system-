@@ -11,6 +11,9 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 3001,
+        CORS_ORIGIN: 'https://payment.bellsuniversity.edu.ng',
+        PUBLIC_URL: 'https://payment.bellsuniversity.edu.ng',
+        PUBLIC_API_URL: 'https://paymentapi.bellsuniversity.edu.ng/api/v1',
       },
       error_file: '/var/log/bells-payment/api-error.log',
       out_file: '/var/log/bells-payment/api-out.log',

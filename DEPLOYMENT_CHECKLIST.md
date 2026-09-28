@@ -2,12 +2,12 @@
 ## PRODUCTION DEPLOYMENT CHECKLIST — Ubuntu 22.04 LTS VPS (Option A)
 
 **Target Architecture:** Single VPS (4 vCPU / 8GB RAM / 100GB SSD) in Lagos datacenter
-  - 🛰️ API:         api.bellsuniversity.edu.ng  → 127.0.0.1:3001 (Node.js/Express + PM2)
-  - 🖥️ Frontend:  portal.bellsuniversity.edu.ng → static /var/www/.../html (Nginx)
-  - 🗄️ PostgreSQL: 127.0.0.1:5432 (no public network access!)
-  - 🧮 Redis:      127.0.0.1:6379 (BullMQ email queue + rate limit + idempotency cache)
-  - 📧 SMTP:       Resend with bellsuniversity.edu.ng custom domain (SPF/DKIM/DMARC)
-  - 💳 Payments:   Paystack (primary) / ALAT Pay (WEMA Bank) — production API keys
+  - 🛰️ API:        paymentapi.bellsuniversity.edu.ng  → 127.0.0.1:3001 (Node.js/Express + PM2)
+  - 🖥️ Frontend:   payment.bellsuniversity.edu.ng    → static /var/www/.../html (Nginx)
+  - 🗄️ PostgreSQL:  127.0.0.1:5432 (no public network access!)
+  - 🧮 Redis:       127.0.0.1:6379 (BullMQ email queue + rate limit + idempotency cache)
+  - 📧 SMTP:        Resend with bellsuniversity.edu.ng custom domain (SPF/DKIM/DMARC)
+  - 💳 Payments:    Paystack (primary) / ALAT Pay (WEMA Bank) — production API keys
 
 ---
 
@@ -16,9 +16,9 @@
 - [ ] Buy a VPS at RackServe/HostAfrica/Hostnownow (Lagos/Ibadan): **4 vCPU / 8GB RAM / 100GB NVMe**, Ubuntu 22.04 LTS
 - [ ] Assign IPv4 + note IP, e.g. `197.211.X.Y`
 - [ ] In Bells University domain registrar (www.bellsuniversity.edu.ng):
-  - [ ] Add **A record** `portal.bellsuniversity.edu.ng → 197.211.X.Y`
-  - [ ] Add **A record** `api.bellsuniversity.edu.ng    → 197.211.X.Y`
-- [ ] Confirm both resolve: `dig +short portal.bellsuniversity.edu.ng` returns your VPS IP
+  - [ ] Add **A record** `payment.bellsuniversity.edu.ng    → 197.211.X.Y`   (FRONTEND)
+  - [ ] Add **A record** `paymentapi.bellsuniversity.edu.ng → 197.211.X.Y`   (BACKEND API)
+- [ ] Confirm both resolve: `dig +short payment.bellsuniversity.edu.ng` + `dig +short paymentapi.bellsuniversity.edu.ng` both return your VPS IP
 
 ---
 
@@ -134,8 +134,8 @@ redis-cli -a REDIS-LONG-RANDOM-PASSWORD-64CHARS ping   # expect PONG
 
 ```bash
 # === Clone repo as deploy user ===
-sudo mkdir -p /var/www/bells-payment /var/www/portal.bellsuniversity.edu.ng/html /var/log/bells-payment /var/www/_letsencrypt /var/backups
-sudo chown -R deploy:deploy /var/www/bells-payment /var/www/portal.bellsuniversity.edu.ng/html /var/log/bells-payment
+sudo mkdir -p /var/www/bells-payment /var/www/payment.bellsuniversity.edu.ng/html /var/log/bells-payment /var/www/_letsencrypt /var/backups
+sudo chown -R deploy:deploy /var/www/bells-payment /var/www/payment.bellsuniversity.edu.ng/html /var/log/bells-payment
 sudo usermod -aG www-data deploy
 
 su - deploy
@@ -155,9 +155,9 @@ nano api/.env
 #   JWT_EXPIRES_IN=15m
 #   JWT_REFRESH_EXPIRES_IN=7d
 #   REDIS_URL=redis://:REDIS-LONG-RANDOM-PASSWORD-64CHARS@127.0.0.1:6379/0
-#   CORS_ORIGIN=https://portal.bellsuniversity.edu.ng
-#   PUBLIC_URL=https://portal.bellsuniversity.edu.ng
-#   PUBLIC_API_URL=https://api.bellsuniversity.edu.ng/api/v1
+#   CORS_ORIGIN=https://payment.bellsuniversity.edu.ng
+#   PUBLIC_URL=https://payment.bellsuniversity.edu.ng
+#   PUBLIC_API_URL=https://paymentapi.bellsuniversity.edu.ng/api/v1
 #   PAYSTACK_SECRET_KEY=sk_live_xxx        (Paystack dashboard → API Keys)
 #   PAYSTACK_PUBLIC_KEY=pk_live_xxx
 #   PAYSTACK_WEBHOOK_SECRET=<copy from Paystack Dashboard Webhook settings>
@@ -172,7 +172,7 @@ nano api/.env
 
 # === Populate app/.env.local for frontend build (URL gets BAKED into JS) ===
 cat > app/.env.local <<'EOF'
-VITE_API_BASE_URL=https://api.bellsuniversity.edu.ng/api/v1
+VITE_API_BASE_URL=https://paymentapi.bellsuniversity.edu.ng/api/v1
 EOF
 
 # === Run 1-click deploy ===
@@ -182,7 +182,7 @@ chmod +x deploy.sh
 ```
 
 If deploy.sh succeeds, you should now have:
-  - React SPA built in `app/dist/` and rsync'd to `/var/www/portal.bellsuniversity.edu.ng/html/`
+  - React SPA built in `app/dist/` and rsync'd to `/var/www/payment.bellsuniversity.edu.ng/html/`
   - Node API running on 127.0.0.1:3001 via 2 PM2 cluster workers
   - `pm2 status` → `bells-api` is `online` for both workers
 
@@ -192,25 +192,25 @@ If deploy.sh succeeds, you should now have:
 
 ```bash
 # (As user with sudo — root or deploy)
-sudo cp /var/www/bells-payment/nginx/portal.bellsuniversity.edu.ng.conf /etc/nginx/sites-available/
-sudo cp /var/www/bells-payment/nginx/api.bellsuniversity.edu.ng.conf    /etc/nginx/sites-available/
-sudo ln -s /etc/nginx/sites-available/portal.bellsuniversity.edu.ng.conf /etc/nginx/sites-enabled/
-sudo ln -s /etc/nginx/sites-available/api.bellsuniversity.edu.ng.conf    /etc/nginx/sites-enabled/
+sudo cp /var/www/bells-payment/nginx/payment.bellsuniversity.edu.ng.conf    /etc/nginx/sites-available/
+sudo cp /var/www/bells-payment/nginx/paymentapi.bellsuniversity.edu.ng.conf /etc/nginx/sites-available/
+sudo ln -s /etc/nginx/sites-available/payment.bellsuniversity.edu.ng.conf    /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/paymentapi.bellsuniversity.edu.ng.conf /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t        # MUST say test is successful
 sudo systemctl reload nginx
 
 # ===== SSL: Run certbot ONCE per domain =====
-sudo certbot --nginx -n --agree-tos -m devops@bellsuniversity.edu.ng -d portal.bellsuniversity.edu.ng --redirect
-sudo certbot --nginx -n --agree-tos -m devops@bellsuniversity.edu.ng -d api.bellsuniversity.edu.ng    --redirect
+sudo certbot --nginx -n --agree-tos -m devops@bellsuniversity.edu.ng -d payment.bellsuniversity.edu.ng    --redirect
+sudo certbot --nginx -n --agree-tos -m devops@bellsuniversity.edu.ng -d paymentapi.bellsuniversity.edu.ng --redirect
 sudo systemctl status certbot.timer   # auto-renewal should be active (runs 2x/day)
 ```
 
 ## TEST SSL + CORS
 ```bash
 # From ANY machine:
-curl -I https://portal.bellsuniversity.edu.ng/      # HTTP 200, Strict-Transport-Security header
-curl -v https://api.bellsuniversity.edu.ng/api/v1/health  # HTTP 200 JSON success
+curl -I https://payment.bellsuniversity.edu.ng/          # HTTP 200, Strict-Transport-Security header
+curl -v https://paymentapi.bellsuniversity.edu.ng/api/v1/health  # HTTP 200 JSON success
 
 # From the VPS itself (bypass nginx, sanity-check raw API):
 curl -s http://127.0.0.1:3001/api/v1/health | jq .
@@ -270,8 +270,8 @@ For OFF-SITE backup (fire, theft, ransomware):
 ## PHASE 8 — Smoke Test Payment Gateway Webhooks BEFORE Go-Live
 
 **In Paystack / ALAT Pay Production Dashboards:**
-- [ ] Set Paystack webhook URL to `https://api.bellsuniversity.edu.ng/api/v1/webhooks/paystack`
-- [ ] Set ALAT Pay webhook URL to `https://api.bellsuniversity.edu.ng/api/v1/webhooks/alatpay`
+- [ ] Set Paystack webhook URL to `https://paymentapi.bellsuniversity.edu.ng/api/v1/webhooks/paystack`
+- [ ] Set ALAT Pay webhook URL to `https://paymentapi.bellsuniversity.edu.ng/api/v1/webhooks/alatpay`
 - [ ] Use Paystack Test Mode → create a ₦100 invoice for student `student1@university.edu.ng`
 - [ ] Simulate payment via test card → verify:
     - [ ] Paystack webhook arrives at API (inspect pm2 logs: `pm2 logs bells-api`)
@@ -296,7 +296,7 @@ For OFF-SITE backup (fire, theft, ransomware):
 | Task | Command |
 |---|---|
 | Deploy new code | `cd /var/www/bells-payment && ./deploy.sh` |
-| Check API health | `curl https://api.bellsuniversity.edu.ng/api/v1/health \| jq` |
+| Check API health | `curl https://paymentapi.bellsuniversity.edu.ng/api/v1/health \| jq` |
 | View live logs | `pm2 logs bells-api --lines 100` |
 | Restart API | `pm2 reload bells-api --update-env` |
 | Stop API | `pm2 stop bells-api` |
