@@ -4,6 +4,8 @@ import { Role, AccountStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { randomHex } from '../utils/security';
+import { PERMISSION_DEFS } from './permissionSeed';
+import { i18n } from '../i18n/en';
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
@@ -12,6 +14,13 @@ const ACCESS_EXPIRES_IN: string = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
 const REFRESH_EXPIRES_IN: string = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 const ACCESS_EXPIRES_MS: number = 15 * 60 * 1000;
 const REFRESH_EXPIRES_MS: number = 7 * 24 * 60 * 60 * 1000;
+
+export const SessionTiming = {
+  ACCESS_EXPIRES_MS,
+  REFRESH_EXPIRES_MS,
+};
+
+const GENERIC_LOGIN_ERROR = 'Incorrect email or password';
 
 const getRefreshSecret = (): string => {
   if (process.env.JWT_REFRESH_SECRET) return process.env.JWT_REFRESH_SECRET;
@@ -177,6 +186,20 @@ export class AuthService {
       select: safeUserSelect,
     });
 
+    await prisma.auditLog
+      .create({
+        data: {
+          userId: user.id,
+          action: i18n.auditActions.sessionRefreshed,
+          entityType: 'SESSION',
+          entityId: String(refreshRow.id),
+          ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
+          userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
+          details: { rotated: true },
+        },
+      })
+      .catch(() => {});
+
     return {
       user: safeUser,
       accessToken: result.newAccessToken,
@@ -185,8 +208,8 @@ export class AuthService {
     };
   }
 
-  static async revokeAll(userId: number) {
-    await prisma.refreshToken.updateMany({
+  static async revokeAll(userId: number, opts?: { ipAddress?: string; userAgent?: string }) {
+    const { count } = await prisma.refreshToken.updateMany({
       where: {
         userId,
         revokedAt: null,
@@ -195,6 +218,59 @@ export class AuthService {
         revokedAt: new Date(),
       },
     });
+    if (count > 0) {
+      await prisma.auditLog
+        .create({
+          data: {
+            userId,
+            action: i18n.auditActions.logoutAll,
+            entityType: 'SESSION',
+            entityId: String(userId),
+            ipAddress: opts?.ipAddress ? String(opts.ipAddress).slice(0, 64) : null,
+            userAgent: opts?.userAgent ? String(opts.userAgent).slice(0, 512) : null,
+            details: { revokedSessions: count },
+          },
+        })
+        .catch(() => {});
+    }
+  }
+
+  static async revokeSingle(userId: number, refreshJWT: string, opts?: { ipAddress?: string; userAgent?: string }) {
+    let decoded: any;
+    try {
+      decoded = jwt.verify(refreshJWT, getRefreshSecret());
+    } catch {
+      throw new AppError('Invalid refresh token.', 401);
+    }
+    if (!decoded || typeof decoded.jti !== 'string') {
+      throw new AppError('Invalid refresh token.', 401);
+    }
+    const tokenHex = decoded.jti;
+    const row = await prisma.refreshToken.findUnique({
+      where: { token: tokenHex },
+      select: { id: true, userId: true, revokedAt: true },
+    });
+    if (!row || row.userId !== userId) {
+      throw new AppError('Invalid refresh token.', 401);
+    }
+    await prisma.refreshToken.update({
+      where: { id: row.id },
+      data: { revokedAt: new Date() },
+    });
+    await prisma.auditLog
+      .create({
+        data: {
+          userId,
+          action: i18n.auditActions.logout,
+          entityType: 'SESSION',
+          entityId: String(row.id),
+          ipAddress: opts?.ipAddress ? String(opts.ipAddress).slice(0, 64) : null,
+          userAgent: opts?.userAgent ? String(opts.userAgent).slice(0, 512) : null,
+          details: { via: 'AUTH_LOGOUT' },
+        },
+      })
+      .catch(() => {});
+    return { revoked: true };
   }
 
   static async signup(data: any): Promise<AuthResult> {
@@ -251,27 +327,32 @@ export class AuthService {
     };
   }
 
-  static async login(data: any, ipAddress?: string, userAgent?: string): Promise<AuthResult> {
+  static async login(
+    data: any,
+    ipAddress?: string,
+    userAgent?: string,
+    audience?: Role,
+  ): Promise<AuthResult> {
     const { email, password } = data;
 
     if (!email || !password) {
-      throw new AppError('Please provide email and password', 400);
+      throw new AppError(i18n.errors.auth.noCredentials, 400);
     }
 
     const userWithPassword = await prisma.user.findUnique({ where: { email } });
 
     if (!userWithPassword) {
-      throw new AppError('Incorrect email or password', 401);
+      throw new AppError(GENERIC_LOGIN_ERROR, 401);
     }
 
     if (userWithPassword.accountStatus === AccountStatus.SUSPENDED) {
-      throw new AppError('Your account has been suspended. Please contact the administrator.', 403);
+      throw new AppError(i18n.errors.auth.accountSuspended, 403);
     }
     if (userWithPassword.accountStatus === AccountStatus.WITHDRAWN) {
-      throw new AppError('This account is no longer active.', 403);
+      throw new AppError(i18n.errors.auth.accountInactive, 403);
     }
     if (userWithPassword.accountStatus === AccountStatus.GRADUATED) {
-      throw new AppError('This account has been marked as graduated. Please contact alumni services.', 403);
+      throw new AppError(i18n.errors.auth.accountGraduated, 403);
     }
 
     const now = new Date();
@@ -280,7 +361,7 @@ export class AuthService {
         (userWithPassword.lockedUntil.getTime() - now.getTime()) / 60000
       );
       throw new AppError(
-        `Account temporarily locked due to too many failed attempts. Try again in ${minutesLeft} minute(s).`,
+        i18n.errors.auth.accountLocked(minutesLeft),
         429
       );
     }
@@ -301,19 +382,38 @@ export class AuthService {
         data: { failedLoginAttempts: newFailedCount, lockedUntil: lockUntil },
       });
 
-      await prisma.auditLog.create({
-        data: {
-          userId: userWithPassword.id,
-          action: 'LOGIN_FAILED',
-          entityType: 'USER',
-          entityId: String(userWithPassword.id),
-          ipAddress,
-          userAgent,
-          details: { reason: 'BAD_PASSWORD', attempt: newFailedCount, locked: !!lockUntil },
-        },
-      });
+      await prisma.auditLog
+        .create({
+          data: {
+            userId: userWithPassword.id,
+            action: i18n.auditActions.loginFailed,
+            entityType: 'USER',
+            entityId: String(userWithPassword.id),
+            ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
+            userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
+            details: { reason: 'BAD_PASSWORD', attempt: newFailedCount, locked: !!lockUntil },
+          },
+        })
+        .catch(() => {});
 
-      throw new AppError('Incorrect email or password', 401);
+      throw new AppError(GENERIC_LOGIN_ERROR, 401);
+    }
+
+    if (audience && userWithPassword.role !== audience) {
+      await prisma.auditLog
+        .create({
+          data: {
+            userId: userWithPassword.id,
+            action: i18n.auditActions.loginWrongAudience,
+            entityType: 'USER',
+            entityId: String(userWithPassword.id),
+            ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
+            userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
+            details: { submittedAudience: audience, actualRole: userWithPassword.role },
+          },
+        })
+        .catch(() => {});
+      throw new AppError(GENERIC_LOGIN_ERROR, 401);
     }
 
     await prisma.user.update({
@@ -329,7 +429,7 @@ export class AuthService {
       where: { id: userWithPassword.id },
       select: safeUserSelect,
     });
-    if (!user) throw new AppError('User not found', 404);
+    if (!user) throw new AppError(i18n.errors.auth.userNotFound, 404);
 
     const permRows = await prisma.rolePermission.findMany({
       where: { role: user.role },
@@ -337,17 +437,19 @@ export class AuthService {
     });
     const permissions: string[] = permRows.map((rp: any) => rp.permission.key);
 
-    await prisma.auditLog.create({
-      data: {
-        userId: user.id,
-        action: 'LOGIN',
-        entityType: 'USER',
-        entityId: String(user.id),
-        ipAddress,
-        userAgent,
-        details: { role: user.role },
-      },
-    });
+    await prisma.auditLog
+      .create({
+        data: {
+          userId: user.id,
+          action: i18n.auditActions.login,
+          entityType: 'USER',
+          entityId: String(user.id),
+          ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
+          userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
+          details: { role: user.role, audience: audience ?? null },
+        },
+      })
+      .catch(() => {});
 
     const tokens = await AuthService.buildTokensForUser(user.id, user.role, permissions, ipAddress, userAgent);
 
@@ -371,7 +473,19 @@ export class AuthService {
     if (user.accountStatus !== AccountStatus.ACTIVE) {
       throw new AppError('This account is no longer active.', 403);
     }
-    return user;
+    let permissions: string[] = [];
+    if (!user.role) {
+      permissions = [];
+    } else if (user.role === Role.ADMIN) {
+      permissions = PERMISSION_DEFS.map((p) => p.key);
+    } else {
+      const rows = await prisma.rolePermission.findMany({
+        where: { role: user.role },
+        select: { permission: { select: { key: true } } },
+      });
+      permissions = rows.map((r) => r.permission.key);
+    }
+    return { ...user, permissions };
   }
 
   static async changePassword(userId: number, currentPassword: string, newPassword: string) {

@@ -1,10 +1,11 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { signup, login, refresh, logoutAll, me, changePassword, forgotPassword, resetPassword } from '../controllers/auth';
+import { signup, login, refresh, logout, logoutAll, me, changePassword, forgotPassword, resetPassword } from '../controllers/auth';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
 import { protect } from '../middlewares/auth';
 import { reqIp } from '../utils/http';
+import { Role } from '@prisma/client';
 
 const router = express.Router();
 
@@ -19,7 +20,8 @@ const signupSchema = z.object({
 const loginSchema = z.object({
   email: z.string().trim().max(255).email(),
   password: z.string().min(1).max(128).trim(),
-});
+  audience: z.enum([Role.ADMIN, Role.BURSARY, Role.STUDENT]).optional(),
+}).strict();
 
 const forgotPasswordSchema = z.object({
   email: z.string().trim().max(255).email(),
@@ -58,6 +60,7 @@ router.post('/reset-password', resetPassword as any[]);
 
 router.use(protect);
 router.get('/me', me);
+router.post('/logout', ...(logout as any[]));
 router.post('/logout-all', logoutAll);
 router.patch('/change-password', ...(changePassword as any[]));
 

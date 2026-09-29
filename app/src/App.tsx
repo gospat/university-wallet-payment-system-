@@ -1,7 +1,8 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import ForcePasswordChangeGate from './components/ForcePasswordChangeGate';
+import SessionInactivityModal from './components/SessionInactivityModal';
 import StudentLogin from './pages/auth/StudentLogin';
 import AdminLogin from './pages/auth/AdminLogin';
 import BursaryLogin from './pages/auth/BursaryLogin';
@@ -24,7 +25,6 @@ import StudentProfilePage from './pages/student/Profile';
 import StudentCheckoutPage from './pages/student/Checkout';
 import StudentCallbackPage from './pages/student/Callback';
 import StudentPaymentConfirmation from './pages/student/PaymentConfirmation';
-import { useAuth } from './context/AuthContext';
 import { useBranding } from './context/BrandingContext';
 import { i18n } from './i18n/en';
 import { navCounters, NavCounters } from './services/api';
@@ -210,12 +210,34 @@ const PlaceholderPage: React.FC<PlaceholderProps> = ({ role, activePath, title, 
   );
 };
 
+const SessionGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { authNotice, isAuthenticated } = useAuth();
+  return (
+    <>
+      {authNotice && isAuthenticated && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-0 inset-x-0 z-[90] bg-amber-50 border-b border-amber-200"
+        >
+          <div className="max-w-6xl mx-auto px-4 py-2.5 text-sm text-amber-900 font-medium text-center">
+            {authNotice}
+          </div>
+        </div>
+      )}
+      <SessionInactivityModal />
+      {children}
+    </>
+  );
+};
+
 const App: React.FC = () => {
   return (
     <Router>
       <AuthProvider>
-        <ForcePasswordChangeGate>
-          <Routes>
+        <SessionGate>
+          <ForcePasswordChangeGate>
+            <Routes>
           <Route path="/" element={<PortalChooser />} />
 
           <Route path="/public/verify-receipt" element={<PublicVerifyReceiptPage />} />
@@ -458,6 +480,7 @@ const App: React.FC = () => {
           <Route path="*" element={<Navigate to="/404" replace />} />
           </Routes>
         </ForcePasswordChangeGate>
+        </SessionGate>
       </AuthProvider>
     </Router>
   );

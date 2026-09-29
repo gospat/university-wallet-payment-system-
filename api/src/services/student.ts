@@ -285,14 +285,16 @@ export type UpdateStudentInput = z.infer<typeof UpdateStudentSchema> & {
   academicSessionId?: number | string | null;
 };
 
-export const StudentSelfUpdateSchema = z.object({
-  firstName: z.string().min(1).max(80).trim().optional(),
-  middleName: z.string().max(80).trim().optional().nullable(),
-  lastName: z.string().min(1).max(80).trim().optional(),
-  phoneNumber: z.string().max(30).trim().optional().nullable(),
-  address: z.string().max(500).trim().optional().nullable(),
-  email: z.string().trim().max(255).email().optional(),
-});
+export const StudentSelfUpdateSchema = z
+  .object({
+    firstName: z.string().min(1).max(80).trim().optional(),
+    middleName: z.string().max(80).trim().optional().nullable(),
+    lastName: z.string().min(1).max(80).trim().optional(),
+    phoneNumber: z.string().max(30).trim().optional().nullable(),
+    address: z.string().max(500).trim().optional().nullable(),
+    email: z.string().trim().max(255).email().optional(),
+  })
+  .strict();
 export type StudentSelfUpdateInput = z.infer<typeof StudentSelfUpdateSchema>;
 
 export const StudentQuerySchema = z.object({

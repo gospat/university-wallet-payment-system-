@@ -17,27 +17,29 @@ const BursaryLogin: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setLoading(true);
     setError('');
     
     try {
-      const res = await api.post('/auth/login', { email, password });
+      const res = await api.post('/auth/login', { email, password, audience: 'BURSARY' });
       
-      const role = res.data.data.user.role;
-      if (role !== 'BURSARY' && role !== 'ADMIN') {
-        throw new Error('Unauthorized access. Bursary privileges required.');
+      const role = res.data?.data?.user?.role;
+      if (role !== 'BURSARY') {
+        throw new Error('Incorrect email or password.');
       }
 
-      login(res.data.token, res.data.data.user);
-      const base = role === 'ADMIN' ? '/admin/dashboard' : '/bursary/dashboard';
-      const allowedPrefix = role === 'ADMIN' ? '/admin/' : '/bursary/';
+      login(res.data.token, res.data.data.user, res.data.refreshToken);
+      const base = '/bursary/dashboard';
+      const allowedPrefix = '/bursary/';
       const raw = location.state?.from as string | undefined;
-      const fromOk = raw && (raw === '/admin/dashboard' || raw === '/bursary/dashboard' || raw.startsWith(allowedPrefix));
+      const fromOk = raw && (raw === base || raw.startsWith(allowedPrefix));
       const next = fromOk ? raw! : base;
       navigate(next, { replace: true });
       
     } catch (err: any) {
-      setError(err.response?.data?.message || err.message || 'Authentication failed.');
+      const serverMsg = err?.response?.data?.message;
+      setError(serverMsg && String(serverMsg).trim() ? String(serverMsg) : 'Incorrect email or password.');
     } finally {
       setLoading(false);
     }

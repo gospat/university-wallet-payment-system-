@@ -17,24 +17,26 @@ const StudentLogin: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setLoading(true);
     setError('');
     
     try {
-      const res = await api.post('/auth/login', { email, password });
+      const res = await api.post('/auth/login', { email, password, audience: 'STUDENT' });
       
-      if (res.data.data.user.role !== 'STUDENT') {
-        throw new Error('Unauthorized access. This portal is for students only.');
+      if (res.data?.data?.user?.role !== 'STUDENT') {
+        throw new Error('Incorrect email or password.');
       }
 
-      login(res.data.token, res.data.data.user);
+      login(res.data.token, res.data.data.user, res.data.refreshToken);
       const base = '/student/dashboard';
       const raw = location.state?.from as string | undefined;
       const fromOk = raw && (raw === base || raw.startsWith('/student/'));
       const next = fromOk ? raw! : base;
       navigate(next, { replace: true });
     } catch (err: any) {
-      setError(err.response?.data?.message || err.message || 'Login failed.');
+      const serverMsg = err?.response?.data?.message;
+      setError(serverMsg && String(serverMsg).trim() ? String(serverMsg) : 'Incorrect email or password.');
     } finally {
       setLoading(false);
     }

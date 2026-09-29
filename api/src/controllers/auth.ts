@@ -27,7 +27,12 @@ export const signup = catchAsync(async (req: Request, res: Response, next: NextF
 });
 
 export const login = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  const { user, token, accessToken, refreshToken, expiresInMs } = await AuthService.login(req.body, reqIp(req), reqUa(req));
+  const { user, token, accessToken, refreshToken, expiresInMs } = await AuthService.login(
+    req.body,
+    reqIp(req),
+    reqUa(req),
+    req.body?.audience as Role | undefined,
+  );
 
   res.status(200).json({
     status: 'success',
@@ -63,9 +68,28 @@ export const refresh = [
   }),
 ];
 
+const logoutSchema = z.object({
+  refreshToken: z.string().min(1).max(2000).trim(),
+});
+
+export const logout = [
+  validateBody(logoutSchema),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError('Unauthorized.', 401));
+    await AuthService.revokeSingle(req.user.id, req.body.refreshToken, {
+      ip: reqIp(req) ?? undefined,
+      userAgent: reqUa(req) ?? undefined,
+    } as any);
+    res.status(200).json({
+      status: 'success',
+      message: 'You have been signed out.',
+    });
+  }),
+];
+
 export const logoutAll = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) return next();
-  await AuthService.revokeAll(req.user.id);
+  await AuthService.revokeAll(req.user.id, { ipAddress: reqIp(req) ?? undefined, userAgent: reqUa(req) ?? undefined });
   res.status(200).json({
     status: 'success',
     message: 'All sessions have been logged out.',

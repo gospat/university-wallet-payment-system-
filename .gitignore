@@ -109,6 +109,15 @@ api/_*.cjs
 api/_*.ts
 app/_*.js
 app/_*.ts
+api/diag*.cjs
+api/diag*.mjs
+api/diag*.js
+app/diag*.cjs
+app/diag*.mjs
+app/diag*.js
+
+# Trae IDE local metadata (specs, session memory — never commit)
+.trae/
 
 # Local test sandbox
 api/tmp/

@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { getDashboardStats, addStudent } from '../controllers/admin';
-import { protect, restrictTo, requirePermission } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission, bumpRolePermsVersion } from '../middlewares/auth';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
@@ -654,10 +654,8 @@ router.post(
 
 // ---------------------------------------------------------------------------
 // Roles CRUD (4 routes, STUDENT hidden)
-//   GET    /admin/roles              list (STUDENT hidden)
-//   GET    /admin/roles/:role        get one (STUDENT 404)
-//   POST   /admin/roles              create role permissions
-//   PATCH  /admin/roles/:role        update role permissions
+//   POST   /admin/roles              atomically REPLACE role permissions
+//   PATCH  /admin/roles/:role        atomically REPLACE role permissions
 //   Permission: MANAGE_ROLES
 // ---------------------------------------------------------------------------
 
@@ -668,6 +666,100 @@ const ROLE_META: Record<string, { name: string; description: string }> = {
 
 const RoleNameParam = z.object({ role: z.enum([Role.ADMIN, Role.BURSARY]) });
 
+type RolePermRow = { permission: { key: string; name: string; category: string | null; description?: string | null } };
+
+function buildRoleOut(role: string, permsRows: RolePermRow[]) {
+  const meta = ROLE_META[role] ?? { name: role, description: '' };
+  return {
+    role,
+    name: meta.name,
+    description: meta.description,
+    permissions: permsRows.map((rp) => ({
+      ...rp.permission,
+      category: rp.permission.category ?? 'Admin',
+    })),
+    permissionsCount: permsRows.length,
+  };
+}
+
+async function loadRolePermissionKeys(role: string): Promise<string[]> {
+  const rows = await prisma.rolePermission.findMany({
+    where: { role: role as Role },
+    select: { permission: { select: { key: true } } },
+  });
+  return rows.map((r) => r.permission.key);
+}
+
+async function replaceRolePermissions(
+  req: ReqLike | undefined,
+  role: string,
+  permissionKeys: string[],
+  auditAction: 'CREATE_ROLE' | 'UPDATE_ROLE'
+) {
+  const asRole = role as Role;
+  const [perms, oldKeys] = await Promise.all([
+    prisma.permission.findMany({
+      where: { key: { in: permissionKeys } },
+      select: { id: true, key: true },
+    }),
+    loadRolePermissionKeys(role),
+  ]);
+  const foundKeys = new Set(perms.map((p) => p.key));
+  const missing = permissionKeys.filter((k) => !foundKeys.has(k));
+  if (missing.length > 0) {
+    return { ok: false as const, status: 400, error: `Unknown permission keys: ${missing.join(', ')}` };
+  }
+  const newSet = new Set(perms.map((p) => p.key));
+  const oldSet = new Set(oldKeys);
+  const addedKeys = perms.filter((p) => !oldSet.has(p.key)).map((p) => p.key).sort();
+  const removedKeys = oldKeys.filter((k) => !newSet.has(k)).sort();
+
+  const finalRows: RolePermRow[] = await prisma.$transaction(async (tx) => {
+    await tx.rolePermission.deleteMany({ where: { role: asRole } });
+    if (perms.length > 0) {
+      await tx.rolePermission.createMany({
+        data: perms.map((p) => ({ role: asRole, permissionId: p.id })),
+        skipDuplicates: true,
+      });
+    }
+    return tx.rolePermission.findMany({
+      where: { role: asRole },
+      include: { permission: { select: { key: true, name: true, category: true, description: true } } },
+    });
+  });
+
+  const hasDiff = addedKeys.length > 0 || removedKeys.length > 0;
+  let summary = 'No changes';
+  if (hasDiff) {
+    const parts: string[] = [];
+    if (addedKeys.length) parts.push(`Added [${addedKeys.join(', ')}]`);
+    if (removedKeys.length) parts.push(`Removed [${removedKeys.join(', ')}]`);
+    summary = parts.join('; ');
+  }
+  if (hasDiff) {
+    bumpRolePermsVersion();
+    await writeAudit(req, {
+      action: auditAction,
+      entityType: 'ROLE',
+      entityId: role,
+      details: {
+        permissionKeys: finalRows.map((r) => r.permission.key),
+        addedKeys,
+        removedKeys,
+        summary,
+      },
+    });
+  }
+
+  return {
+    ok: true as const,
+    status: auditAction === 'CREATE_ROLE' ? 201 : 200,
+    addedKeys,
+    removedKeys,
+    data: buildRoleOut(role, finalRows),
+  };
+}
+
 router.get(
   '/roles',
   requirePermission('MANAGE_ROLES'),
@@ -675,18 +767,11 @@ router.get(
     const visibleRoles = [Role.ADMIN, Role.BURSARY];
     const items = await Promise.all(
       visibleRoles.map(async (r) => {
-        const perms = await prisma.rolePermission.findMany({
+        const perms: RolePermRow[] = await prisma.rolePermission.findMany({
           where: { role: r },
-          include: { permission: { select: { key: true, name: true, category: true } } },
+          include: { permission: { select: { key: true, name: true, category: true, description: true } } },
         });
-        const meta = ROLE_META[r];
-        return {
-          role: r,
-          name: meta.name,
-          description: meta.description,
-          permissions: perms.map((rp) => rp.permission),
-          permissionsCount: perms.length,
-        };
+        return buildRoleOut(r, perms);
       })
     );
     res.status(200).json({ status: 'success', data: { items } });
@@ -699,19 +784,11 @@ router.get(
   validateParams(RoleNameParam),
   catchAsync(async (req: any, res) => {
     const { role } = req.params as z.infer<typeof RoleNameParam>;
-    const perms = await prisma.rolePermission.findMany({
+    const perms: RolePermRow[] = await prisma.rolePermission.findMany({
       where: { role },
       include: { permission: { select: { key: true, name: true, category: true, description: true } } },
     });
-    const meta = ROLE_META[role];
-    const data = {
-      role,
-      name: meta.name,
-      description: meta.description,
-      permissions: perms.map((rp) => rp.permission),
-      permissionsCount: perms.length,
-    };
-    res.status(200).json({ status: 'success', data });
+    res.status(200).json({ status: 'success', data: buildRoleOut(role, perms) });
   }),
 );
 
@@ -728,42 +805,14 @@ router.post(
   validateBody(CreateRoleSchema),
   catchAsync(async (req: any, res) => {
     const { role, permissionKeys } = req.body as z.infer<typeof CreateRoleSchema>;
-    const perms = await prisma.permission.findMany({
-      where: { key: { in: permissionKeys } },
-      select: { id: true, key: true },
-    });
-    const foundKeys = new Set(perms.map((p) => p.key));
-    const missing = permissionKeys.filter((k) => !foundKeys.has(k));
-    if (missing.length > 0) {
-      return res.status(400).json({ status: 'fail', message: `Unknown permission keys: ${missing.join(', ')}` });
+    const result = await replaceRolePermissions(req, role, permissionKeys, 'CREATE_ROLE');
+    if (!result.ok) {
+      return res.status(result.status).json({ status: 'fail', message: result.error });
     }
-    for (const p of perms) {
-      await prisma.rolePermission.upsert({
-        where: { role_permissionId: { role, permissionId: p.id } },
-        create: { role, permissionId: p.id },
-        update: {},
-      });
-    }
-    await writeAudit(req, {
-      action: 'CREATE_ROLE',
-      entityType: 'ROLE',
-      entityId: role,
-      details: { permissionKeys },
-    });
-    const allPerms = await prisma.rolePermission.findMany({
-      where: { role },
-      include: { permission: { select: { key: true, name: true, category: true } } },
-    });
-    const meta = ROLE_META[role];
-    res.status(201).json({
+    res.status(result.status).json({
       status: 'success',
-      data: {
-        role,
-        name: meta.name,
-        description: meta.description,
-        permissions: allPerms.map((rp) => rp.permission),
-        permissionsCount: allPerms.length,
-      },
+      diff: { added: result.addedKeys, removed: result.removedKeys },
+      data: result.data,
     });
   }),
 );
@@ -782,41 +831,14 @@ router.patch(
   catchAsync(async (req: any, res) => {
     const { role } = req.params as z.infer<typeof RoleNameParam>;
     const { permissionKeys } = req.body as z.infer<typeof UpdateRoleSchema>;
-    const perms = await prisma.permission.findMany({
-      where: { key: { in: permissionKeys } },
-      select: { id: true, key: true },
-    });
-    const foundKeys = new Set(perms.map((p) => p.key));
-    const missing = permissionKeys.filter((k) => !foundKeys.has(k));
-    if (missing.length > 0) {
-      return res.status(400).json({ status: 'fail', message: `Unknown permission keys: ${missing.join(', ')}` });
+    const result = await replaceRolePermissions(req, role, permissionKeys, 'UPDATE_ROLE');
+    if (!result.ok) {
+      return res.status(result.status).json({ status: 'fail', message: result.error });
     }
-    await prisma.rolePermission.deleteMany({ where: { role } });
-    for (const p of perms) {
-      await prisma.rolePermission.create({
-        data: { role, permissionId: p.id },
-      });
-    }
-    await writeAudit(req, {
-      action: 'UPDATE_ROLE',
-      entityType: 'ROLE',
-      entityId: role,
-      details: { permissionKeys },
-    });
-    const allPerms = await prisma.rolePermission.findMany({
-      where: { role },
-      include: { permission: { select: { key: true, name: true, category: true } } },
-    });
-    const meta = ROLE_META[role];
-    res.status(200).json({
+    res.status(result.status).json({
       status: 'success',
-      data: {
-        role,
-        name: meta.name,
-        description: meta.description,
-        permissions: allPerms.map((rp) => rp.permission),
-        permissionsCount: allPerms.length,
-      },
+      diff: { added: result.addedKeys, removed: result.removedKeys },
+      data: result.data,
     });
   }),
 );

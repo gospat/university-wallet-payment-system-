@@ -10,7 +10,10 @@
 export const errors = {
   auth: {
     notLoggedIn: 'You are not logged in! Please log in to get access.',
+    unauthenticated: 'You are not logged in! Please log in to get access.',
     invalidToken: 'Invalid token. Please log in again.',
+    wrongTokenTypeAccess: 'Invalid token type. Please use an access token.',
+    wrongTokenTypeRefresh: 'Invalid token type. Please use a refresh token.',
     tokenUserGone: 'The user belonging to this token no longer exists.',
     accountInactive: 'This account is no longer active. Please contact the administrator.',
     accountSuspended: 'Your account has been suspended. Please contact the administrator.',
@@ -123,7 +126,12 @@ export const errors = {
 export const auditActions = {
   login: 'LOGIN',
   loginFailed: 'LOGIN_FAILED',
+  loginWrongAudience: 'LOGIN_WRONG_AUDIENCE',
+  sessionRefreshed: 'SESSION_REFRESHED',
+  logoutAll: 'LOGOUT_ALL',
   logout: 'LOGOUT',
+  accountSuspended: 'ACCOUNT_SUSPENDED',
+  accountReactivated: 'ACCOUNT_REACTIVATED',
   studentSelfSignup: 'STUDENT_SELF_SIGNUP',
   studentCreated: 'STUDENT_CREATED',
   studentBulkImported: 'STUDENT_BULK_IMPORTED',

@@ -152,15 +152,17 @@ export const usersApi = {
     api.post<{ data: { message?: string; generatedPassword?: string } }>(`/admin/users/${id}/reset-password`, body).then(unwrapData<{ message?: string; generatedPassword?: string }>),
 };
 
+export interface RoleDiff { added: string[]; removed: string[]; }
+
 export const rolesApi = {
   list: () =>
     api.get<{ data: { items: RoleOut[] } }>('/admin/roles').then((r) => (unwrapData<any>(r)?.items ?? []) as RoleOut[]),
   get: (role: 'ADMIN' | 'BURSARY') =>
     api.get<{ data: RoleOut }>(`/admin/roles/${role}`).then(unwrapData<RoleOut>),
   assignPermissions: (role: 'ADMIN' | 'BURSARY', permissionKeys: string[]) =>
-    api.post<{ data: RoleOut }>('/admin/roles', { role, permissionKeys }).then(unwrapData<RoleOut>),
+    api.post<{ data: RoleOut; diff?: RoleDiff }>('/admin/roles', { role, permissionKeys }).then((r) => unwrapData<any>(r) ?? {}),
   update: (role: 'ADMIN' | 'BURSARY', body: UpdateRolePermissionInput) =>
-    api.patch<{ data: RoleOut }>(`/admin/roles/${role}`, body).then(unwrapData<RoleOut>),
+    api.patch<{ data: RoleOut; diff?: RoleDiff }>(`/admin/roles/${role}`, body).then((r) => unwrapData<any>(r) ?? {}),
 };
 
 export const permissionsApi = {
