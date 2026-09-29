@@ -99,4 +99,25 @@ export async function navCounters(): Promise<NavCounters> {
   }
 }
 
+export async function downloadBlob(
+  relativePath: string,
+  fallbackFilename: string,
+): Promise<void> {
+  const resp = await api.get(relativePath, {
+    responseType: 'blob',
+  });
+  const blob: Blob = resp.data;
+  const url = URL.createObjectURL(blob);
+  const headers = (resp.headers ?? {}) as Record<string, string>;
+  const disp = headers['content-disposition'] ?? '';
+  const match = disp.match(/filename="?([^"]+)"?/);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = match?.[1] || fallbackFilename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 export default api;

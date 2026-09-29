@@ -3,7 +3,7 @@ import { i18n, students, statusLabels, studentTypes } from '../../i18n/en';
 import Modal from '../../components/Modal';
 import ConfirmAction from '../../components/ConfirmAction';
 import PortalShell from '../../components/PortalShell';
-import api, { navCounters, NavCounters } from '../../services/api';
+import api, { navCounters, NavCounters, downloadBlob } from '../../services/api';
 import type { AxiosRequestConfig } from 'axios';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -510,16 +510,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     }
   };
 
-  const studentsTemplateUrl = (): string => {
-    const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
-    const token = localStorage.getItem('token') ?? '';
-    return `${base}/admin/students/template.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-  };
-  const studentsTemplateXlsxUrl = (): string => {
-    const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
-    const token = localStorage.getItem('token') ?? '';
-    return `${base}/admin/students/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-  };
   const studentsErrorsUrl = (): string => {
     if (!bulkStage?.uploadId) return '';
     const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
@@ -1312,15 +1302,21 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                 </div>
                 <div className="flex flex-wrap gap-2 shrink-0">
                   <a
-                    href={studentsTemplateUrl()}
-                    download
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void downloadBlob('/admin/students/template.csv', 'students-template.csv');
+                    }}
                     className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg text-sm font-semibold hover:bg-blue-50 shadow-sm"
                   >
                     📄 Download .CSV Template
                   </a>
                   <a
-                    href={studentsTemplateXlsxUrl()}
-                    download
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void downloadBlob('/admin/students/template.xlsx', 'students-template.xlsx');
+                    }}
                     className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 border border-green-300 text-green-700 rounded-lg text-sm font-semibold hover:bg-green-100 shadow-sm"
                   >
                     📗 Download .XLSX Template (2 sheets)

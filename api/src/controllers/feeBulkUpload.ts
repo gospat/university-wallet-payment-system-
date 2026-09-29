@@ -77,7 +77,18 @@ export const stageFeeBulkUpload = catchAsync(async (req: Request, res: Response,
     });
     res.status(200).json({ status: 'success', data: result });
   } catch (e) {
-    return next(e instanceof AppError ? e : new AppError(i18n.errors.upload.importFailed, 400));
+    if (e instanceof AppError) return next(e);
+    console.error(
+      `[feeBulkUpload] stageFeeBulkUpload unhandled error fileName=${JSON.stringify(file.originalFilename)} actorId=${req.user.id}:`,
+      e,
+    );
+    const extra = e instanceof Error ? e.message : String(e ?? '');
+    return next(
+      new AppError(
+        i18n.errors.upload.importFailed + (extra ? ` (${extra})` : ''),
+        400,
+      ),
+    );
   }
 });
 

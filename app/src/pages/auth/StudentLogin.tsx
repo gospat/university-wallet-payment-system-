@@ -28,7 +28,10 @@ const StudentLogin: React.FC = () => {
       }
 
       login(res.data.token, res.data.data.user);
-      const next = (location.state?.from as string | undefined) || '/student/dashboard';
+      const base = '/student/dashboard';
+      const raw = location.state?.from as string | undefined;
+      const fromOk = raw && (raw === base || raw.startsWith('/student/'));
+      const next = fromOk ? raw! : base;
       navigate(next, { replace: true });
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Login failed.');

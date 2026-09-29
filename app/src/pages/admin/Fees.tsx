@@ -12,7 +12,7 @@ import Modal from '../../components/Modal';
 import ConfirmAction from '../../components/ConfirmAction';
 import DirectBillForm from '../../components/fees/DirectBillForm';
 import { useAuth } from '../../context/AuthContext';
-import { navCounters, NavCounters } from '../../services/api';
+import { navCounters, NavCounters, downloadBlob } from '../../services/api';
 import {
   adminFees,
   feeCategories as FEE_CATEGORY_PRESETS,
@@ -1058,15 +1058,21 @@ const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
               </div>
               <div className="shrink-0 flex flex-wrap gap-2">
                 <a
-                  href={feeApi.feesTemplateUrl()}
-                  download
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void downloadBlob('/fees/template.csv', 'fees-template.csv');
+                  }}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-blue-300 text-blue-700 hover:bg-blue-100 text-sm font-semibold shadow-sm"
                 >
                   📄 Download .CSV Template
                 </a>
                 <a
-                  href={feeApi.feesTemplateXlsxUrl()}
-                  download
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void downloadBlob('/fees/template.xlsx', 'fees-template.xlsx');
+                  }}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-green-50 border border-green-300 text-green-700 hover:bg-green-100 text-sm font-semibold shadow-sm"
                 >
                   📗 Download .XLSX Template (2 sheets)

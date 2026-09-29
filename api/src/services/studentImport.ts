@@ -97,6 +97,7 @@ const COLUMN_ALIASES: Record<string, string> = {
   lastname: 'lastName', 'last_name': 'lastName', 'surname': 'lastName',
   matricno: 'matricNumber', 'matric no': 'matricNumber', 'matric-number': 'matricNumber',
   matriculationno: 'matricNumber', 'matric_number': 'matricNumber', 'matric': 'matricNumber',
+  matricnumber: 'matricNumber', matriculationnumber: 'matricNumber',
   regno: 'matricNumber', 'reg_no': 'matricNumber',
   formno: 'admissionNumber', 'form no': 'admissionNumber', 'admissionno': 'admissionNumber',
   jambno: 'jambNumber', 'jamb no': 'jambNumber', 'utmeno:': 'jambNumber',
@@ -340,20 +341,41 @@ async function validateRows(rawRows: Record<string, any>[]) {
   // DB duplicates: single query (select {id, email, matricNumber} where OR email IN or matricNumber IN)
   const dbDupes: UploadStage['dbDuplicates'] = [];
   if (emails.size || matrics.size) {
+    const orArr: any[] = [];
+    if (emails.size) {
+      // MySQL + Prisma: use in() on email list, then post-filter case-insensitive
+      // in-app via toLowerCase() on both sides so imports like "User@Example.Com"
+      // still match "user@example.com" in the DB.  We avoid `mode:'insensitive'`
+      // because it is a Prisma PostgreSQL-only filter arg and throws on MySQL.
+      orArr.push({ email: { in: [...emails] } });
+    }
+    if (matrics.size) orArr.push({ matricNumber: { in: [...matrics] } });
+    const query: any = orArr.length === 0
+      ? { id: 0 }
+      : orArr.length === 1
+        ? orArr[0]
+        : { OR: orArr };
     const existing = await prisma.user.findMany({
-      where: {
-        OR: [
-          emails.size ? { email: { in: [...emails], mode: 'insensitive' } } : undefined,
-          matrics.size ? { matricNumber: { in: [...matrics] } } : undefined,
-        ].filter(Boolean) as any[],
-      },
+      where: query,
       select: { id: true, email: true, matricNumber: true, role: true },
     });
     const existingByEmail = new Map<string, number>();
     const existingByMatric = new Map<string, number>();
     for (const u of existing) {
-      if (u.email) existingByEmail.set(u.email.toLowerCase(), u.id);
-      if (u.matricNumber) existingByMatric.set(u.matricNumber, u.id);
+      if (u.email) existingByEmail.set(String(u.email).toLowerCase(), u.id);
+      if (u.matricNumber) existingByMatric.set(String(u.matricNumber), u.id);
+    }
+    // Post-apply the case-insensitive email matches for any email not found by
+    // exact match (covers both mixed-case emails on upload AND on disk).
+    if (emails.size) {
+      for (const e of emails) {
+        const el = String(e).toLowerCase();
+        if (existingByEmail.has(el)) continue;
+        const hit = existing.find(
+          (u) => u.email && String(u.email).toLowerCase() === el,
+        );
+        if (hit) existingByEmail.set(el, hit.id);
+      }
     }
     // Now mark dup validRows
     for (let i = validRows.length - 1; i >= 0; i--) {
@@ -542,9 +564,20 @@ export class BulkStudentUploadService {
     // Pass 2: valid rows → create
     for (const vr of stage.validRows) {
       try {
-        const payload = vr.record as any;
+        const raw = vr.record as Record<string, any>;
+        const recognized = new Set<string>([
+          'email', 'firstName', 'middleName', 'lastName', 'matricNumber',
+          'admissionNumber', 'jambNumber', 'college', 'department', 'program',
+          'level', 'programmeId', 'levelId', 'academicSession', 'academicSessionId',
+          'studentType', 'entryMode', 'admissionYear', 'graduationYear',
+          'phoneNumber', 'address', 'password', 'accountStatus',
+        ]);
+        const payload: Record<string, any> = {};
+        for (const key of recognized) {
+          if (key in raw && raw[key] !== undefined) payload[key] = raw[key];
+        }
         if (payload.password === undefined || payload.password === '') delete payload.password;
-        await StudentService.create({ ...payload }, opts.actorId, {
+        await StudentService.create(payload as any, opts.actorId, {
           ip: opts.ip, userAgent: opts.userAgent, importId: importBatch.id,
         });
         createdCount++;

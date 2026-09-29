@@ -84,7 +84,21 @@ export const stageStudentUpload = catchAsync(async (req: Request, res: Response,
     });
     res.status(200).json({ status: 'success', data: result });
   } catch (e) {
-    return next(e instanceof AppError ? e : new AppError(i18n.errors.upload.importFailed, 400));
+    if (e instanceof AppError) return next(e);
+    // Preserve the actual error message in the server logs (critical for
+    // operators debugging a bad XLSX import) so we don't lose it to the
+    // generic i18n mask.  Then return the generic user-facing message.
+    console.error(
+      `[bulkUpload] stageStudentUpload unhandled error fileName=${JSON.stringify(file.originalFilename)} actorId=${req.user.id}:`,
+      e,
+    );
+    const extra = e instanceof Error ? e.message : String(e ?? '');
+    return next(
+      new AppError(
+        i18n.errors.upload.importFailed + (extra ? ` (${extra})` : ''),
+        400,
+      ),
+    );
   }
 });
 

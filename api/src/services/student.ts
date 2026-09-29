@@ -60,6 +60,63 @@ function generateStrongTemporaryPassword(length = 14): string {
 // AND the legacy string are provided, the resolved display value from the id
 // wins.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Enum normalizers: accept user-friendly spreadsheet values like "REGULAR",
+// "Undergraduate", "200 LEVEL", "DIRECT ENTRY" and convert to Prisma enum
+// values / numeric level. Single point of truth for both create + update.
+// ---------------------------------------------------------------------------
+const STUDENT_TYPE_MAP: Record<string, 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_TIME' | 'JUPEB' | 'OTHER'> = {
+  UNDERGRADUATE: 'UNDERGRADUATE', UG: 'UNDERGRADUATE', REGULAR: 'UNDERGRADUATE',
+  'UNDER-GRADUATE': 'UNDERGRADUATE', UNDERGRAD: 'UNDERGRADUATE',
+  POSTGRADUATE: 'POSTGRADUATE', PG: 'POSTGRADUATE', MASTERS: 'POSTGRADUATE',
+  PHD: 'POSTGRADUATE', MSC: 'POSTGRADUATE', MBA: 'POSTGRADUATE',
+  'PART-TIME': 'PART_TIME', PARTTIME: 'PART_TIME', 'PART TIME': 'PART_TIME',
+  PART_TIME: 'PART_TIME', PT: 'PART_TIME',
+  JUPEB: 'JUPEB', IJMB: 'JUPEB', ALEVELS: 'JUPEB', 'A-LEVEL': 'JUPEB',
+  FOUNDATION: 'JUPEB',
+};
+const ENTRY_MODE_MAP: Record<string, 'UTME' | 'DIRECT_ENTRY' | 'TRANSFER' | 'OTHER'> = {
+  UTME: 'UTME', JAMB: 'UTME', UME: 'UTME',
+  'DIRECT-ENTRY': 'DIRECT_ENTRY', DIRECTENTRY: 'DIRECT_ENTRY',
+  'DIRECT ENTRY': 'DIRECT_ENTRY', DIRECT_ENTRY: 'DIRECT_ENTRY', DE: 'DIRECT_ENTRY',
+  TRANSFER: 'TRANSFER', TRANS: 'TRANSFER',
+};
+function normalizeStudentType(v: unknown): 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_TIME' | 'JUPEB' | 'OTHER' | undefined {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toUpperCase().replace(/[_\s-]+/g, '_');
+  if (!s) return undefined;
+  if (STUDENT_TYPE_MAP[s]) return STUDENT_TYPE_MAP[s];
+  const clean = s.replace(/_/g, '');
+  for (const key of Object.keys(STUDENT_TYPE_MAP)) {
+    if (key.replace(/_/g, '') === clean) return STUDENT_TYPE_MAP[key];
+  }
+  const out = STUDENT_TYPE_MAP[s];
+  return out ?? 'OTHER';
+}
+function normalizeEntryMode(v: unknown): 'UTME' | 'DIRECT_ENTRY' | 'TRANSFER' | 'OTHER' | undefined {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toUpperCase().replace(/[_\s-]+/g, '_');
+  if (!s) return undefined;
+  if (ENTRY_MODE_MAP[s]) return ENTRY_MODE_MAP[s];
+  const clean = s.replace(/_/g, '');
+  for (const key of Object.keys(ENTRY_MODE_MAP)) {
+    if (key.replace(/_/g, '') === clean) return ENTRY_MODE_MAP[key];
+  }
+  return 'OTHER';
+}
+function normalizeLevelValue(v: unknown): number | null | undefined {
+  if (v === null || v === undefined) return undefined;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const s = String(v).trim();
+  if (!s) return undefined;
+  const direct = Number(s);
+  if (Number.isFinite(direct)) return direct;
+  const m = /(\d+)/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function resolveProgrammeContext(
   input: Partial<CreateStudentInput>,
 ): Promise<{ program?: string | null; department?: string | null; college?: string | null }> {
@@ -100,8 +157,7 @@ async function resolveLevelDisplay(input: Partial<CreateStudentInput>): Promise<
     }
   }
   if (input.level === undefined || input.level === null) return undefined;
-  const n = Number(input.level);
-  return Number.isNaN(n) ? null : n;
+  return normalizeLevelValue(input.level);
 }
 
 async function resolveSessionDisplay(input: Partial<CreateStudentInput>): Promise<string | null | undefined> {
@@ -372,8 +428,14 @@ export class StudentService {
     if (hierarchy.program !== undefined) createData.program = hierarchy.program ?? undefined;
     if (resolvedLevel !== undefined) createData.level = resolvedLevel ?? undefined;
     if (resolvedSession !== undefined) createData.academicSession = resolvedSession ?? undefined;
-    if (input.studentType !== undefined) createData.studentType = (input.studentType ?? undefined) as any;
-    if (input.entryMode !== undefined) createData.entryMode = (input.entryMode ?? undefined) as any;
+    {
+      const nt = normalizeStudentType(input.studentType);
+      if (nt !== undefined) createData.studentType = nt;
+    }
+    {
+      const ne = normalizeEntryMode(input.entryMode);
+      if (ne !== undefined) createData.entryMode = ne;
+    }
     if (input.admissionYear !== undefined) createData.admissionYear = input.admissionYear ?? undefined;
     if (input.graduationYear !== undefined) createData.graduationYear = input.graduationYear ?? undefined;
     if (input.phoneNumber !== undefined) createData.phoneNumber = input.phoneNumber ?? undefined;
@@ -522,6 +584,12 @@ export class StudentService {
 
     // ---- hierarchy resolution if any id-based field changed -------------
     const patchData: Prisma.UserUpdateInput = { ...(input as Prisma.UserUpdateInput) };
+    {
+      const nt = normalizeStudentType((patchData as any).studentType);
+      if (nt !== undefined) (patchData as any).studentType = nt;
+      const ne = normalizeEntryMode((patchData as any).entryMode);
+      if (ne !== undefined) (patchData as any).entryMode = ne;
+    }
     if (
       input.programmeId !== undefined ||
       input.levelId !== undefined ||

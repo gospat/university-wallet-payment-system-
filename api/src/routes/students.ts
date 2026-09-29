@@ -52,7 +52,7 @@ import {
   verifyPayment,
   verifyPaymentValidator,
 } from '../controllers/payments';
-import { downloadFormalReceipt, listMyReceipts } from '../controllers/receipt';
+import { downloadFormalReceipt, downloadStatement, listMyReceipts } from '../controllers/receipt';
 import { FeeService, FeeQuerySchema } from '../services/fee';
 import { PaymentService, InitiatePaymentSchema } from '../services/payment';
 import prisma from '../config/database';
@@ -86,6 +86,9 @@ router.get('/invoices/:id', protect, restrictTo(Role.STUDENT), validateParams(Id
 // ---------- Self-service payments (STUDENT only) ----------------------------
 router.get('/receipts', protect, restrictTo(Role.STUDENT), listMyReceipts);
 router.get('/receipts/:id/download', protect, restrictTo(Role.STUDENT), downloadFormalReceipt);
+router.get('/statement', protect, restrictTo(Role.STUDENT), downloadStatement);
+router.get('/me/receipts', protect, restrictTo(Role.STUDENT), listMyReceipts);
+router.get('/me/statement', protect, restrictTo(Role.STUDENT), downloadStatement);
 router.get(
   '/payments/confirm-payload',
   protect,

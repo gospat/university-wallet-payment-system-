@@ -30,7 +30,10 @@ const BursaryLogin: React.FC = () => {
 
       login(res.data.token, res.data.data.user);
       const base = role === 'ADMIN' ? '/admin/dashboard' : '/bursary/dashboard';
-      const next = (location.state?.from as string | undefined) || base;
+      const allowedPrefix = role === 'ADMIN' ? '/admin/' : '/bursary/';
+      const raw = location.state?.from as string | undefined;
+      const fromOk = raw && (raw === '/admin/dashboard' || raw === '/bursary/dashboard' || raw.startsWith(allowedPrefix));
+      const next = fromOk ? raw! : base;
       navigate(next, { replace: true });
       
     } catch (err: any) {

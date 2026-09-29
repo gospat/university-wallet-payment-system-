@@ -84,9 +84,9 @@ const COLUMN_ALIASES: Record<string, string> = {
   code: 'feeCode', referenceno: 'feeCode', referencenumber: 'feeCode',
   name: 'name', feename: 'name', fee_name: 'name', billname: 'name', bill_name: 'name',
   title: 'name', description: 'description', details: 'description', notes: 'description',
-  category: 'category', categorycode: 'category', catcode: 'category',
-  categoryname: 'category', catname: 'category', feecategory: 'category',
-  billcategory: 'category', category_id: 'category', categoryId: 'category',
+  categorycode: 'categoryCode', catcode: 'categoryCode', category: 'categoryCode',
+  categoryname: 'categoryCode', catname: 'categoryCode', feecategory: 'categoryCode',
+  billcategory: 'categoryCode', category_id: 'categoryCode', categoryId: 'categoryCode',
   amount: 'amount', feeamount: 'amount', price: 'amount', cost: 'amount',
   total: 'amount', amountngn: 'amount', naira: 'amount',
   session: 'academicSession', academicsession: 'academicSession',
@@ -109,7 +109,7 @@ const COLUMN_ALIASES: Record<string, string> = {
   currency: 'currency', isactive: 'isActive', active: 'isActive',
 };
 
-const REQUIRED_KEYS = ['feeCode', 'name', 'category', 'amount', 'academicSession'] as const;
+const REQUIRED_KEYS = ['feeCode', 'name', 'categoryCode', 'amount', 'academicSession'] as const;
 
 // ---------------------------------------------------------------------------
 // In-memory stage LRU. Cap = 50 pending batches, TTL = 60 min.
@@ -267,7 +267,7 @@ function amountToNumber(v: any): number | null {
 async function resolveCategoryHints(records: ValidRow[]): Promise<Record<string, { status: 'RESOLVED' | 'UNRESOLVED'; categoryId?: number; matches: number; rows: number[] }>> {
   const tokens = new Map<string, number[]>();
   for (const r of records) {
-    const t = String(r.record.category ?? '').trim();
+    const t = String(r.record.categoryCode ?? r.record.category ?? '').trim();
     if (!t) continue;
     const arr = tokens.get(t);
     if (arr) arr.push(r.row);
@@ -403,7 +403,7 @@ export async function stageFeeUpload(opts: { filePath: string; fileName: string;
 
   const categoryRes = await resolveCategoryHints(validRows);
   for (const r of validRows) {
-    const token = String(r.record.category ?? '').trim();
+    const token = String(r.record.categoryCode ?? r.record.category ?? '').trim();
     const resolution = categoryRes[token];
     if (resolution?.status === 'RESOLVED' && resolution.categoryId) {
       r.resolvedCategoryId = resolution.categoryId;
@@ -411,7 +411,7 @@ export async function stageFeeUpload(opts: { filePath: string; fileName: string;
       problemRows.push({
         row: r.row,
         record: r.record,
-        errors: [{ code: 'CATEGORY_NOT_FOUND', field: 'category', message: `Category "${token}" not found. Create it first in Bill Categories.` }],
+        errors: [{ code: 'CATEGORY_NOT_FOUND', field: 'categoryCode', message: `Category "${token}" not found. Create it first in Bill Categories.` }],
       });
       const idx = validRows.indexOf(r);
       if (idx >= 0) validRows.splice(idx, 1);
@@ -433,12 +433,19 @@ export async function stageFeeUpload(opts: { filePath: string; fileName: string;
       });
     }
 
-    const ors: Prisma.FeeWhereInput[] = parts.map((p) => ({
-      feeCode: p.feeCode,
-      academicSession: p.academicSession,
-      program: p.program === null ? { isSet: false } as any : p.program,
-      ...(p.level === null ? {} : { level: p.level }),
-    }));
+    const ors: Prisma.FeeWhereInput[] = parts.map((p) => {
+      const clause: any = {
+        feeCode: p.feeCode,
+        academicSession: p.academicSession,
+      };
+      // `{ isSet: false }` is a Mongo-style filter Prisma doesn't support on
+      // optional MySQL string fields. For NULL-scoped program entries we
+      // explicitly compare against null (matches rows where program IS NULL).
+      if (p.program === null) clause.program = null;
+      else clause.program = p.program;
+      if (p.level !== null) clause.level = p.level;
+      return clause as Prisma.FeeWhereInput;
+    });
     if (ors.length > 0) {
       const existing = await prisma.fee.findMany({
         where: { OR: ors },
@@ -617,14 +624,14 @@ function buildSummary(stage: FeeUploadStage): FeeUploadSummary {
   const categoryRes: Record<string, { status: 'RESOLVED' | 'UNRESOLVED'; categoryId?: number; matches: number }> = {};
   const tokenMap = new Map<string, { status: 'RESOLVED' | 'UNRESOLVED'; categoryId?: number; matches: number }>();
   for (const r of stage.validRows) {
-    const token = String(r.record.category ?? '').trim();
+    const token = String(r.record.categoryCode ?? r.record.category ?? '').trim();
     const existing = tokenMap.get(token) ?? { status: 'RESOLVED' as const, categoryId: r.resolvedCategoryId, matches: 0 };
     existing.matches += 1;
     tokenMap.set(token, existing);
   }
   stage.problemRows.forEach((p) => {
     if (p.errors.some((e) => e.code === 'CATEGORY_NOT_FOUND')) {
-      const token = String(p.record.category ?? '').trim();
+      const token = String(p.record.categoryCode ?? p.record.category ?? '').trim();
       const existing = tokenMap.get(token) ?? { status: 'UNRESOLVED' as const, matches: 0 };
       existing.matches += 1;
       tokenMap.set(token, existing);

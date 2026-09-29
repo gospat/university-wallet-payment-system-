@@ -37,9 +37,9 @@ async function loadPuppeteer(): Promise<PuppeteerApi> {
 
   _puppeteerPromise = (async (): Promise<PuppeteerApi> => {
     try {
-      // Dynamic import works for both ESM-only puppeteer 25 AND CJS puppeteer.
-      const ns: any = await import('puppeteer');
-      // ESM default export or plain namespace (with named exports {launch})
+      const loadNative: (specifier: string) => Promise<any> =
+        new Function('spec', 'return import(spec)') as (s: string) => Promise<any>;
+      const ns: any = await loadNative('puppeteer');
       const resolved: PuppeteerApi =
         ns && ns.default && typeof ns.default.launch === 'function'
           ? ns.default
@@ -51,17 +51,22 @@ async function loadPuppeteer(): Promise<PuppeteerApi> {
       return resolved;
     } catch (err) {
       _puppeteerLoadFailed = err instanceof Error ? err : new Error(String(err));
-      if (!(process.env.NODE_ENV === 'test')) {
-        console.warn(
-          '[receipt] Puppeteer not available; receipt PDF endpoints will return 503. ' +
-            'Install puppeteer@~25.12.0 to enable PDF receipts. Error:',
-          _puppeteerLoadFailed.message,
-        );
+      // Always print detailed puppeteer load failure so local devs can debug
+      // missing Chrome / ESM interop.  In production deployments, the process
+      // manager (systemd) will log this too — which is desirable.
+      console.error(
+        '[receipt] Puppeteer failed to load. Receipt PDF endpoints will return 503. ' +
+          'Install puppeteer@~25.12.0 and ensure Chrome headless is downloaded locally.',
+      );
+      console.error('[receipt] Puppeteer load error:', _puppeteerLoadFailed);
+      if (_puppeteerLoadFailed && typeof (_puppeteerLoadFailed as any).cause !== 'undefined') {
+        console.error('[receipt] Puppeteer load error (cause):', (_puppeteerLoadFailed as any).cause);
       }
       throw new AppError(
         'Receipt PDF generation failed: Puppeteer is not installed. ' +
           'Run `PUPPETEER_SKIP_DOWNLOAD=true npm install puppeteer@~25.12.0` and restart, ' +
-          'or use the HTML receipt download button on the receipt page as a fallback.',
+          'or use the HTML receipt download button on the receipt page as a fallback. ' +
+          '(Server debug message: ' + _puppeteerLoadFailed.message + ')',
         503,
       );
     }
