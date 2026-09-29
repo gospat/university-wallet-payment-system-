@@ -18,6 +18,7 @@
 
 import { Job, Queue, Worker, Processor } from 'bullmq';
 import Redis from 'ioredis';
+import { createBullmqProducerConnection, createBullmqWorkerConnection } from './redis';
 
 export type JobTopic =
   | 'paystack.webhook'
@@ -46,12 +47,28 @@ export interface HandlerCtx {
 type Handler<P = unknown> = (payload: P, ctx: HandlerCtx) => Promise<void> | void;
 
 // -----------------------------------------------------------------------------
-// Redis connectivity: reuse the existing ioredis instance but wrap in
-// `lazilyCreateRedisConnection` — only open Redis sockets the first time
-// something actually tries to enqueue. This avoids startup errors when
-// Redis isn't running in dev.
+// Redis connectivity: TWO SEPARATE clients (required by BullMQ v3).
+//
+// 1. PRODUCER connection: short-lived commands only (job ADDs, ping checks).
+//    Keeps strict commandTimeout + bounded retries so HTTP requests don't hang.
+//    maxRetriesPerRequest = 1 so any stuck Redis command fails fast.
+//
+// 2. WORKER connection: BullMQ Worker uses LONG BLOCKING BRPOP / BLPOP /
+//    BRPOPLPUSH commands that intentionally hold for 5-30+ seconds (BullMQ
+//    default blocking timeout is 30s). Worker connections MUST use:
+//      - maxRetriesPerRequest = null (BullMQ warning otherwise every poll)
+//      - NO commandTimeout (would interrupt blocking reads on every iteration)
+//      - enableReadyCheck true + a resilient retryStrategy
+//
+// Reusing the producer client for the worker (old code) causes:
+//   "Command timed out" spam every 2s when 2s commandTimeout hits on BRPOP
+//   "maxRetriesPerRequest is set to 1, this is not compatible..." warnings
+//
+// Database selection (/2 in REDIS_URL) preserved — createBullmq* factories
+// parse REDIS_URL exactly including its path portion.
 // -----------------------------------------------------------------------------
-let _redis: InstanceType<typeof Redis> | null = null;
+let _producerRedis: InstanceType<typeof Redis> | null = null;
+let _workerRedis: InstanceType<typeof Redis> | null = null;
 let _queueByTopic = new Map<string, Queue>();
 let _workerByTopic = new Map<string, Worker>();
 let _handlers = new Map<string, Handler>();
@@ -60,10 +77,16 @@ let _degradedLogIssued = false;
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 const LAZY = process.env.REDIS_LAZY_CONNECT === 'true' || process.env.QUEUE_DISABLE_WORKERS === 'true' || process.env.NODE_ENV === 'test';
 
-function ensureRedis(): InstanceType<typeof Redis> | null {
-  if (_redis) return _redis;
+/**
+ * Producer Redis client used for dispatch/job-ADD + health ping. This is the
+ * ONLY client allowed to have commandTimeout (we keep a 2s strict cap since
+ * these commands happen inside user-facing HTTP handlers and must fail fast
+ * to fall through to sync degraded mode).
+ */
+function ensureProducerRedis(): InstanceType<typeof Redis> | null {
+  if (_producerRedis) return _producerRedis;
   try {
-    _redis = new Redis(REDIS_URL, {
+    _producerRedis = createBullmqProducerConnection({
       maxRetriesPerRequest: LAZY ? 0 : 1,
       enableReadyCheck: !LAZY,
       connectTimeout: LAZY ? 400 : 1500,
@@ -71,15 +94,38 @@ function ensureRedis(): InstanceType<typeof Redis> | null {
       lazyConnect: true,
       retryStrategy: () => null,
     });
-    _redis.on('error', () => {
-      /* handled via .ping() probe inside enqueue */
-    });
     if (!LAZY) {
-      _redis.connect().catch(() => {
+      _producerRedis.connect().catch(() => {
         /* lazy connect best-effort — fall through to sync fallback */
       });
     }
-    return _redis;
+    return _producerRedis;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Worker Redis client used ONLY by BullMQ Worker instances. Nulls out every
+ * setting that would interrupt the long blocking queue reads that BullMQ
+ * Workers rely on. Single shared client for all queue topics (same DB /2)
+ * which is safe because ioredis multiplexes commands over one socket.
+ */
+function ensureWorkerRedis(): InstanceType<typeof Redis> | null {
+  if (_workerRedis) return _workerRedis;
+  try {
+    // maxRetriesPerRequest:null is REQUIRED for BullMQ workers (otherwise
+    // every BRPOP emits the "maxRetriesPerRequest must be null" warning).
+    _workerRedis = createBullmqWorkerConnection({
+      lazyConnect: true,
+      retryStrategy: (times) => Math.min(times * 200, 2000),
+    });
+    if (!LAZY) {
+      _workerRedis.connect().catch(() => {
+        /* worker will retry via its own connection events */
+      });
+    }
+    return _workerRedis;
   } catch {
     return null;
   }
@@ -88,9 +134,13 @@ function ensureRedis(): InstanceType<typeof Redis> | null {
 /**
  * Probe Redis liveliness synchronously-ish. Used inside `dispatchJob` to
  * decide whether to fall back to sync execution.
+ *
+ * Uses the PRODUCER connection so the commandTimeout short-fuse applies; if
+ * this used the worker connection we'd hang for the full blocking timeout
+ * on every dispatch when Redis is down.
  */
 async function isRedisHealthy(): Promise<boolean> {
-  const r = ensureRedis();
+  const r = ensureProducerRedis();
   if (!r) return false;
   try {
     await Promise.race([r.ping(), new Promise<never>((_, rej) => setTimeout(() => rej(new Error('ping-timed-out')), 700))]);
@@ -160,7 +210,7 @@ async function runWithRetries<P>(
 function ensureQueue(topic: string): Queue | null {
   const existing = _queueByTopic.get(topic);
   if (existing) return existing;
-  const r = ensureRedis();
+  const r = ensureProducerRedis();
   if (!r) return null;
   const q = new Queue(topic, { connection: r, defaultJobOptions: { removeOnComplete: 1000, removeOnFail: 5000 } });
   _queueByTopic.set(topic, q);
@@ -176,7 +226,7 @@ function ensureWorker<P>(topic: string, handler: Handler<P>): Worker | null {
   if (process.env.NODE_ENV === 'test' || process.env.QUEUE_DISABLE_WORKERS === 'true') {
     return null;
   }
-  const r = ensureRedis();
+  const r = ensureWorkerRedis();
   if (!r) return null;
   const defaults = TOPIC_DEFAULTS[topic as JobTopic] ?? { concurrency: 2, retries: 2, attempts: 3 };
 
@@ -303,20 +353,31 @@ export async function getQueueHealth(): Promise<{ mode: 'bullmq' | 'degraded'; r
 }
 
 /**
- * Shutdown hook: drain workers, close queues, disconnect Redis.
- * Call from server.ts on SIGTERM/SIGINT to avoid stalled jobs.
+ * Shutdown hook: drain workers, close queues, disconnect producer + worker
+ * Redis connections. Call from server.ts on SIGTERM/SIGINT to avoid stalled
+ * jobs. Idempotent: safe to invoke multiple times.
  */
 export async function shutdownQueue(): Promise<void> {
+  // (1) close workers FIRST (so they don't try to read from a closed queue/redis)
   await Promise.all([..._workerByTopic.values()].map((w) => w.close().catch(() => {})));
-  await Promise.all([..._queueByTopic.values()].map((q) => q.close().catch(() => {})));
-  if (_redis) {
-    try {
-      await _redis.quit();
-    } catch {
-      /* ignore */
-    }
-    _redis = null;
-  }
   _workerByTopic.clear();
+
+  // (2) close queues (producers)
+  await Promise.all([..._queueByTopic.values()].map((q) => q.close().catch(() => {})));
   _queueByTopic.clear();
+
+  // (3) disconnect worker redis — use quit (clean, won't interrupt in-flight
+  //     blocking reads); fallback to hard disconnect if quit hangs.
+  if (_workerRedis) {
+    const client = _workerRedis;
+    _workerRedis = null;
+    try { await client.quit(); } catch { try { client.disconnect(false); } catch { /* ignore */ } }
+  }
+
+  // (4) disconnect producer redis
+  if (_producerRedis) {
+    const client = _producerRedis;
+    _producerRedis = null;
+    try { await client.quit(); } catch { try { client.disconnect(false); } catch { /* ignore */ } }
+  }
 }

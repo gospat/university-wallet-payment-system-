@@ -1,5 +1,6 @@
 import { Queue, Worker } from 'bullmq';
-import redisProxy from '../config/redis';
+import Redis from 'ioredis';
+import { createBullmqProducerConnection, createBullmqWorkerConnection } from '../config/redis';
 import { JobTopic } from '../config/queue';
 import prisma from '../config/database';
 import {
@@ -28,12 +29,32 @@ export function clearCapturesForTests(): void {
 }
 
 let _emailQueue: Queue | null = null;
+let _emailProducerRedis: InstanceType<typeof Redis> | null = null;
+let _emailWorkerRedis: InstanceType<typeof Redis> | null = null;
+let _emailWorker: Worker | null = null;
 
 function ensureQueue(): Queue | null {
   if (_emailQueue) return _emailQueue;
+  // Build an email-private PRODUCER Redis with short commandTimeout so user
+  // flows fail fast and fall back to inlineFallbackSend if Redis is stuck.
+  // Reuses env REDIS_URL including the /2 db path — matches other queues.
   try {
+    if (!_emailProducerRedis) {
+      const LAZY = process.env.REDIS_LAZY_CONNECT === 'true' || process.env.QUEUE_DISABLE_WORKERS === 'true' || process.env.NODE_ENV === 'test';
+      _emailProducerRedis = createBullmqProducerConnection({
+        maxRetriesPerRequest: LAZY ? 0 : 1,
+        enableReadyCheck: !LAZY,
+        connectTimeout: LAZY ? 400 : 1500,
+        commandTimeout: LAZY ? 600 : 2000,
+        lazyConnect: true,
+        retryStrategy: () => null,
+      });
+      if (!LAZY) {
+        _emailProducerRedis.connect().catch(() => { /* inline fallback handles Redis down */ });
+      }
+    }
     const q = new Queue('emails', {
-      connection: redisProxy as any,
+      connection: _emailProducerRedis,
       defaultJobOptions: {
         removeOnComplete: true,
         removeOnFail: { count: 5 },
@@ -491,6 +512,17 @@ function createWorker(): Worker | null {
     return null;
   }
   try {
+    // BullMQ Worker REQUIRES maxRetriesPerRequest = null (emits warning
+    // otherwise every blocking BRPOP) — and MUST NOT have a commandTimeout
+    // because BRPOP commands are *supposed* to block for 30s by default.
+    // Use a dedicated worker Redis client, NEVER the producer/singleton.
+    if (!_emailWorkerRedis) {
+      _emailWorkerRedis = createBullmqWorkerConnection({
+        lazyConnect: true,
+        retryStrategy: (times) => Math.min(times * 200, 2000),
+      });
+      _emailWorkerRedis.connect().catch(() => { /* worker retries via its own events */ });
+    }
     const worker = new Worker('emails', async (job) => {
       const { emailType, to, payload, logIdempotencyKey, forceSmtp } = job.data || {};
       const currentAttempt = (job.attemptsMade as number) || 0;
@@ -503,7 +535,7 @@ function createWorker(): Worker | null {
         currentAttempt,
       });
     }, {
-      connection: redisProxy as any,
+      connection: _emailWorkerRedis,
       concurrency: 4,
       attempts: MAX_ATTEMPTS,
       backoff: {
@@ -514,6 +546,7 @@ function createWorker(): Worker | null {
     worker.on('failed', (job, err) => {
       try { console.error('[emailQueue] worker failed jobId=', job?.id, ':', err?.message?.slice(0, 120) ?? String(err).slice(0, 120)); } catch {}
     });
+    _emailWorker = worker;
     return worker;
   } catch {
       return null;
@@ -522,5 +555,39 @@ function createWorker(): Worker | null {
 
 let _workerRef = createWorker();
 void _workerRef;
+
+/**
+ * Graceful shutdown hook for the email worker + its two Redis connections.
+ * Idempotent, never throws. Called on SIGTERM/SIGINT in server.ts.
+ */
+export async function shutdownEmailQueue(): Promise<void> {
+  // (1) worker first — so new jobs stop being pulled mid-close.
+  if (_emailWorker) {
+    const w = _emailWorker;
+    _emailWorker = null;
+    try { await w.close(); } catch { /* ignore */ }
+  }
+
+  // (2) queue producer
+  if (_emailQueue) {
+    const q = _emailQueue;
+    _emailQueue = null;
+    try { await q.close(); } catch { /* ignore */ }
+  }
+
+  // (3) worker redis
+  if (_emailWorkerRedis) {
+    const c = _emailWorkerRedis;
+    _emailWorkerRedis = null;
+    try { await c.quit(); } catch { try { c.disconnect(false); } catch { /* ignore */ } }
+  }
+
+  // (4) producer redis (email-private producer — separate from shared singleton)
+  if (_emailProducerRedis) {
+    const c = _emailProducerRedis;
+    _emailProducerRedis = null;
+    try { await c.quit(); } catch { try { c.disconnect(false); } catch { /* ignore */ } }
+  }
+}
 
 export const EMAIL_TOPIC: JobTopic = 'email.send';

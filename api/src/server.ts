@@ -2,6 +2,9 @@ import dotenv from 'dotenv';
 import app from './app';
 import { z } from 'zod';
 import { seedPermissions } from './services/permissionSeed';
+import { shutdownQueue } from './config/queue';
+import { shutdownEmailQueue } from './queues/emailQueue';
+import { shutdownProducerRedis } from './config/redis';
 
 dotenv.config();
 
@@ -133,6 +136,8 @@ envSchema.parse(process.env);
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
 
+let httpServer: ReturnType<typeof app.listen> | null = null;
+
 async function bootstrap() {
   try {
     await seedPermissions();
@@ -140,12 +145,82 @@ async function bootstrap() {
   } catch (err) {
     console.warn('Permissions seed skipped:', err instanceof Error ? err.message : String(err));
   }
-  app.listen(port, () => {
+  httpServer = app.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });
 }
 
 bootstrap();
+
+// -----------------------------------------------------------------------------
+// Graceful shutdown: idempotent single-run handler for SIGTERM (systemd stop,
+// deploy restart) and SIGINT (Ctrl-C on dev). Systemd's default timeout is 90s
+// but PM2/other supervisors often use 30s; we hard cap at 25s so the process
+// always exits cleanly under its own power before a SIGKILL arrives.
+//
+// Close order matches BullMQ docs best practices:
+//   1. stop accepting HTTP -> new job dispatches won't be added
+//   2. general topic queue workers + email worker stop polling for new jobs
+//   3. producers (queues) stop -> no Redis writes
+//   4. close all Redis sockets cleanly via QUIT (graceful) / DISC fallback
+// -----------------------------------------------------------------------------
+let shutdownInProgress = false;
+
+async function performGracefulShutdown(signal: 'SIGTERM' | 'SIGINT'): Promise<void> {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+  console.log(`[shutdown] ${signal} received — draining workers then exiting.`);
+
+  // Safety net: force-exit if shutdown doesn't complete in 25s
+  const forceTimer = setTimeout(() => {
+    console.error('[shutdown] timed out after 25s — force-exit code=143');
+    process.exit(143);
+  }, 25000);
+  forceTimer.unref?.();
+
+  try {
+    // Step 1: stop accepting new HTTP requests. Let in-flight requests finish
+    // (server.close stops accepting, does NOT drop active keepalive sockets).
+    if (httpServer) {
+      await new Promise<void>((resolve) => {
+        // server.close(cb) may take seconds for keepalive; timeout resolve if hung
+        const hung = setTimeout(() => resolve(), 10000);
+        hung.unref?.();
+        try {
+          httpServer?.close(() => { clearTimeout(hung); resolve(); });
+        } catch {
+          clearTimeout(hung);
+          resolve();
+        }
+      });
+      httpServer = null;
+      console.log('[shutdown] HTTP server — no longer accepting new connections.');
+    }
+
+    // Step 2: close both worker pools first (stop polling for jobs)
+    try { await shutdownQueue(); } catch (e) { try { console.warn('[shutdown] shutdownQueue:', (e as Error).message); } catch {} }
+    try { await shutdownEmailQueue(); } catch (e) { try { console.warn('[shutdown] shutdownEmailQueue:', (e as Error).message); } catch {} }
+
+    // Step 3: close the shared singleton producer Redis (used outside queues,
+    // e.g. rate-limiter store)
+    try { await shutdownProducerRedis(); } catch (e) { try { console.warn('[shutdown] shutdownProducerRedis:', (e as Error).message); } catch {} }
+
+    console.log('[shutdown] clean exit code=0');
+    clearTimeout(forceTimer);
+    process.exit(0);
+  } catch (rootErr) {
+    console.error('[shutdown] fatal during drain — force-exit code=143:', rootErr instanceof Error ? rootErr.message : String(rootErr));
+    clearTimeout(forceTimer);
+    process.exit(143);
+  }
+}
+
+// Only attach production-env signal handlers once and NOT in Jest tests —
+// Jest installs its own signal handlers that conflict with user listeners.
+if (process.env.NODE_ENV !== 'test') {
+  process.once('SIGTERM', () => void performGracefulShutdown('SIGTERM'));
+  process.once('SIGINT', () => void performGracefulShutdown('SIGINT'));
+}
 
 process.on('unhandledRejection', (err) => {
   const msg = err instanceof Error ? err.message : String(err ?? '');
