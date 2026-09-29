@@ -47,7 +47,10 @@ export interface HandlerCtx {
 type Handler<P = unknown> = (payload: P, ctx: HandlerCtx) => Promise<void> | void;
 
 // -----------------------------------------------------------------------------
-// Redis connectivity: TWO SEPARATE clients (required by BullMQ v3).
+// Redis connectivity: TWO SEPARATE clients (required for BullMQ v4 and v5;
+// previously documented as "required by BullMQ v3" — same rule applies to
+// v4/v5 with stricter enforcement of maxRetriesPerRequest=null on workers).
+// Installed versions: bullmq@5.81.5, ioredis@5.11.1.
 //
 // 1. PRODUCER connection: short-lived commands only (job ADDs, ping checks).
 //    Keeps strict commandTimeout + bounded retries so HTTP requests don't hang.
@@ -56,13 +59,13 @@ type Handler<P = unknown> = (payload: P, ctx: HandlerCtx) => Promise<void> | voi
 // 2. WORKER connection: BullMQ Worker uses LONG BLOCKING BRPOP / BLPOP /
 //    BRPOPLPUSH commands that intentionally hold for 5-30+ seconds (BullMQ
 //    default blocking timeout is 30s). Worker connections MUST use:
-//      - maxRetriesPerRequest = null (BullMQ warning otherwise every poll)
+//      - maxRetriesPerRequest = null (BullMQ v5 prints warning otherwise)
 //      - NO commandTimeout (would interrupt blocking reads on every iteration)
 //      - enableReadyCheck true + a resilient retryStrategy
 //
 // Reusing the producer client for the worker (old code) causes:
 //   "Command timed out" spam every 2s when 2s commandTimeout hits on BRPOP
-//   "maxRetriesPerRequest is set to 1, this is not compatible..." warnings
+//   "maxRetriesPerRequest is set to N, this is not compatible..." warnings
 //
 // Database selection (/2 in REDIS_URL) preserved — createBullmq* factories
 // parse REDIS_URL exactly including its path portion.
