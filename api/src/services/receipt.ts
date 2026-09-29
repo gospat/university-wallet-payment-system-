@@ -4,68 +4,84 @@ import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding, BE
 import prisma from '../config/database';
 
 // -----------------------------------------------------------------------------
-// Puppeteer loader — runtime-safe optional load.  The default is for puppeteer
-// to be present in production dependencies (we add it there in package.json).
-// However as a defense-in-depth layer, we NEVER `import puppeteer from
-// 'puppeteer'` at module top-level statically.  Instead, we dynamically require
-// it lazily when render() is FIRST called, wrapped in try/catch.
+// Puppeteer loader — runtime-safe optional load, ASYNC dynamic import().
 //
-// Why not just a static import?
-//   1. If npm ci --omit=dev is ever run with puppeteer accidentally absent,
-//      a static import would throw MODULE_NOT_FOUND at require-time, which
-//      crashes the ENTIRE server bootstrap (even though receipt PDF is not
-//      needed for the payment-list / health / login routes).
-//   2. A lazy require + try/catch returns a descriptive 503 AppError with
-//      install instructions, without taking down unrelated routes.
+// The default is for puppeteer to be present in production dependencies (we
+// add it there in package.json).  However as a defense-in-depth layer, we
+// NEVER `import puppeteer from 'puppeteer'` statically.  Instead, we load it
+// lazily when render() is FIRST called, using an async dynamic import() so
+// receipt generation works on:
+//   • Puppeteer 24 (CommonJS — both static import and require() work)
+//   • Puppeteer 25+ (PURE ESM ONLY, `type: module` — the sync require() path
+//     throws ERR_REQUIRE_ESM; dynamic import() works in BOTH CommonJS output
+//     from our tsconfig AND ESM environments).
+//
+// Defense-in-depth: If puppeteer is ever genuinely absent even though listed
+// in prod deps (e.g. accidental stripped install), the receipt route returns
+// a descriptive HTTP 503 AppError with install instructions for that route
+// ONLY — the rest of the server (payment/auth/health/branding) keeps running.
 // -----------------------------------------------------------------------------
 type PuppeteerApi = { launch: (opts?: unknown) => Promise<any> };
 
-let _puppeteer: PuppeteerApi | null | undefined = undefined;
-let _puppeteerLoadErr: Error | null = null;
-function requirePuppeteer(): PuppeteerApi {
-  if (_puppeteer !== undefined) {
-    if (_puppeteer) return _puppeteer;
-    throw new AppError(
-      'Receipt PDF generation failed: Puppeteer is not installed. ' +
-      'Run `PUPPETEER_SKIP_DOWNLOAD=true npm install --no-save puppeteer@~24.43.1` and restart, ' +
-      'or use the HTML receipt download button on the receipt page as a fallback.',
-      503,
-    );
-  }
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const mod = require('puppeteer');
-    const resolved: PuppeteerApi = (mod && (mod as any).default) ? (mod as any).default : mod;
-    if (!resolved || typeof resolved.launch !== 'function') {
-      throw new Error('puppeteer module exports invalid shape');
-    }
-    _puppeteer = resolved;
-    _puppeteerLoadErr = null;
-    return resolved;
-  } catch (err) {
-    _puppeteer = null;
-    _puppeteerLoadErr = err instanceof Error ? err : new Error(String(err));
-    if (!(process.env.NODE_ENV === 'test')) {
-      console.warn(
-        '[receipt] Puppeteer not available; receipt PDF endpoints will return 503. ' +
-          'Install puppeteer@~24.43.1 to enable PDF receipts. Error:',
-        _puppeteerLoadErr.message,
+let _puppeteerPromise: Promise<PuppeteerApi> | null = null;
+let _puppeteerApi: PuppeteerApi | null = null;
+let _puppeteerLoadFailed: Error | null = null;
+
+async function loadPuppeteer(): Promise<PuppeteerApi> {
+  // Fast path: already resolved
+  if (_puppeteerApi) return _puppeteerApi;
+
+  // Re-use a pending dynamic import so multiple concurrent receipt requests
+  // don't each trigger separate import() evals on first boot.
+  if (_puppeteerPromise) return _puppeteerPromise;
+
+  _puppeteerPromise = (async (): Promise<PuppeteerApi> => {
+    try {
+      // Dynamic import works for both ESM-only puppeteer 25 AND CJS puppeteer.
+      const ns: any = await import('puppeteer');
+      // ESM default export or plain namespace (with named exports {launch})
+      const resolved: PuppeteerApi =
+        ns && ns.default && typeof ns.default.launch === 'function'
+          ? ns.default
+          : ns && typeof ns.launch === 'function'
+          ? ns
+          : (() => { throw new Error('puppeteer exports invalid shape, missing launch()'); })();
+      _puppeteerApi = resolved;
+      _puppeteerLoadFailed = null;
+      return resolved;
+    } catch (err) {
+      _puppeteerLoadFailed = err instanceof Error ? err : new Error(String(err));
+      if (!(process.env.NODE_ENV === 'test')) {
+        console.warn(
+          '[receipt] Puppeteer not available; receipt PDF endpoints will return 503. ' +
+            'Install puppeteer@~25.12.0 to enable PDF receipts. Error:',
+          _puppeteerLoadFailed.message,
+        );
+      }
+      throw new AppError(
+        'Receipt PDF generation failed: Puppeteer is not installed. ' +
+          'Run `PUPPETEER_SKIP_DOWNLOAD=true npm install puppeteer@~25.12.0` and restart, ' +
+          'or use the HTML receipt download button on the receipt page as a fallback.',
+        503,
       );
     }
-    // Throw the friendly 503 error on this first call too
-    return requirePuppeteer();
-  }
+  })();
+  return _puppeteerPromise;
 }
 
 /**
- * Exposed for tests and diagnostics (never leaks credential data).
+ * Diagnostics helper — async, resolves when the lazy import completes.
+ * Exposed for tests / health readouts; never leaks credential data.
  */
-export function isPuppeteerAvailable(): boolean {
-  if (_puppeteer === undefined) {
-    // Not yet attempted.  Try loading once.
-    try { requirePuppeteer(); } catch { /* handled below */ }
+export async function isPuppeteerAvailable(): Promise<boolean> {
+  if (_puppeteerApi) return true;
+  if (_puppeteerLoadFailed) return false;
+  try {
+    await loadPuppeteer();
+    return true;
+  } catch {
+    return false;
   }
-  return _puppeteer !== null;
 }
 
 type ReceiptData = {
@@ -192,11 +208,11 @@ function chargeSourceHtml(info: DirectBillInfo): string {
 }
 
 async function render(html: string) {
-  const puppeteer = requirePuppeteer();
+  const puppeteer = await loadPuppeteer();
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
   try {
     browser = await puppeteer.launch({
-      headless: 'new' as any,
+      headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     const page = await browser.newPage();
