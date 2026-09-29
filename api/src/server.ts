@@ -55,80 +55,197 @@ const envSchema = z.object({
 envSchema.parse(process.env);
 
 // -----------------------------------------------------------------------------
-// Production hardening guardrails — FAIL-ON-START if any prod-only checks fail.
-// These are NON-NEGOTIABLE on paymentapi.bellsuniversity.edu.ng
+// Production hardening guardrails
 // -----------------------------------------------------------------------------
-(function productionGuardrails() {
-  if (process.env.NODE_ENV !== 'production') return;
-  const problems: string[] = [];
+// Two separate classes of checks:
+//
+//   1. FATAL problems — things that MUST NOT run on production public URLs,
+//      because they either expose user data, or refuse all browser/app traffic,
+//      or mean secrets are trivially crackable.  ANY fatal → process.exit(2).
+//
+//   2. PAYMENT-MODE warnings — PAYSTACK_SECRET_KEY still has sk_test_ prefix
+//      and/or ALATPAY_MODE is still sandbox.  These are **intentionally**
+//      allowed on production infrastructure during the go-live payment-testing
+//      phase the Bells University ops team is currently running.  We:
+//        • PRINT A LOUDSPEAKER STARTUP BANNER so operators CANNOT miss it,
+//        • NEVER SILENTLY UPGRADE TEST/SANDBOX TO LIVE.
+//          Paystack remains in test because the key prefix is sk_test_,
+//          Alatpay remains in sandbox because ALATPAY_MODE is sandbox.
+//          Real-money transactions therefore CANNOT go through — the code
+//          in paystack.ts / utils/alatpay.ts always reads the env values
+//          directly; it never derives the mode from NODE_ENV.
+//
+// Provider mode check details (safety invariant for real-money safety):
+//   • Paystack: PaystackService.SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
+//     Paystack distinguishes test vs live SOLELY via the key prefix.
+//     sk_test_ → always hits api.paystack.co with test mode; no real debits.
+//     sk_live_ → real money. Guardrails warn, never modify the key/env.
+//   • Alatpay:  ALATPAY_MODE = 'prod' ? prod : sandbox
+//     getActiveAlatpaySecretKey() + getAlatpayBaseUrl() both read MODE env,
+//     never infer from NODE_ENV.  sandbox mode = https://apibox.alatpay.ng test.
+// -----------------------------------------------------------------------------
+export interface GuardrailResult {
+  fatalProblems: string[];
+  paymentModeWarnings: { provider: string; message: string }[];
+  paymentModes: {
+    paystack: 'live' | 'test' | 'unknown';
+    alatpay: 'prod' | 'sandbox' | 'unknown';
+  };
+}
 
-  const cors = (process.env.CORS_ORIGIN || '').toLowerCase();
-  const fbu = (process.env.FRONTEND_BASE_URL || '').toLowerCase();
-  const publicUrl = (process.env.PUBLIC_URL || '').toLowerCase();
-  const appBase = (process.env.APP_BASE_URL || '').toLowerCase();
+export function runProductionGuardrails(env: NodeJS.ProcessEnv = process.env): GuardrailResult {
+  const fatalProblems: string[] = [];
+  const paymentModeWarnings: GuardrailResult['paymentModeWarnings'] = [];
 
+  const cors = (env.CORS_ORIGIN || '').toLowerCase();
+  const fbu = (env.FRONTEND_BASE_URL || '').toLowerCase();
+  const publicUrl = (env.PUBLIC_URL || '').toLowerCase();
+  const appBase = (env.APP_BASE_URL || '').toLowerCase();
+
+  // --- CATEGORY A: FATAL (always hard exit on production NODE_ENV) ---
   const hasLocalhost = /localhost|127\.0\.0\.1|192\.168\.|10\./.test(cors + fbu + publicUrl + appBase);
   if (hasLocalhost) {
-    problems.push(
+    fatalProblems.push(
       'PROD_GUARD: NODE_ENV=production but a URL env contains localhost / private IP. ' +
         'CORS_ORIGIN / FRONTEND_BASE_URL / PUBLIC_URL / APP_BASE_URL must only contain production origins.',
     );
   }
   if (!cors && !fbu) {
-    problems.push('PROD_GUARD: NODE_ENV=production but CORS_ORIGIN + FRONTEND_BASE_URL are both empty. Browser frontend will get CORS errors.');
+    fatalProblems.push('PROD_GUARD: NODE_ENV=production but CORS_ORIGIN + FRONTEND_BASE_URL are both empty. Browser frontend will get CORS errors.');
   }
   if (
     !(publicUrl.includes('//payment.') || publicUrl.includes('//paymentapi.') || fbu.includes('//payment.') || cors.includes('payment.bellsuniversity'))
   ) {
-    problems.push(
+    fatalProblems.push(
       'PROD_GUARD: Expected PUBLIC_URL / FRONTEND_BASE_URL / CORS_ORIGIN to reference ' +
         'payment.bellsuniversity.edu.ng or paymentapi.bellsuniversity.edu.ng subdomains. ' +
         'Receipt QR / receipt verify URLs may resolve to wrong host.',
     );
   }
-  const jwtSec = process.env.JWT_SECRET || '';
+  const jwtSec = env.JWT_SECRET || '';
   if (
     jwtSec.length < 48 ||
     /change.?me|admin123|password|secret|^dev-|^test-|^sample-/i.test(jwtSec)
   ) {
-    problems.push(
+    fatalProblems.push(
       'PROD_GUARD: JWT_SECRET is too short (<48 chars) or looks weak / dev-flavored. ' +
         'Generate a strong 64-byte hex secret: `node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"` ' +
         'and set it in api/.env',
     );
   }
-  const enc = process.env.ENCRYPTION_KEY || '';
+  const enc = env.ENCRYPTION_KEY || '';
   if (/0{16,}|a{16,}|b{16,}|fffff{4,}/i.test(enc)) {
-    problems.push('PROD_GUARD: ENCRYPTION_KEY looks like a static dev placeholder, NOT a random 32-byte hex. Rotate it.');
+    fatalProblems.push('PROD_GUARD: ENCRYPTION_KEY looks like a static dev placeholder, NOT a random 32-byte hex. Rotate it.');
   }
-  if (!process.env.RESEND_API_KEY && !process.env.SMTP_HOST) {
-    problems.push(
+  if (!env.RESEND_API_KEY && !env.SMTP_HOST) {
+    fatalProblems.push(
       'PROD_GUARD: Neither RESEND_API_KEY nor SMTP_HOST are configured. ' +
         'Student welcome emails, password resets, and receipt emails will FAIL. ' +
         'Configure Resend (recommended) or SMTP credentials.',
     );
   }
-  if (!process.env.PAYSTACK_SECRET_KEY?.startsWith('sk_live_')) {
-    problems.push(
-      'PROD_GUARD: PAYSTACK_SECRET_KEY does NOT start with "sk_live_". ' +
-        'This is a TEST/DEVELOPMENT key. Real student payments will be rejected by Paystack in production.',
-    );
+
+  // --- CATEGORY B: PAYMENT-MODE WARNINGS (WARN ONLY. NEVER UPGRADE MODES.) ---
+  // Paystack: key prefix = 'sk_test_' → warn but allow startup during test phase.
+  const paystackKey = env.PAYSTACK_SECRET_KEY ?? '';
+  let paystackMode: GuardrailResult['paymentModes']['paystack'] = 'unknown';
+  if (paystackKey.startsWith('sk_live_')) {
+    paystackMode = 'live';
+  } else if (paystackKey.startsWith('sk_test_')) {
+    paystackMode = 'test';
+    paymentModeWarnings.push({
+      provider: 'PAYSTACK',
+      message:
+        'PAYSTACK_SECRET_KEY is prefixed sk_test_ so Paystack is in TEST/SANDBOX MODE. ' +
+        'No real naira charges can go through — Paystack gateway returns test-env transactions only. ' +
+        'To go live, replace PAYSTACK_SECRET_KEY with one starting sk_live_ in api/.env and restart.',
+    });
+  } else if (paystackKey) {
+    paymentModeWarnings.push({
+      provider: 'PAYSTACK',
+      message:
+        'PAYSTACK_SECRET_KEY does not start with sk_live_ OR sk_test_. Confirm validity in the Paystack dashboard Settings → API Keys page.',
+    });
   }
-  if (!process.env.ALATPAY_MODE || process.env.ALATPAY_MODE === 'sandbox') {
-    problems.push(
-      'PROD_GUARD: ALATPAY_MODE is not "prod" (is sandbox/empty). ALAT Pay / WEMA Bank transactions will go to test sandbox. ' +
-        'Set ALATPAY_MODE=prod and populate ALATPAY_PROD_SECRET_KEY + ALATPAY_PUBLIC_KEY + ALATPAY_BUSINESS_ID + ALATPAY_WEBHOOK_SECRET.',
+
+  // Alatpay: ALATPAY_MODE !== 'prod' → sandbox (default per zod schema too)
+  const alatMode = env.ALATPAY_MODE ?? 'sandbox';
+  let alatpayMode: GuardrailResult['paymentModes']['alatpay'] = 'unknown';
+  if (alatMode === 'prod') {
+    alatpayMode = 'prod';
+  } else {
+    alatpayMode = 'sandbox';
+    paymentModeWarnings.push({
+      provider: 'ALATPAY/WEMA',
+      message:
+        `ALATPAY_MODE is "${alatMode}" → SANDBOX/TEST MODE (ALATPAY PROD is not enabled). ` +
+        'All ALAT Pay / WEMA Bank transactions go to https://apibox.alatpay.ng sandbox only. ' +
+        'To go live, set ALATPAY_MODE=prod and populate ALATPAY_PROD_SECRET_KEY, ALATPAY_PUBLIC_KEY, ALATPAY_BUSINESS_ID, ALATPAY_WEBHOOK_SECRET in api/.env and restart.',
+    });
+  }
+
+  return {
+    fatalProblems,
+    paymentModeWarnings,
+    paymentModes: { paystack: paystackMode, alatpay: alatpayMode },
+  };
+}
+
+function printLargeBanner(lines: string[], style: 'fatal' | 'warn' = 'warn'): void {
+  const edge = style === 'fatal' ? '⚠️' : '🔔';
+  const width = 72;
+  const sep = edge.repeat(Math.max(4, Math.ceil(width / edge.length))).slice(0, width);
+  const stream: (...a: any[]) => void = style === 'fatal' ? console.error : console.warn;
+  stream('');
+  stream(sep);
+  for (const line of lines) {
+    const wrapped = String(line).length > width - 4 ? String(line).slice(0, width - 4) : String(line);
+    stream(`${edge} ${wrapped.padEnd(width - 4)} ${edge}`);
+  }
+  stream(sep);
+  stream('');
+}
+
+(function applyProductionGuardrails() {
+  if (process.env.NODE_ENV !== 'production') return;
+  const result = runProductionGuardrails();
+
+  // PAYMENT MODE WARNINGS FIRST (large banner) — WARN-ONLY, NEVER process.exit.
+  if (result.paymentModeWarnings.length > 0) {
+    const bannerLines: string[] = [
+      '  PAYMENT PROVIDERS — TEST / SANDBOX MODE ONLY — NO REAL-MONEY',
+      '  =============================================================',
+      '',
+    ];
+    for (const w of result.paymentModeWarnings) {
+      bannerLines.push(`  [${w.provider}] ${w.message.slice(0, 240)}`);
+      bannerLines.push('');
+    }
+    bannerLines.push('  This startup IS intentionally allowed for payment-testing on prod infra.');
+    bannerLines.push('  Ops team: swap env vars + restart once Bursary go-live is approved.');
+    printLargeBanner(bannerLines, 'warn');
+  } else {
+    // All providers live. Print OK banner for auditable confirmation.
+    printLargeBanner(
+      [
+        `  PAYSTACK mode = ${String(result.paymentModes.paystack).toUpperCase()}`,
+        `  ALATPAY  mode = ${String(result.paymentModes.alatpay).toUpperCase()}`,
+        '',
+        '  Production payment modes confirmed. Real-money transactions enabled.',
+      ],
+      'warn',
     );
   }
 
-  if (problems.length > 0) {
+  // FATAL PROBLEMS → HARD EXIT. Always, no exceptions.
+  if (result.fatalProblems.length > 0) {
     console.error('\n============================================================');
     console.error('  🛑  PAYMENT API REFUSED TO START — PRODUCTION MISCONFIGURATION');
     console.error('============================================================\n');
-    for (const [i, p] of problems.entries()) {
-      console.error(`  [${i + 1}/${problems.length}] ${p}\n`);
+    for (const [i, p] of result.fatalProblems.entries()) {
+      console.error(`  [${i + 1}/${result.fatalProblems.length}] ${p}\n`);
     }
-    console.error('  Fix the problems above, then restart PM2 / the server.');
+    console.error('  Fix the problems above, then restart systemd / the server.');
     console.error('  (If this is a DEVELOPMENT environment, export NODE_ENV=development)\n');
     process.exit(2);
   }
