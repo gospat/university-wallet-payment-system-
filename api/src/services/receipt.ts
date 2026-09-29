@@ -1,8 +1,72 @@
-import puppeteer from 'puppeteer';
 import QRCode from 'qrcode';
 import { AppError } from '../utils/AppError';
 import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding, BELLS_LOGO_DATA_URI } from '../utils/branding';
 import prisma from '../config/database';
+
+// -----------------------------------------------------------------------------
+// Puppeteer loader — runtime-safe optional load.  The default is for puppeteer
+// to be present in production dependencies (we add it there in package.json).
+// However as a defense-in-depth layer, we NEVER `import puppeteer from
+// 'puppeteer'` at module top-level statically.  Instead, we dynamically require
+// it lazily when render() is FIRST called, wrapped in try/catch.
+//
+// Why not just a static import?
+//   1. If npm ci --omit=dev is ever run with puppeteer accidentally absent,
+//      a static import would throw MODULE_NOT_FOUND at require-time, which
+//      crashes the ENTIRE server bootstrap (even though receipt PDF is not
+//      needed for the payment-list / health / login routes).
+//   2. A lazy require + try/catch returns a descriptive 503 AppError with
+//      install instructions, without taking down unrelated routes.
+// -----------------------------------------------------------------------------
+type PuppeteerApi = { launch: (opts?: unknown) => Promise<any> };
+
+let _puppeteer: PuppeteerApi | null | undefined = undefined;
+let _puppeteerLoadErr: Error | null = null;
+function requirePuppeteer(): PuppeteerApi {
+  if (_puppeteer !== undefined) {
+    if (_puppeteer) return _puppeteer;
+    throw new AppError(
+      'Receipt PDF generation failed: Puppeteer is not installed. ' +
+      'Run `PUPPETEER_SKIP_DOWNLOAD=true npm install --no-save puppeteer@~24.43.1` and restart, ' +
+      'or use the HTML receipt download button on the receipt page as a fallback.',
+      503,
+    );
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('puppeteer');
+    const resolved: PuppeteerApi = (mod && (mod as any).default) ? (mod as any).default : mod;
+    if (!resolved || typeof resolved.launch !== 'function') {
+      throw new Error('puppeteer module exports invalid shape');
+    }
+    _puppeteer = resolved;
+    _puppeteerLoadErr = null;
+    return resolved;
+  } catch (err) {
+    _puppeteer = null;
+    _puppeteerLoadErr = err instanceof Error ? err : new Error(String(err));
+    if (!(process.env.NODE_ENV === 'test')) {
+      console.warn(
+        '[receipt] Puppeteer not available; receipt PDF endpoints will return 503. ' +
+          'Install puppeteer@~24.43.1 to enable PDF receipts. Error:',
+        _puppeteerLoadErr.message,
+      );
+    }
+    // Throw the friendly 503 error on this first call too
+    return requirePuppeteer();
+  }
+}
+
+/**
+ * Exposed for tests and diagnostics (never leaks credential data).
+ */
+export function isPuppeteerAvailable(): boolean {
+  if (_puppeteer === undefined) {
+    // Not yet attempted.  Try loading once.
+    try { requirePuppeteer(); } catch { /* handled below */ }
+  }
+  return _puppeteer !== null;
+}
 
 type ReceiptData = {
   receiptNumber: string;
@@ -128,6 +192,7 @@ function chargeSourceHtml(info: DirectBillInfo): string {
 }
 
 async function render(html: string) {
+  const puppeteer = requirePuppeteer();
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
   try {
     browser = await puppeteer.launch({
@@ -147,6 +212,7 @@ async function render(html: string) {
     return Buffer.from(pdfBuffer);
   } catch (error) {
     if (browser) await browser.close().catch(() => {});
+    if (error instanceof AppError) throw error;
     console.error('Receipt PDF Error:', error);
     throw new AppError('Failed to generate receipt PDF', 500);
   }
