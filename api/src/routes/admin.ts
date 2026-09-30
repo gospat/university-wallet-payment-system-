@@ -215,8 +215,18 @@ router.use((req, res, next) => {
     (/^\/email-delivery-logs(\/|$)/.test(req.path));
   const isEmailTemplate = /^\/email-templates(\/|$)/.test(req.path);
   const isResendCredentials = /\/resend-credentials$/.test(req.path);
+  const isAuditLogsRead =
+    req.method === 'GET' && /^\/audit-logs(\/|$)/.test(req.path);
   const role = String((req as any).user?.role || '');
 
+  if (isAuditLogsRead) {
+    const requireRole = role === 'ADMIN'
+      ? requirePermission('AUDIT_LOGS_VIEW_FULL')
+      : role === 'BURSARY'
+      ? requirePermission('AUDIT_LOGS_VIEW_LIMITED')
+      : restrictTo('ADMIN');
+    return requireRole(req, res, next);
+  }
   if (isEmailDeliveryLogRead) {
     if (role === 'ADMIN' || role === 'BURSARY') return next();
     return res.status(403).json({ status: 'fail', message: 'Requires ADMIN or BURSARY role' });

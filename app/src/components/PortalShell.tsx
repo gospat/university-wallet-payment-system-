@@ -128,7 +128,7 @@ const hasPermission = (
 ): boolean => {
   if (role === 'ADMIN') return true;
   if (!requiresPermission) return true;
-  if (!userPermissions || userPermissions.length === 0) return true;
+  if (!userPermissions || userPermissions.length === 0) return false;
   return userPermissions.includes(requiresPermission);
 };
 
@@ -146,7 +146,11 @@ const buildStudentNav = (_counters?: Record<string, number>): NavGroup[] => [
   },
 ];
 
-const buildAdminNav = (role: Role, _counters?: Record<string, number>): NavGroup[] => {
+const buildAdminNav = (
+  role: Role,
+  _counters?: Record<string, number>,
+  userPermissions?: string[],
+): NavGroup[] => {
   const groups: NavGroup[] = [
     {
       title: 'DASHBOARD',
@@ -196,9 +200,9 @@ const buildAdminNav = (role: Role, _counters?: Record<string, number>): NavGroup
       items: [
         { to: role === 'BURSARY' ? '/bursary/receipts' : '/admin/receipts', icon: Receipt, label: 'All Receipts', sub: true },
         { to: role === 'BURSARY' ? '/bursary/receipts?verify=1' : '/admin/receipts?verify=1', icon: Receipt, label: 'Verify Receipt', sub: true },
-        ...(role === 'BURSARY'
+        ...(role === 'BURSARY' && userPermissions?.includes('AUDIT_LOGS_VIEW_LIMITED')
           ? [{
-              to: '/admin/audit-logs',
+              to: '/bursary/audit-logs',
               icon: Receipt,
               label: 'Audit Logs',
               sub: true,
@@ -369,7 +373,7 @@ const PortalShell: React.FC<PortalShellProps> = ({
 
   const navGroups = role === 'STUDENT'
     ? buildStudentNav(navCounters)
-    : buildAdminNav(role, navCounters);
+    : buildAdminNav(role, navCounters, userPermissions);
 
   const logoutItem: NavItem = {
     to: '#',

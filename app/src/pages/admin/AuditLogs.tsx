@@ -17,6 +17,7 @@ import i18n from '../../i18n/en';
 import Modal from '../../components/Modal';
 import { useLocation } from 'react-router-dom';
 import { navCounters, NavCounters } from '../../services/api';
+import type { Role } from '../../config/session';
 
 const fmtDateTime = (s?: string | null) =>
   s
@@ -125,12 +126,14 @@ const AdminAuditLogs: React.FC = () => {
     );
   }, [items, search]);
 
+  const effectiveRole: Role = user?.role === 'BURSARY' ? 'BURSARY' : 'ADMIN';
+
   return (
     <PortalShell
-      role="ADMIN"
+      role={effectiveRole}
       activePath={location.pathname}
-      brand={i18n.portals.admin.dashboardBrand}
-      userText={fullName || i18n.portals.admin.dashboardGreeting('')}
+      brand={effectiveRole === 'BURSARY' ? i18n.portals.bursary.dashboardBrand : i18n.portals.admin.dashboardBrand}
+      userText={fullName || (effectiveRole === 'BURSARY' ? i18n.portals.bursary.dashboardBrand : i18n.portals.admin.dashboardGreeting(''))}
       userEmail={user?.email ?? undefined}
       onLogout={logout}
       userPermissions={(user?.permissions as string[]) ?? []}

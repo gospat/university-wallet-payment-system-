@@ -439,6 +439,7 @@ const App: React.FC = () => {
 
             <Route path="/bursary/payments" element={<BursaryPaymentsWrapped />} />
             <Route path="/bursary/receipts" element={<BursaryReceiptsWrapped />} />
+            <Route path="/bursary/audit-logs" element={<AdminAuditLogs />} />
             <Route path="/bursary/direct-billing" element={<BursaryDirectBillingWrapped />} />
             <Route path="/bursary/direct-billing/:tab" element={<BursaryDirectBillingWrapped />} />
             <Route path="/bursary/reports/daily" element={
