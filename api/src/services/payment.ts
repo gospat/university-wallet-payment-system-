@@ -19,17 +19,17 @@
 //         7. Wallet credit backward-compat (wallet flow still works).
 // =============================================================================
 import { z } from 'zod';
-import { Prisma, TransactionType, TransactionStatus, Role, Invoice, PaymentGateway } from '@prisma/client';
+import { Prisma, TransactionType, TransactionStatus, Role, PaymentGateway } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
-import { PaystackService, computePaymentBreakdown } from './paystack';
-import { generatePaymentReference, generateReceiptReference, generateVerificationToken, kobo, readPaystackMetadata } from '../utils/paystack';
+import { computePaymentBreakdown } from './paystack';
+import { generatePaymentReference, generateVerificationToken, kobo, readPaystackMetadata } from '../utils/paystack';
 import { i18n } from '../i18n/en';
 import { dispatchEmail } from '../queues/emailQueue';
 import { AdminNotificationService } from './adminNotification';
 import { SystemSettingsService } from './systemSettings';
 import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerFactory';
-import { gatewayLabel, decimalOrNull } from './payment/types';
+import { gatewayLabel } from './payment/types';
 
 type ReqLike = any;
 
@@ -503,8 +503,9 @@ export class PaymentService {
 
       const amountBreakdown = latest.metadata?.amount ?? {};
       const baseAmount = money(Number(amountBreakdown.base ?? 0));
-      const serviceCharge = money(Number(amountBreakdown.serviceCharge ?? 0));
-      const gatewayFee = money(Number(amountBreakdown.gatewayFee ?? 0));
+
+      void Number(amountBreakdown.serviceCharge ?? 0);
+      void Number(amountBreakdown.gatewayFee ?? 0);
 
       // --- UNDERPAID / OVERPAID PATH (no ledger, no receipt) ---------------
       const txnSuccess = providerStatus === 'success' || providerStatus === 'completed' || providerStatus === 'paid' || verifyResult.status === TransactionStatus.SUCCESS;
@@ -635,7 +636,6 @@ export class PaymentService {
       });
 
       // 6. Update invoice
-      let invoiceUpdated: any = null;
       if (latest.invoice) {
         const invoiceId = latest.invoice.id;
         const before = {
@@ -649,7 +649,7 @@ export class PaymentService {
         if (balanceAfter === 0) newStatus = 'PAID';
         else if (newAmountPaid > 0 && balanceAfter > 0) newStatus = 'PARTIALLY_PAID';
         else newStatus = before.status;
-        invoiceUpdated = await tx.invoice.update({
+        await tx.invoice.update({
           where: { id: invoiceId },
           data: { amountPaid: newAmountPaid, status: newStatus },
         });

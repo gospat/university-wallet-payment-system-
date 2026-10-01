@@ -14,7 +14,7 @@ const signupSchema = z.object({
   password: z.string().min(8).max(128).trim(),
   firstName: z.string().min(1).max(80).trim(),
   lastName: z.string().min(1).max(80).trim(),
-  matricNumber: z.string().trim().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).").optional(),
+  matricNumber: z.string().trim().min(3, 'Matric number must be at least 3 characters').max(50, 'Matric number must be 50 characters or fewer').regex(/^[A-Za-z0-9][A-Za-z0-9/\-. _]*$/, "Matric number must start with a letter or digit and contain only letters, digits, slash ( / ), hyphen ( - ), dot ( . ), underscore ( _ ), or space.").optional(),
 });
 
 const loginSchema = z.object({

@@ -93,8 +93,25 @@ router.get('/webhooks/events', requirePermission('VIEW_PAYMENTS'), validateQuery
       { lastError: { contains: query.q } },
     ];
   }
-  const sortKey = (query.sort ?? 'createdAt') as 'createdAt' | 'processedAt' | 'eventType';
-  const order = (query.order ?? 'desc') as 'asc' | 'desc';
+  type WhAllowedSort = 'createdAt' | 'processedAt' | 'eventType';
+  type WhAllowedOrder = 'asc' | 'desc';
+  const WH_ALLOWED_SORTS: ReadonlySet<WhAllowedSort> = new Set(['createdAt', 'processedAt', 'eventType']);
+  const WH_ALLOWED_ORDERS: ReadonlySet<WhAllowedOrder> = new Set(['asc', 'desc']);
+  const WH_SORT_TO_FIELD: Record<WhAllowedSort, 'createdAt' | 'processedAt' | 'eventType'> = {
+    createdAt: 'createdAt',
+    processedAt: 'processedAt',
+    eventType: 'eventType',
+  };
+  const rawSortWh = query.sort as WhAllowedSort | string | undefined;
+  const rawOrderWh = query.order as WhAllowedOrder | string | undefined;
+  const sortWh: WhAllowedSort = WH_ALLOWED_SORTS.has(rawSortWh as WhAllowedSort)
+    ? (rawSortWh as WhAllowedSort)
+    : 'createdAt';
+  const orderWh: WhAllowedOrder = WH_ALLOWED_ORDERS.has(rawOrderWh as WhAllowedOrder)
+    ? (rawOrderWh as WhAllowedOrder)
+    : 'desc';
+  const sortKey = WH_SORT_TO_FIELD[sortWh];
+  const order = orderWh;
   const [rows, total] = await Promise.all([
     prisma.webhookEvent.findMany({
       where,
@@ -600,11 +617,24 @@ router.get(
       ];
     }
 
-    const orderBy: any = {};
-    const allowedSorts: Record<string, string> = {
-      createdAt: 'createdAt', amount: 'amount', status: 'status',
+    type BurTxnAllowedSort = 'createdAt' | 'amount' | 'status';
+    type BurTxnAllowedOrder = 'asc' | 'desc';
+    const BUR_TXN_ALLOWED_SORTS: ReadonlySet<BurTxnAllowedSort> = new Set(['createdAt', 'amount', 'status']);
+    const BUR_TXN_ALLOWED_ORDERS: ReadonlySet<BurTxnAllowedOrder> = new Set(['asc', 'desc']);
+    const BUR_TXN_SORT_TO_FIELD: Record<BurTxnAllowedSort, 'createdAt' | 'amount' | 'status'> = {
+      createdAt: 'createdAt',
+      amount: 'amount',
+      status: 'status',
     };
-    orderBy[allowedSorts[q.sort as string] || 'createdAt'] = q.order || 'desc';
+    const rawSortBurTxn = q.sort as BurTxnAllowedSort | string | undefined;
+    const rawOrderBurTxn = q.order as BurTxnAllowedOrder | string | undefined;
+    const sortBurTxn: BurTxnAllowedSort = BUR_TXN_ALLOWED_SORTS.has(rawSortBurTxn as BurTxnAllowedSort)
+      ? (rawSortBurTxn as BurTxnAllowedSort)
+      : 'createdAt';
+    const orderBurTxn: BurTxnAllowedOrder = BUR_TXN_ALLOWED_ORDERS.has(rawOrderBurTxn as BurTxnAllowedOrder)
+      ? (rawOrderBurTxn as BurTxnAllowedOrder)
+      : 'desc';
+    const orderBy = { [BUR_TXN_SORT_TO_FIELD[sortBurTxn]]: orderBurTxn };
 
     const [items, total] = await Promise.all([
       prisma.transaction.findMany({
@@ -689,11 +719,24 @@ router.get(
       ];
     }
 
-    const orderBy: any = {};
-    const allowedSorts: Record<string, string> = {
-      paidAt: 'paidAt', paidAmount: 'paidAmount', receiptNumber: 'receiptNumber',
+    type BurRcpAllowedSort = 'paidAt' | 'paidAmount' | 'receiptNumber';
+    type BurRcpAllowedOrder = 'asc' | 'desc';
+    const BUR_RCP_ALLOWED_SORTS: ReadonlySet<BurRcpAllowedSort> = new Set(['paidAt', 'paidAmount', 'receiptNumber']);
+    const BUR_RCP_ALLOWED_ORDERS: ReadonlySet<BurRcpAllowedOrder> = new Set(['asc', 'desc']);
+    const BUR_RCP_SORT_TO_FIELD: Record<BurRcpAllowedSort, 'paidAt' | 'paidAmount' | 'receiptNumber'> = {
+      paidAt: 'paidAt',
+      paidAmount: 'paidAmount',
+      receiptNumber: 'receiptNumber',
     };
-    orderBy[allowedSorts[q.sort as string] || 'paidAt'] = q.order || 'desc';
+    const rawSortBurRcp = q.sort as BurRcpAllowedSort | string | undefined;
+    const rawOrderBurRcp = q.order as BurRcpAllowedOrder | string | undefined;
+    const sortBurRcp: BurRcpAllowedSort = BUR_RCP_ALLOWED_SORTS.has(rawSortBurRcp as BurRcpAllowedSort)
+      ? (rawSortBurRcp as BurRcpAllowedSort)
+      : 'paidAt';
+    const orderBurRcp: BurRcpAllowedOrder = BUR_RCP_ALLOWED_ORDERS.has(rawOrderBurRcp as BurRcpAllowedOrder)
+      ? (rawOrderBurRcp as BurRcpAllowedOrder)
+      : 'desc';
+    const orderBy = { [BUR_RCP_SORT_TO_FIELD[sortBurRcp]]: orderBurRcp };
 
     const [items, total] = await Promise.all([
       prisma.receipt.findMany({

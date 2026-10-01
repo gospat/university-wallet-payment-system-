@@ -509,7 +509,7 @@ const CreateUserSchema = z
     firstName: z.string().min(1).max(80),
     middleName: z.string().max(80).optional().nullable(),
     lastName: z.string().min(1).max(80),
-    matricNumber: z.string().trim().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).").optional().nullable(),
+    matricNumber: z.string().trim().min(3, 'Matric number must be at least 3 characters').max(50, 'Matric number must be 50 characters or fewer').regex(/^[A-Za-z0-9][A-Za-z0-9/\-. _]*$/, "Matric number must start with a letter or digit and contain only letters, digits, slash ( / ), hyphen ( - ), dot ( . ), underscore ( _ ), or space.").optional().nullable(),
     role: z.enum([Role.ADMIN, Role.BURSARY, Role.STUDENT]).default(Role.STUDENT),
     accountStatus: z.enum([AccountStatus.ACTIVE, AccountStatus.SUSPENDED]).default(AccountStatus.ACTIVE),
     phoneNumber: z.string().max(30).optional().nullable(),
@@ -557,7 +557,7 @@ const UpdateUserSchema = z
     firstName: z.string().min(1).max(80).optional(),
     middleName: z.string().max(80).optional().nullable(),
     lastName: z.string().min(1).max(80).optional(),
-    matricNumber: z.string().trim().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).").optional().nullable(),
+    matricNumber: z.string().trim().min(3, 'Matric number must be at least 3 characters').max(50, 'Matric number must be 50 characters or fewer').regex(/^[A-Za-z0-9][A-Za-z0-9/\-. _]*$/, "Matric number must start with a letter or digit and contain only letters, digits, slash ( / ), hyphen ( - ), dot ( . ), underscore ( _ ), or space.").optional().nullable(),
     role: z.enum([Role.ADMIN, Role.BURSARY, Role.STUDENT]).optional(),
     accountStatus: z.enum([AccountStatus.ACTIVE, AccountStatus.SUSPENDED, AccountStatus.GRADUATED, AccountStatus.WITHDRAWN]).optional(),
     phoneNumber: z.string().max(30).optional().nullable(),
@@ -1129,11 +1129,24 @@ router.get(
       ];
     }
 
-    const orderBy: any = {};
-    const allowedSorts: Record<string, string> = {
-      createdAt: 'createdAt', amount: 'amount', status: 'status',
+    type AdminTxnAllowedSort = 'createdAt' | 'amount' | 'status';
+    type AdminTxnAllowedOrder = 'asc' | 'desc';
+    const ADMIN_TXN_ALLOWED_SORTS: ReadonlySet<AdminTxnAllowedSort> = new Set(['createdAt', 'amount', 'status']);
+    const ADMIN_TXN_ALLOWED_ORDERS: ReadonlySet<AdminTxnAllowedOrder> = new Set(['asc', 'desc']);
+    const ADMIN_TXN_SORT_TO_FIELD: Record<AdminTxnAllowedSort, 'createdAt' | 'amount' | 'status'> = {
+      createdAt: 'createdAt',
+      amount: 'amount',
+      status: 'status',
     };
-    orderBy[allowedSorts[q.sort as string] || 'createdAt'] = q.order || 'desc';
+    const rawSortTxn = q.sort as AdminTxnAllowedSort | string | undefined;
+    const rawOrderTxn = q.order as AdminTxnAllowedOrder | string | undefined;
+    const sortTxn: AdminTxnAllowedSort = ADMIN_TXN_ALLOWED_SORTS.has(rawSortTxn as AdminTxnAllowedSort)
+      ? (rawSortTxn as AdminTxnAllowedSort)
+      : 'createdAt';
+    const orderTxn: AdminTxnAllowedOrder = ADMIN_TXN_ALLOWED_ORDERS.has(rawOrderTxn as AdminTxnAllowedOrder)
+      ? (rawOrderTxn as AdminTxnAllowedOrder)
+      : 'desc';
+    const orderBy = { [ADMIN_TXN_SORT_TO_FIELD[sortTxn]]: orderTxn };
 
     const [items, total] = await Promise.all([
       prisma.transaction.findMany({
@@ -1218,11 +1231,24 @@ router.get(
       ];
     }
 
-    const orderBy: any = {};
-    const allowedSorts: Record<string, string> = {
-      paidAt: 'paidAt', paidAmount: 'paidAmount', receiptNumber: 'receiptNumber',
+    type AdminRcpAllowedSort = 'paidAt' | 'paidAmount' | 'receiptNumber';
+    type AdminRcpAllowedOrder = 'asc' | 'desc';
+    const ADMIN_RCP_ALLOWED_SORTS: ReadonlySet<AdminRcpAllowedSort> = new Set(['paidAt', 'paidAmount', 'receiptNumber']);
+    const ADMIN_RCP_ALLOWED_ORDERS: ReadonlySet<AdminRcpAllowedOrder> = new Set(['asc', 'desc']);
+    const ADMIN_RCP_SORT_TO_FIELD: Record<AdminRcpAllowedSort, 'paidAt' | 'paidAmount' | 'receiptNumber'> = {
+      paidAt: 'paidAt',
+      paidAmount: 'paidAmount',
+      receiptNumber: 'receiptNumber',
     };
-    orderBy[allowedSorts[q.sort as string] || 'paidAt'] = q.order || 'desc';
+    const rawSortRcp = q.sort as AdminRcpAllowedSort | string | undefined;
+    const rawOrderRcp = q.order as AdminRcpAllowedOrder | string | undefined;
+    const sortRcp: AdminRcpAllowedSort = ADMIN_RCP_ALLOWED_SORTS.has(rawSortRcp as AdminRcpAllowedSort)
+      ? (rawSortRcp as AdminRcpAllowedSort)
+      : 'paidAt';
+    const orderRcp: AdminRcpAllowedOrder = ADMIN_RCP_ALLOWED_ORDERS.has(rawOrderRcp as AdminRcpAllowedOrder)
+      ? (rawOrderRcp as AdminRcpAllowedOrder)
+      : 'desc';
+    const orderBy = { [ADMIN_RCP_SORT_TO_FIELD[sortRcp]]: orderRcp };
 
     const [items, total] = await Promise.all([
       prisma.receipt.findMany({
