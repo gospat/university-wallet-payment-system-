@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { Prisma, TransactionStatus, TransactionType, PaymentGateway } from '@prisma/client';
+import { Prisma, TransactionStatus, TransactionType, PaymentGateway, Role } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { generatePaymentReference, generateReceiptReference, generateVerificationToken, kobo } from '../utils/paystack';
@@ -673,7 +673,36 @@ export class ReconciliationService {
     userId: number;
     ipAddress?: string | null;
     userAgent?: string | null;
+    callerRole?: string;
+    proofOfPaymentReference?: string;
+    confirmedAmount?: number;
+    approvalReason?: string;
   }): Promise<{ created: boolean; transactionId: number | null; receiptId: number | null; auditId: number | null }> {
+    // TASK H10 Gate 1: ADMIN-only (not BURSARY)
+    if (params.callerRole !== 'ADMIN') {
+      throw new AppError('ADMIN role is required to forge internal payment records. Bursary must escalate to ADMIN for manual approval.', 403);
+    }
+
+    // TASK H10 Gate 2: proof of payment reference + confirmed numeric amount
+    const proofRef = String(params.proofOfPaymentReference ?? '').trim();
+    if (!proofRef) {
+      throw new AppError('proofOfPaymentReference is required for manual internal payment (teller/deposit slip/bank reference).', 400);
+    }
+    const confirmedAmountRaw = Number(params.confirmedAmount ?? NaN);
+    if (!Number.isFinite(confirmedAmountRaw) || confirmedAmountRaw <= 0) {
+      throw new AppError('confirmedAmount is required for manual internal payment (numeric positive amount verified against proof document).', 400);
+    }
+
+    // TASK H10: Build internal manual approval audit-trail metadata
+    const nowIso = new Date().toISOString();
+    const approvalMeta = {
+      approverId: params.userId,
+      approverRole: 'ADMIN',
+      timestamp: nowIso,
+      reason: String(params.approvalReason ?? '').trim() || 'ADMIN reconciliation MISSING_INTERNAL manual approval',
+      proofOfPaymentReference: proofRef,
+      confirmedAmount: Number(Number(confirmedAmountRaw).toFixed(2)),
+    };
     const gw: PaymentGateway = params.gatewayData?.gateway
       ?? (params.paystackData ? PaymentGateway.PAYSTACK : PaymentGateway.ALATPAY);
     const psData = params.paystackData ?? (gw === PaymentGateway.PAYSTACK ? (params.gatewayData as any) : undefined);
@@ -746,6 +775,7 @@ export class ReconciliationService {
         gateway: gw,
         originalGatewayRef: gwRef,
       },
+      internalManualApproval: approvalMeta,
       ...rawMetadata,
     } as any;
 
@@ -781,33 +811,84 @@ export class ReconciliationService {
     } else if (gw === PaymentGateway.ALATPAY) {
       txData.alatpayReference = gwRef;
     }
+    // TASK H10: Attach proof-of-payment ref + confirmed amount on tx row
+    (txData as any).proofOfPaymentReference = proofRef;
+    if (txData.expectedAmount == null) txData.expectedAmount = Number(Number(confirmedAmountRaw).toFixed(2)) as any;
+    if (txData.amount == null) txData.amount = Number(Number(confirmedAmountRaw).toFixed(2)) as any;
 
     const createdTx = await prisma.transaction.create({ data: txData });
 
     let receiptId: number | null = null;
+    let receiptCounterValue: number | null = null;
+    let receiptNumberUsed: string | null = null;
     try {
-      const receiptCounter = await (prisma.receipt.aggregate({ _max: { id: true } }) as Promise<{
-        _max: { id: number | null };
-      }>);
-      const nextId = (receiptCounter._max.id ?? 0) + 1;
-      const receiptNumber = generateReceiptReference(nextId);
-      const verificationToken = generateVerificationToken();
-      const qrUrl = `${process.env.APP_BASE_URL ?? 'http://localhost:3001'}/public/verify-receipt/${verificationToken}`;
-      const receipt = await prisma.receipt.create({
-        data: {
-          receiptNumber,
-          verificationToken,
-          transaction: { connect: { id: createdTx.id } },
-          student: { connect: { id: studentUserId } },
-          paidAmount: amountNaira,
-          paystackReference: gw === PaymentGateway.PAYSTACK ? gwRef : null,
-          paymentChannel: channel,
-          paidAt,
-          qrCodeData: qrUrl,
-        },
-      });
-      receiptId = receipt.id;
-    } catch (_) {
+      // TASK B3: atomic Counter table instead of MAX(id)+1 race
+      await prisma.$transaction(async (tx) => {
+        const counterRow = await (tx as any).counter.upsert({
+          where: { id: 'receipt_number' },
+          update: { value: { increment: 1 } },
+          create: { id: 'receipt_number', value: 2 },
+          select: { value: true },
+        });
+        receiptCounterValue = Number(counterRow.value ?? 1);
+        const academicYearShort = String(new Date().getFullYear()).slice(2);
+        const receiptNumber = `COUNTER-${receiptCounterValue}-${academicYearShort}`;
+        receiptNumberUsed = receiptNumber;
+
+        const verificationToken = generateVerificationToken();
+        const qrUrl = `${process.env.APP_BASE_URL ?? 'http://localhost:3001'}/public/verify-receipt/${verificationToken}`;
+        // TASK H12: fee columns structural invariant (base=amountNaira, other fees 0 for manual recon entries)
+        const base = Number(Number(confirmedAmountRaw ?? amountNaira).toFixed(2));
+        const convenienceFee = 0;
+        const serviceChargeRow = 0;
+        const gatewayFeeRow = 0;
+        const totalAmount = Number((base + convenienceFee + serviceChargeRow + gatewayFeeRow).toFixed(2));
+        const receipt = await (tx as any).receipt.create({
+          data: {
+            receiptNumber,
+            verificationToken,
+            transaction: { connect: { id: createdTx.id } },
+            student: { connect: { id: studentUserId } },
+            paidAmount: base,
+            convenienceFee,
+            serviceCharge: serviceChargeRow,
+            gatewayFee: gatewayFeeRow,
+            totalAmount,
+            paystackReference: gw === PaymentGateway.PAYSTACK ? gwRef : null,
+            paymentChannel: channel,
+            paidAt,
+            qrCodeData: qrUrl,
+          },
+        });
+        receiptId = receipt.id;
+
+        // TASK H10 Gate 3: INTERNAL_PAYMENT_APPROVED audit log entry (entityId=Transaction.id)
+        await tx.auditLog.create({
+          data: {
+            action: 'INTERNAL_PAYMENT_APPROVED',
+            entityType: 'TRANSACTION',
+            entityId: String(createdTx.id),
+            userId: params.userId,
+            ipAddress: params.ipAddress ? String(params.ipAddress).slice(0, 64) : null,
+            userAgent: params.userAgent ? String(params.userAgent).slice(0, 512) : null,
+            oldValue: JSON_DB_NULL,
+            newValue: {
+              transactionId: createdTx.id,
+              receiptId: receipt.id,
+              receiptNumber,
+              receiptCounterValue,
+              gateway: gw,
+              gatewayReference: gwRef,
+              amount: totalAmount,
+              proofOfPaymentReference: proofRef,
+              confirmedAmountRaw,
+              approvalMeta,
+            } as any,
+          },
+        });
+      }, { timeout: 15000 });
+    } catch (rxErr) {
+      console.warn('[recon:createInternalFromMissing] inner tx failed:', (rxErr as Error)?.message?.slice(0, 200));
       receiptId = null;
     }
 
@@ -823,9 +904,13 @@ export class ReconciliationService {
         newValue: {
           transactionId: createdTx.id,
           receiptId,
+          receiptCounterValue,
+          receiptNumber: receiptNumberUsed,
           gateway: gw,
           gatewayReference: gwRef,
           amount: amountNaira,
+          proofOfPaymentReference: proofRef,
+          approverRole: 'ADMIN',
         } as any,
       },
     });

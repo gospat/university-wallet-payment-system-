@@ -129,6 +129,13 @@ async function main() {
   const plan = wipeOrder(opts);
   console.log(`[clean-slate] NODE_ENV=${env}  DB host=${dbHost}  mode=${opts.yes ? 'APPLY' : 'PREVIEW'}  students=${opts.keepStudents ? 'KEPT' : 'WIPED (keep via --keep-students)'}`);
 
+  const envStr = String(process.env.NODE_ENV ?? '').toLowerCase();
+  const dangerousEnv = /prod|production|staging/.test(envStr);
+  if (opts.yes && dangerousEnv && process.env.FORCE_CLEAN_SLATE !== '1') {
+    console.error('[clean-slate] ❌  ABORT — destructive wipe blocked because NODE_ENV="' + String(process.env.NODE_ENV) + '" (includes prod/production/staging). Set FORCE_CLEAN_SLATE=1 to explicitly enable destructive operations in this environment.');
+    process.exit(1);
+  }
+
   if (opts.yes && env === 'production' && !opts.allowProd) {
     console.error('[clean-slate] ❌  ABORT — NODE_ENV=production. Re-run with --i-accept-production-wipe alongside --yes if you truly want to wipe production transactional history.');
     process.exit(2);

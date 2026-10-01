@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import ForcePasswordChangeGate from './components/ForcePasswordChangeGate';
@@ -9,17 +9,10 @@ import BursaryLogin from './pages/auth/BursaryLogin';
 import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import StudentDashboard from './pages/student/Dashboard';
-import AdminDashboard from './pages/admin/Dashboard';
-import AdminRefunds from './pages/admin/Refunds';
-import AdminAuditLogs from './pages/admin/AuditLogs';
-import AdminStudents from './pages/admin/Students';
-import BursaryDashboard from './pages/bursary/Dashboard';
-import BursaryRefunds from './pages/bursary/Refunds';
 import PrivateRoute from './components/PrivateRoute';
 import PortalShell from './components/PortalShell';
-import { FileQuestion, Home, ShieldAlert } from 'lucide-react';
+import { FileQuestion, Home, ShieldAlert, Loader2 } from 'lucide-react';
 import { StudentFeesPage, InvoiceDetailPage } from './pages/student/Fees';
-import { AdminFeesWrapped, BursaryFeesWrapped } from './pages/admin/Fees';
 import PublicVerifyReceiptPage from './pages/public/PublicVerifyReceipt';
 import StudentProfilePage from './pages/student/Profile';
 import StudentCheckoutPage from './pages/student/Checkout';
@@ -28,20 +21,39 @@ import StudentPaymentConfirmation from './pages/student/PaymentConfirmation';
 import { useBranding } from './context/BrandingContext';
 import { i18n } from './i18n/en';
 import { navCounters, NavCounters } from './services/api';
-import FacultiesPage from './pages/admin/academic/Faculties';
-import DepartmentsPage from './pages/admin/academic/Departments';
-import ProgrammesPage from './pages/admin/academic/Programmes';
-import UsersPage from './pages/admin/Users';
-import RolesPage from './pages/admin/Roles';
-import PermissionsPage from './pages/admin/Permissions';
-import SystemSettingsPage from './pages/admin/SystemSettings';
-import PaymentConfigPage from './pages/admin/PaymentConfig';
-import AdminPaymentsPage from './pages/admin/Payments';
-import AdminReceiptsPage from './pages/admin/Receipts';
-import BursaryPaymentsPage from './pages/bursary/Payments';
-import BursaryReceiptsPage from './pages/bursary/Receipts';
 import StudentMyReceiptsPage from './pages/student/MyReceipts';
-import { AdminDirectBillingWrapped, BursaryDirectBillingWrapped } from './pages/bursary/DirectBilling';
+
+const AdminDashboard = React.lazy(() => import('./pages/admin/Dashboard'));
+const AdminRefunds = React.lazy(() => import('./pages/admin/Refunds'));
+const AdminAuditLogs = React.lazy(() => import('./pages/admin/AuditLogs'));
+const AdminStudents = React.lazy(() => import('./pages/admin/Students'));
+const BursaryDashboard = React.lazy(() => import('./pages/bursary/Dashboard'));
+const BursaryRefunds = React.lazy(() => import('./pages/bursary/Refunds'));
+const FacultiesPage = React.lazy(() => import('./pages/admin/academic/Faculties'));
+const DepartmentsPage = React.lazy(() => import('./pages/admin/academic/Departments'));
+const ProgrammesPage = React.lazy(() => import('./pages/admin/academic/Programmes'));
+const UsersPage = React.lazy(() => import('./pages/admin/Users'));
+const RolesPage = React.lazy(() => import('./pages/admin/Roles'));
+const PermissionsPage = React.lazy(() => import('./pages/admin/Permissions'));
+const SystemSettingsPage = React.lazy(() => import('./pages/admin/SystemSettings'));
+const PaymentConfigPage = React.lazy(() => import('./pages/admin/PaymentConfig'));
+const AdminPaymentsPage = React.lazy(() => import('./pages/admin/Payments'));
+const AdminReceiptsPage = React.lazy(() => import('./pages/admin/Receipts'));
+const BursaryPaymentsPage = React.lazy(() => import('./pages/bursary/Payments'));
+const BursaryReceiptsPage = React.lazy(() => import('./pages/bursary/Receipts'));
+const AdminFeesWrapped = React.lazy(() => import('./pages/admin/Fees').then(m => ({ default: m.AdminFeesWrapped })));
+const BursaryFeesWrapped = React.lazy(() => import('./pages/admin/Fees').then(m => ({ default: m.BursaryFeesWrapped })));
+const AdminDirectBillingWrapped = React.lazy(() => import('./pages/bursary/DirectBilling').then(m => ({ default: m.AdminDirectBillingWrapped })));
+const BursaryDirectBillingWrapped = React.lazy(() => import('./pages/bursary/DirectBilling').then(m => ({ default: m.BursaryDirectBillingWrapped })));
+
+const PageLoader: React.FC = () => (
+  <div className="min-h-[60vh] flex items-center justify-center">
+    <div className="inline-flex items-center gap-3 text-sm text-gray-500 bg-white rounded-xl px-5 py-3 border border-gray-200 shadow-sm">
+      <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+      <span className="font-medium">Loading page…</span>
+    </div>
+  </div>
+);
 
 const UnauthorizedPage: React.FC = () => {
   const location = useLocation();
@@ -386,24 +398,24 @@ const App: React.FC = () => {
           </Route>
 
           <Route element={<PrivateRoute roles={['ADMIN']} />}>
-            <Route path="/admin/dashboard" element={<AdminDashboard />} />
-            <Route path="/admin/students" element={<AdminStudentsWrapped />} />
-            <Route path="/admin/fees" element={<AdminFeesWrapped />} />
-            <Route path="/admin/fees/:tab" element={<AdminFeesWrapped />} />
-            <Route path="/admin/refunds" element={<AdminRefunds />} />
-            <Route path="/admin/audit-logs" element={<AdminAuditLogs />} />
-            <Route path="/admin/users" element={<UsersPage />} />
-            <Route path="/admin/roles" element={<RolesPage />} />
-            <Route path="/admin/permissions" element={<PermissionsPage />} />
-            <Route path="/admin/settings" element={<SystemSettingsPage />} />
-            <Route path="/admin/payment-config" element={<PaymentConfigPage />} />
+            <Route path="/admin/dashboard" element={<Suspense fallback={<PageLoader />}><AdminDashboard /></Suspense>} />
+            <Route path="/admin/students" element={<Suspense fallback={<PageLoader />}><AdminStudentsWrapped /></Suspense>} />
+            <Route path="/admin/fees" element={<Suspense fallback={<PageLoader />}><AdminFeesWrapped /></Suspense>} />
+            <Route path="/admin/fees/:tab" element={<Suspense fallback={<PageLoader />}><AdminFeesWrapped /></Suspense>} />
+            <Route path="/admin/refunds" element={<Suspense fallback={<PageLoader />}><AdminRefunds /></Suspense>} />
+            <Route path="/admin/audit-logs" element={<Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense>} />
+            <Route path="/admin/users" element={<Suspense fallback={<PageLoader />}><UsersPage /></Suspense>} />
+            <Route path="/admin/roles" element={<Suspense fallback={<PageLoader />}><RolesPage /></Suspense>} />
+            <Route path="/admin/permissions" element={<Suspense fallback={<PageLoader />}><PermissionsPage /></Suspense>} />
+            <Route path="/admin/settings" element={<Suspense fallback={<PageLoader />}><SystemSettingsPage /></Suspense>} />
+            <Route path="/admin/payment-config" element={<Suspense fallback={<PageLoader />}><PaymentConfigPage /></Suspense>} />
 
-            <Route path="/admin/academic/faculties" element={<FacultiesPage />} />
-            <Route path="/admin/academic/departments" element={<DepartmentsPage />} />
-            <Route path="/admin/academic/programmes" element={<ProgrammesPage />} />
+            <Route path="/admin/academic/faculties" element={<Suspense fallback={<PageLoader />}><FacultiesPage /></Suspense>} />
+            <Route path="/admin/academic/departments" element={<Suspense fallback={<PageLoader />}><DepartmentsPage /></Suspense>} />
+            <Route path="/admin/academic/programmes" element={<Suspense fallback={<PageLoader />}><ProgrammesPage /></Suspense>} />
 
-            <Route path="/admin/payments" element={<AdminPaymentsWrapped />} />
-            <Route path="/admin/receipts" element={<AdminReceiptsWrapped />} />
+            <Route path="/admin/payments" element={<Suspense fallback={<PageLoader />}><AdminPaymentsWrapped /></Suspense>} />
+            <Route path="/admin/receipts" element={<Suspense fallback={<PageLoader />}><AdminReceiptsWrapped /></Suspense>} />
             <Route path="/admin/reports/daily" element={
               <PlaceholderPage role="ADMIN" activePath="/admin/reports/daily" title="Daily Reports" subtitle="Daily transaction summaries" />
             } />
@@ -426,22 +438,22 @@ const App: React.FC = () => {
               <PlaceholderPage role="ADMIN" activePath="/admin/reports/student" title="Student Reports" subtitle="Per-student reporting" />
             } />
 
-            <Route path="/admin/direct-billing" element={<AdminDirectBillingWrapped />} />
-            <Route path="/admin/direct-billing/:tab" element={<AdminDirectBillingWrapped />} />
+            <Route path="/admin/direct-billing" element={<Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense>} />
+            <Route path="/admin/direct-billing/:tab" element={<Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense>} />
           </Route>
 
           <Route element={<PrivateRoute roles={['BURSARY', 'ADMIN']} />}>
-            <Route path="/bursary/dashboard" element={<BursaryDashboard />} />
-            <Route path="/bursary/students" element={<BursaryStudentsWrapped />} />
-            <Route path="/bursary/fees" element={<BursaryFeesWrapped />} />
-            <Route path="/bursary/fees/:tab" element={<BursaryFeesWrapped />} />
-            <Route path="/bursary/refunds" element={<BursaryRefunds />} />
+            <Route path="/bursary/dashboard" element={<Suspense fallback={<PageLoader />}><BursaryDashboard /></Suspense>} />
+            <Route path="/bursary/students" element={<Suspense fallback={<PageLoader />}><BursaryStudentsWrapped /></Suspense>} />
+            <Route path="/bursary/fees" element={<Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense>} />
+            <Route path="/bursary/fees/:tab" element={<Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense>} />
+            <Route path="/bursary/refunds" element={<Suspense fallback={<PageLoader />}><BursaryRefunds /></Suspense>} />
 
-            <Route path="/bursary/payments" element={<BursaryPaymentsWrapped />} />
-            <Route path="/bursary/receipts" element={<BursaryReceiptsWrapped />} />
-            <Route path="/bursary/audit-logs" element={<AdminAuditLogs />} />
-            <Route path="/bursary/direct-billing" element={<BursaryDirectBillingWrapped />} />
-            <Route path="/bursary/direct-billing/:tab" element={<BursaryDirectBillingWrapped />} />
+            <Route path="/bursary/payments" element={<Suspense fallback={<PageLoader />}><BursaryPaymentsWrapped /></Suspense>} />
+            <Route path="/bursary/receipts" element={<Suspense fallback={<PageLoader />}><BursaryReceiptsWrapped /></Suspense>} />
+            <Route path="/bursary/audit-logs" element={<Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense>} />
+            <Route path="/bursary/direct-billing" element={<Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense>} />
+            <Route path="/bursary/direct-billing/:tab" element={<Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense>} />
             <Route path="/bursary/reports/daily" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/reports/daily" title="Daily Reports" subtitle="Daily transaction summaries" />
             } />

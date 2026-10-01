@@ -1,7 +1,7 @@
 import express from 'express';
 import { z } from 'zod';
 import { PaymentGateway } from '@prisma/client';
-import { protect, restrictTo } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { validateParams, validateQuery, validateBody } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
 import {
@@ -30,6 +30,7 @@ const SummaryQuery = z.object({
 
 router.get(
   '/summary',
+  requirePermission('VIEW_RECONCILIATION'),
   validateQuery(SummaryQuery),
   catchAsync(async (req: any, res) => {
     const { dateFrom, dateTo, feeId, gateway, chargeSource } = req.query as any;
@@ -67,6 +68,7 @@ const ItemsQuery = z.object({
 
 router.get(
   '/items',
+  requirePermission('VIEW_RECONCILIATION'),
   validateQuery(ItemsQuery),
   catchAsync(async (req: any, res) => {
     const q = req.query as any;
@@ -123,6 +125,7 @@ const ReportQuery = z.object({
 
 router.get(
   '/report',
+  requirePermission('VIEW_RECONCILIATION_REPORTS'),
   validateQuery(ReportQuery),
   catchAsync(async (req: any, res) => {
     const q = req.query as any;
@@ -160,8 +163,12 @@ const MarkReconciledBody = z.object({
   notes: z.string().max(2000).trim().optional(),
 });
 
+// TODO: Add EDIT_RECONCILIATION permission key to permissionSeed.ts and use it here instead of PROCESS_REFUND
+// when a dedicated reconciliation-edit permission exists.
 router.post(
   '/items/:reference/mark-reconciled',
+  requirePermission('VIEW_RECONCILIATION'),
+  requirePermission('PROCESS_REFUND'),
   validateParams(ReferenceParam),
   validateBody(MarkReconciledBody),
   catchAsync(async (req: any, res) => {

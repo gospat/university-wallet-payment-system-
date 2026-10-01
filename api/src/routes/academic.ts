@@ -4,13 +4,11 @@ import { IncomingMessage } from 'http';
 import path from 'path';
 import fs from 'fs';
 import formidable, { Fields, Files, Part } from 'formidable';
-import jwt from 'jsonwebtoken';
 import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
 import { AppError } from '../utils/AppError';
 import { validateSpreadsheetBytes } from '../utils/security';
-import prisma from '../config/database';
 import {
   FacultyService,
   DepartmentService,
@@ -38,6 +36,7 @@ import {
   buildErrorsCsv,
   BulkKind,
 } from '../services/academicBulkImport';
+import { assertCanManageTemplates } from '../utils/templateAuth';
 
 const router = express.Router();
 
@@ -137,38 +136,11 @@ async function runBulkImport(
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-async function templateAuthCheck(req: Request, allowedRoles: string[]): Promise<{ ok: boolean; html?: string }> {
-  let token: string | undefined;
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.slice(7);
-  if (!token && typeof (req.query as any).access_token === 'string') {
-    token = (req.query as any).access_token as string;
-  }
-  let userId: number | null = null;
-  let userRole: string | null = null;
-  if (token) {
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as any;
-      if (typeof decoded?.id === 'number') {
-        const u = await prisma.user.findUnique({ where: { id: decoded.id }, select: { id: true, role: true, accountStatus: true } });
-        if (u && u.accountStatus === 'ACTIVE') { userId = u.id; userRole = u.role; }
-      }
-    } catch { /* ignore invalid token — fallback to html login link */ }
-  }
-  if (!userId || !userRole || !allowedRoles.includes(userRole)) {
-    const redirect = encodeURIComponent(req.originalUrl);
-    const html = `<html><head><title>Login Required</title></head><body style="font-family:system-ui,-apple-system,sans-serif;padding:40px;max-width:600px;margin:auto"><h2 style="color:#b91c1c">Login Required</h2><p>Your session expired. Please <a href="${FRONTEND_URL}/login?redirect=${redirect}" style="color:#2563eb;font-weight:600">click here to log in</a>.</p></body></html>`;
-    return { ok: false, html };
-  }
-  (req as any).user = { id: userId, role: userRole };
-  return { ok: true };
-}
-
 // --- Faculties templates (ADMIN | BURSARY) ---
 router.get(
   '/faculties/template.csv',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await templateAuthCheck(req, ['ADMIN', 'BURSARY']);
+    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
@@ -183,7 +155,7 @@ router.get(
 router.get(
   '/faculties/template.xlsx',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await templateAuthCheck(req, ['ADMIN', 'BURSARY']);
+    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
@@ -199,7 +171,7 @@ router.get(
 router.get(
   '/departments/template.csv',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await templateAuthCheck(req, ['ADMIN', 'BURSARY']);
+    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
@@ -214,7 +186,7 @@ router.get(
 router.get(
   '/departments/template.xlsx',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await templateAuthCheck(req, ['ADMIN', 'BURSARY']);
+    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
@@ -230,7 +202,7 @@ router.get(
 router.get(
   '/programmes/template.csv',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await templateAuthCheck(req, ['ADMIN', 'BURSARY']);
+    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
@@ -245,7 +217,7 @@ router.get(
 router.get(
   '/programmes/template.xlsx',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await templateAuthCheck(req, ['ADMIN', 'BURSARY']);
+    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
       return res.status(401).type('text/html').send(auth.html!);
     }
@@ -263,6 +235,7 @@ router.use(protect);
 router.get(
   '/faculties',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_COLLEGES'),
   validateQuery(ListQuerySchema),
   catchAsync(async (req: Request, res: Response) => {
     const data = await FacultyService.list(req.query as any);
@@ -273,6 +246,7 @@ router.get(
 router.get(
   '/faculties/:id',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_COLLEGES'),
   validateParams(IdParam),
   catchAsync(async (req: Request, res: Response) => {
     const faculty = await FacultyService.get(Number(req.params.id));
@@ -331,6 +305,7 @@ router.post(
 router.get(
   '/departments',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_DEPARTMENTS'),
   validateQuery(ListQuerySchema),
   catchAsync(async (req: Request, res: Response) => {
     const data = await DepartmentService.list(req.query as any);
@@ -341,6 +316,7 @@ router.get(
 router.get(
   '/departments/:id',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_DEPARTMENTS'),
   validateParams(IdParam),
   catchAsync(async (req: Request, res: Response) => {
     const department = await DepartmentService.get(Number(req.params.id));
@@ -399,6 +375,7 @@ router.post(
 router.get(
   '/programmes',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_PROGRAMMES'),
   validateQuery(ListQuerySchema),
   catchAsync(async (req: Request, res: Response) => {
     const data = await ProgrammeService.list(req.query as any);
@@ -409,6 +386,7 @@ router.get(
 router.get(
   '/programmes/:id',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_PROGRAMMES'),
   validateParams(IdParam),
   catchAsync(async (req: Request, res: Response) => {
     const programme = await ProgrammeService.get(Number(req.params.id));
@@ -478,6 +456,8 @@ router.get(
 );
 
 // ============ LEVEL ============
+// TODO: Add VIEW_LEVELS permission key to permissionSeed.ts and requirePermission('VIEW_LEVELS')
+// to GET /levels and GET /levels/:id routes once the perm key exists.
 router.get(
   '/levels',
   restrictTo('ADMIN', 'BURSARY'),
@@ -530,6 +510,8 @@ router.post(
 );
 
 // ============ ACADEMIC SESSION ============
+// TODO: Add VIEW_SESSIONS permission key to permissionSeed.ts and requirePermission('VIEW_SESSIONS')
+// to GET /sessions and GET /sessions/:id routes once the perm key exists.
 router.get(
   '/sessions',
   restrictTo('ADMIN', 'BURSARY'),

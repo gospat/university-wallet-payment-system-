@@ -36,7 +36,12 @@ export const listStudents = [
 
 export const getStudent = [
   validateParams(IdParam),
-  catchAsync(async (req: Request, res: Response) => {
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (req.user?.role === 'STUDENT') {
+      if (req.user.id !== parseInt(req.params.id, 10)) {
+        return next(new AppError('Cannot operate on other students', 403));
+      }
+    }
     const user = await StudentService.getById(Number(req.params.id));
     res.status(200).json({ status: 'success', data: { user } });
   }),
@@ -77,8 +82,13 @@ export const createStudent = [
 export const updateStudent = [
   validateParams(IdParam),
   validateBody(UpdateStudentSchema),
-  catchAsync(async (req: Request, res: Response) => {
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) return;
+    if (req.user.role === 'STUDENT') {
+      if (req.user.id !== parseInt(req.params.id, 10)) {
+        return next(new AppError('Cannot operate on other students', 403));
+      }
+    }
     const user = await StudentService.update(Number(req.params.id), req.body, req.user.id, {
       ip: reqIp(req), userAgent: reqUa(req),
     });
@@ -89,8 +99,13 @@ export const updateStudent = [
 export const setStudentStatus = [
   validateParams(IdParam),
   validateBody(StatusSchema),
-  catchAsync(async (req: Request, res: Response) => {
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) return;
+    if (req.user.role === 'STUDENT') {
+      if (req.user.id !== parseInt(req.params.id, 10)) {
+        return next(new AppError('Cannot operate on other students', 403));
+      }
+    }
     const user = await StudentService.setAccountStatus(
       Number(req.params.id),
       req.body.status,
@@ -104,8 +119,13 @@ export const setStudentStatus = [
 export const resetStudentPassword = [
   validateParams(IdParam),
   validateBody(PasswordResetSchema.partial().passthrough()),
-  catchAsync(async (req: Request, res: Response) => {
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) return;
+    if (req.user.role === 'STUDENT') {
+      if (req.user.id !== parseInt(req.params.id, 10)) {
+        return next(new AppError('Cannot operate on other students', 403));
+      }
+    }
     const { temporaryPassword } = await StudentService.resetPassword(
       Number(req.params.id),
       req.user.id,

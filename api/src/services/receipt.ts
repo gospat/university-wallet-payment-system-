@@ -26,6 +26,9 @@ type PuppeteerApi = { launch: (opts?: unknown) => Promise<any> };
 let _puppeteerPromise: Promise<PuppeteerApi> | null = null;
 let _puppeteerApi: PuppeteerApi | null = null;
 let _puppeteerLoadFailed: Error | null = null;
+type _SandboxMode = 'strict' | 'fallback_nosandbox' | 'unknown';
+let _sandboxMode: _SandboxMode = 'unknown';
+let _sandboxWarned = false;
 
 async function loadPuppeteer(): Promise<PuppeteerApi> {
   // Fast path: already resolved
@@ -113,8 +116,9 @@ type ReceiptData = {
 
 function signatureBlockHtml(b: Branding): string {
   if (!hasBrandingSignature(b)) return '';
-  const sigImg = b.bursarSignatureUrl
-    ? `<div class="signature-line-img"><img src="${escapeHtml(b.bursarSignatureUrl)}" alt="Signature" onerror="this.style.display='none'" /></div>`
+  const safeSigUrl = assertSafeImageUrl(b.bursarSignatureUrl);
+  const sigImg = safeSigUrl
+    ? `<div class="signature-line-img"><img src="${escapeHtml(safeSigUrl)}" alt="Signature" onerror="this.style.display='none'" /></div>`
     : '';
   const nameLine = b.bursarName ? `<div class="signature-meta-name">${escapeHtml(b.bursarName)}</div>` : `<div class="signature-meta-name placeholder">Signature of Bursar</div>`;
   const titleLine = b.bursarTitle ? `<div class="signature-meta-title">${escapeHtml(b.bursarTitle)}</div>` : `<div class="signature-meta-title placeholder">Bursary Department</div>`;
@@ -145,8 +149,9 @@ function conditionalTermLine1(b: Branding): string {
 }
 
 function logoImgHtml(b: Branding, sizePx = 54): string {
-  if (!b.logoUrl) return '';
-  return `<div class="logo-img"><img src="${escapeHtml(b.logoUrl)}" alt="logo" style="max-height:${sizePx}px; max-width:${sizePx * 1.6}px; object-fit:contain;" onerror="this.parentNode.style.display='none'" /></div>`;
+  const safeLogoUrl = assertSafeImageUrl(b.logoUrl);
+  if (!safeLogoUrl) return '';
+  return `<div class="logo-img"><img src="${escapeHtml(safeLogoUrl)}" alt="logo" style="max-height:${sizePx}px; max-width:${sizePx * 1.6}px; object-fit:contain;" onerror="this.parentNode.style.display='none'" /></div>`;
 }
 
 function logoImgHtmlProfessional(sizePx = 58): string {
@@ -212,15 +217,114 @@ function chargeSourceHtml(info: DirectBillInfo): string {
   return `<div class="charge-source">Charge source: <strong>Direct Bill</strong> (Bursary assignment #${info.assignmentId})${matricPart}</div>`;
 }
 
+function _isSandboxRootError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes('running as root without --no-sandbox is not supported') ||
+    m.includes('setuid sandbox')
+  );
+}
+
+function assertSafeImageUrl(url: string | undefined | null): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const isDevLocalHttp =
+      process.env.NODE_ENV !== 'production' &&
+      (url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1'));
+    if (u.protocol !== 'https:' && !isDevLocalHttp) {
+      console.warn(`[receipt.ts] Blocked unsafe image URL: protocol=${u.protocol} hostname=${u.hostname}`);
+      return null;
+    }
+    const unsafeHost = /^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[::1\]|metadata\.google\.internal|169\.254\.169\.254)$/i;
+    if (unsafeHost.test(u.hostname)) {
+      console.warn(`[receipt.ts] Blocked unsafe image URL: hostname=${u.hostname}`);
+      return null;
+    }
+    return url;
+  } catch {
+    console.warn(`[receipt.ts] Blocked unsafe image URL: malformed url=${String(url).slice(0, 120)}`);
+    return null;
+  }
+}
+
+function _isAllowedImageUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const isDevLocalHttp =
+      process.env.NODE_ENV !== 'production' &&
+      (url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1'));
+    if (u.protocol !== 'https:' && !isDevLocalHttp) return false;
+    const unsafeHost = /^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[::1\]|metadata\.google\.internal|169\.254\.169\.254)$/i;
+    if (unsafeHost.test(u.hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function render(html: string) {
   const puppeteer = await loadPuppeteer();
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    const strictArgs = ['--disable-javascript'];
+    const fallbackArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-javascript'];
+
+    if (_sandboxMode === 'unknown' || _sandboxMode === 'strict') {
+      try {
+        browser = await puppeteer.launch({
+          headless: true,
+          args: strictArgs,
+        });
+        if (_sandboxMode === 'unknown') _sandboxMode = 'strict';
+      } catch (err: any) {
+        const msg = err && typeof err.message === 'string' ? err.message : '';
+        if (_isSandboxRootError(msg)) {
+          if (!_sandboxWarned) {
+            _sandboxWarned = true;
+            console.warn(
+              '[receipt.ts] WARN: Chromium sandbox launch failed (running as root?). ' +
+                'Falling back to --no-sandbox for this process lifetime. ' +
+                'For improved security run the server process as a non-root user in a sandboxed environment.',
+            );
+          }
+          _sandboxMode = 'fallback_nosandbox';
+          browser = await puppeteer.launch({
+            headless: true,
+            args: fallbackArgs,
+          });
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      browser = await puppeteer.launch({
+        headless: true,
+        args: fallbackArgs,
+      });
+    }
+
     const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on('request', (req: any) => {
+      const rt: string = req.resourceType();
+      if (rt === 'document' || rt === 'stylesheet' || rt === 'font') {
+        req.continue();
+        return;
+      }
+      if (rt === 'image') {
+        const url: string = req.url();
+        if (url.startsWith('data:') || _isAllowedImageUrl(url)) {
+          req.continue();
+        } else {
+          console.warn(`[receipt.ts] Blocked image fetch via request interception: url=${url.slice(0, 160)}`);
+          req.abort();
+        }
+        return;
+      }
+      req.abort();
+    });
+
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await new Promise(res => setTimeout(res, 350));
     const pdfBuffer = await page.pdf({

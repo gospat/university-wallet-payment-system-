@@ -92,6 +92,24 @@ export async function seedPermissions() {
       update: {},
     });
   }
+
+  // TASK B3: Seed atomic receipt_number counter (idempotent).
+  // Ensures receipt number generation uses dedicated row instead of MAX(id)+1 race.
+  try {
+    await prisma.counter.upsert({
+      where: { id: 'receipt_number' },
+      create: { id: 'receipt_number', value: 1 },
+      update: {},
+    });
+  } catch (e) {
+    // Counter model may not yet exist in db during pre-migration seed runs; swallow.
+    const msg = (e as Error)?.message ?? '';
+    if (msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist')) {
+      // ignore
+    } else {
+      console.warn('[seedPermissions] Counter seed note:', msg.slice(0, 180));
+    }
+  }
 }
 
 export default { seedPermissions, PERMISSION_DEFS };

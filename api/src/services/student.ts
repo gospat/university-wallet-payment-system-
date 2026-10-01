@@ -222,7 +222,7 @@ export const CreateStudentSchema = z.object({
   firstName: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(1).max(80)),
   middleName: optStrNullable(80),
   lastName: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(1).max(80)),
-  matricNumber: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().min(3).max(50)),
+  matricNumber: z.preprocess((v) => (typeof v === 'string' ? v.trim() : String(v ?? '').trim()), z.string().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).")),
   admissionNumber: optStrNullable(50),
   jambNumber: optStrNullable(50),
   college: optStrNullable(120, 2),

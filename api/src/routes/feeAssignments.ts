@@ -25,4 +25,7 @@ router.post('/:id/generate-invoices', requirePermission('ASSIGN_FEES'), generate
 router.post('/manual-student', requirePermission('DIRECT_BILL_STUDENT'), manualStudentInvoice);
 router.post('/student-bill', requirePermission('DIRECT_BILL_STUDENT'), createDirectStudentBill);
 
+// TODO: Add GET /direct-bills-logs route with requirePermission('VIEW_DIRECT_BILLS_LOG') middleware
+// when the Direct Bills Log list endpoint is implemented for the sidebar view.
+
 export default router;

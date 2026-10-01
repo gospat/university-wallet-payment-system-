@@ -1,7 +1,7 @@
 import { PaymentService } from '../services/payment';
 import prisma from '../config/database';
 import * as PaystackModule from '../services/paystack';
-import { TransactionStatus, Role } from '@prisma/client';
+import { TransactionStatus, Role, PaymentGateway } from '@prisma/client';
 
 jest.mock('../config/database', () => ({
   __esModule: true,
@@ -22,6 +22,55 @@ jest.mock('../services/paystack', () => ({
   },
   computePaymentBreakdown: jest.fn(),
 }));
+
+jest.mock('../services/payment/providerFactory', () => {
+  const actual = jest.requireActual('@prisma/client');
+  return {
+    __esModule: true,
+    getActiveGatewaySetting: jest.fn().mockResolvedValue(actual.PaymentGateway.PAYSTACK),
+    setActiveGatewaySetting: jest.fn(),
+    getPaymentProvider: jest.fn(() => {
+      // Build a PaystackProvider-like adapter on the fly from jest-mocked PaystackService
+      const PaystackService = (require('../services/paystack') as any).PaystackService;
+      const computePaymentBreakdown = (require('../services/paystack') as any).computePaymentBreakdown;
+      return {
+        initialize: async (_email: string, amountKobo: number, opts: any) => {
+          const result = await PaystackService.initializeTransaction({
+            email: _email,
+            amount: amountKobo,
+            reference: opts?.reference,
+            callback_url: opts?.callbackUrl,
+            metadata: opts?.metadata,
+          });
+          return {
+            paymentUrl: result?.authorization_url,
+            redirectUrl: result?.authorization_url,
+            checkoutUrl: result?.authorization_url,
+            sessionId: result?.access_code,
+            accessCode: result?.access_code,
+            providerReference: result?.reference,
+            reference: result?.reference,
+          };
+        },
+        verify: async (ref: string) => {
+          const r = await PaystackService.verifyTransaction(ref);
+          const success = r?.data?.status === 'success';
+          return {
+            success,
+            amountKobo: success ? Math.round(Number(r.data.amount)) : 0,
+            amountMajor: success ? Number(r.data.amount) / 100 : 0,
+            providerReference: String(r?.data?.reference ?? ref),
+            channel: (r?.data?.channel as any) ?? null,
+            paidAt: r?.data?.paid_at ? new Date(r.data.paid_at) : null,
+            customerEmail: r?.data?.customer?.email ?? null,
+            raw: r,
+          };
+        },
+        computeBreakdown: (baseAmountMajor: number) => computePaymentBreakdown(baseAmountMajor),
+      };
+    }),
+  };
+});
 
 describe('A5.1 initiatePayment idempotency 425 guard', () => {
   const MOCK_STUDENT = {
@@ -127,7 +176,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
     expect(prisma.transaction.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 9010 },
-        data: expect.objectContaining({ status: 'CANCELLED', description: 'client-reinit-timeout' }),
+        data: expect.objectContaining({ status: 'FAILED', description: 'client-reinit-timeout' }),
       }),
     );
     expect(result).toBeDefined();

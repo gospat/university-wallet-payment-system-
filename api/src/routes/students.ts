@@ -18,7 +18,7 @@
 // =============================================================================
 
 import express from 'express';
-import { protect, restrictTo } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import {
   createStudent,
   getMe,
@@ -84,8 +84,9 @@ router.get('/invoices/:id', protect, restrictTo(Role.STUDENT), validateParams(Id
 }));
 
 // ---------- Self-service payments (STUDENT only) ----------------------------
+const ReceiptDownloadIdParam = z.object({ id: z.coerce.number().int().positive() });
 router.get('/receipts', protect, restrictTo(Role.STUDENT), listMyReceipts);
-router.get('/receipts/:id/download', protect, restrictTo(Role.STUDENT), downloadFormalReceipt);
+router.get('/receipts/:id/download', protect, restrictTo(Role.STUDENT), validateParams(ReceiptDownloadIdParam), downloadFormalReceipt);
 router.get('/statement', protect, restrictTo(Role.STUDENT), downloadStatement);
 router.get('/me/receipts', protect, restrictTo(Role.STUDENT), listMyReceipts);
 router.get('/me/statement', protect, restrictTo(Role.STUDENT), downloadStatement);
@@ -127,20 +128,33 @@ router.get(
     });
     if (!me) throw new AppError('Student profile not found.', 404);
 
+    type AllowedSort = 'createdAt' | 'amountDue' | 'dueDate' | 'feeName' | 'category';
+    type AllowedOrder = 'asc' | 'desc';
+    const ALLOWED_SORTS: ReadonlySet<AllowedSort> = new Set(['createdAt', 'amountDue', 'dueDate', 'feeName', 'category']);
+    const ALLOWED_ORDERS: ReadonlySet<AllowedOrder> = new Set(['asc', 'desc']);
+    const SORT_TO_PRISMA_FIELD: Record<AllowedSort, 'createdAt' | 'amount' | 'paymentDeadline' | 'name' | 'categoryId'> = {
+      createdAt: 'createdAt',
+      amountDue: 'amount',
+      dueDate: 'paymentDeadline',
+      feeName: 'name',
+      category: 'categoryId',
+    };
+    const validatedQuery = req.query as NonNullable<typeof req.query>;
+
     const baseWhere: any = { isActive: true };
-    if (req.query?.session) baseWhere.academicSession = req.query.session;
-    if (req.query?.category) {
-      const cat = typeof req.query.category === 'number'
-        ? { id: req.query.category }
-        : { code: String(req.query.category).toUpperCase() };
+    if (validatedQuery?.session) baseWhere.academicSession = validatedQuery.session;
+    if (validatedQuery?.category) {
+      const cat = typeof validatedQuery.category === 'number'
+        ? { id: validatedQuery.category }
+        : { code: String(validatedQuery.category).toUpperCase() };
       baseWhere.category = cat;
     }
-    if (req.query?.semester) baseWhere.semester = req.query.semester;
-    if (req.query?.q) {
+    if (validatedQuery?.semester) baseWhere.semester = validatedQuery.semester;
+    if (validatedQuery?.q) {
       baseWhere.OR = [
-        { name: { contains: String(req.query.q) } },
-        { feeCode: { contains: String(req.query.q) } },
-        { description: { contains: String(req.query.q) } },
+        { name: { contains: String(validatedQuery.q) } },
+        { feeCode: { contains: String(validatedQuery.q) } },
+        { description: { contains: String(validatedQuery.q) } },
       ];
     }
 
@@ -177,11 +191,17 @@ router.get(
       ...globalOrMatch,
     };
 
-    const page = Number(req.query?.page ?? 1);
-    const pageSize = Math.min(Number(req.query?.pageSize ?? 25), 500);
+    const rawPage = Number(validatedQuery?.page);
+    const rawPageSize = Number(validatedQuery?.pageSize);
+    const rawSort = validatedQuery?.sort as AllowedSort | string | undefined;
+    const rawOrder = validatedQuery?.order as AllowedOrder | string | undefined;
+
+    const page: number = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+    const pageSize: number = Number.isFinite(rawPageSize) && rawPageSize > 0 && rawPageSize <= 500 ? Math.floor(rawPageSize) : 25;
+    const sort: AllowedSort = ALLOWED_SORTS.has(rawSort as AllowedSort) ? (rawSort as AllowedSort) : 'createdAt';
+    const order: AllowedOrder = ALLOWED_ORDERS.has(rawOrder as AllowedOrder) ? (rawOrder as AllowedOrder) : 'desc';
+    const prismaSortField = SORT_TO_PRISMA_FIELD[sort];
     const skip = (page - 1) * pageSize;
-    const sort = (req.query?.sort ?? 'createdAt') as any;
-    const order = (req.query?.order ?? 'desc') as any;
 
     const directAssignments = await prisma.feeAssignment.findMany({
       where: {
@@ -227,7 +247,7 @@ router.get(
         },
         skip: Math.max(0, skip - directAssignments.length),
         take: pageSize,
-        orderBy: { [sort]: order },
+        orderBy: { [prismaSortField]: order as 'asc' | 'desc' },
       }),
       prisma.fee.count({ where }),
     ]);
@@ -416,12 +436,13 @@ router.post(
 router.use(protect);
 router.use(restrictTo(Role.ADMIN, Role.BURSARY));
 
-router.get('/', validateQuery(StudentQuerySchema), listStudents);
-router.post('/', validateBody(CreateStudentSchema), createStudent);
+router.get('/', requirePermission('VIEW_STUDENTS'), validateQuery(StudentQuerySchema), listStudents);
+router.post('/', requirePermission('CREATE_STUDENT'), validateBody(CreateStudentSchema), createStudent);
 router.get('/:id', getStudent);
 router.patch('/:id', validateBody(UpdateStudentSchema), updateStudent);
-router.post('/:id/status', setStudentStatus);
-router.post('/:id/reset-password', resetStudentPassword);
-router.get('/matric/:matric', getStudentByMatric);
+router.post('/:id/status', requirePermission('CREATE_STUDENT'), setStudentStatus);
+router.post('/:id/reset-password', requirePermission('MANAGE_USERS'), resetStudentPassword);
+const MatricParam = z.object({ matric: z.string().min(3).max(50).trim() });
+router.get('/matric/:matric', requirePermission('VIEW_STUDENTS'), validateParams(MatricParam), getStudentByMatric);
 
 export default router;

@@ -14,6 +14,9 @@ declare global {
         role: Role;
         permissions?: string[];
       };
+      cookies?: {
+        [key: string]: string;
+      };
     }
   }
 }
@@ -49,12 +52,14 @@ async function resolveRolePermissionsLive(role: Role, fallback: string[]): Promi
 export const protect = catchAsync(
   async (req: Request, res: Response, next: NextFunction) => {
     let token: string | undefined;
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer')) {
-      token = authHeader.split(' ')[1];
+    if (req.cookies && typeof req.cookies.access_token === 'string') {
+      token = req.cookies.access_token;
     }
-    if (!token && typeof (req.query as any).access_token === 'string') {
-      token = (req.query as any).access_token;
+    if (!token) {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer')) {
+        token = authHeader.split(' ')[1];
+      }
     }
 
     if (!token) {
@@ -63,7 +68,7 @@ export const protect = catchAsync(
 
     let decoded: any;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET as string);
+      decoded = jwt.verify(token, process.env.JWT_SECRET as string, { algorithms: ['HS256'] });
     } catch (err) {
       return next(new AppError(i18n.errors.auth.invalidToken, 401));
     }

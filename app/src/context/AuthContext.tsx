@@ -38,6 +38,7 @@ interface AuthContextType {
   refresh: () => Promise<boolean>;
   logout: (reason?: 'SESSION_EXPIRED' | 'LOGOUT' | 'ACCOUNT_INACTIVE') => Promise<void>;
   clearMustChangePassword: () => void;
+  refetchUser: () => Promise<void>;
   isAuthenticated: boolean;
   isValidating: boolean;
   authNotice?: string | null;
@@ -362,6 +363,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
+  const refetchUser = useCallback(async (): Promise<void> => {
+    if (!token) return;
+    setIsValidating(true);
+    try {
+      await performSessionValidation();
+    } finally {
+      if (mountedRef.current) {
+        setIsValidating(false);
+      }
+    }
+  }, [token, performSessionValidation]);
+
   const value = useMemo<AuthContextType>(
     () => ({
       user,
@@ -371,11 +384,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       refresh,
       logout,
       clearMustChangePassword,
+      refetchUser,
       isAuthenticated: !!token,
       isValidating,
       authNotice,
     }),
-    [user, token, refreshToken, login, refresh, logout, clearMustChangePassword, isValidating, authNotice]
+    [user, token, refreshToken, login, refresh, logout, clearMustChangePassword, refetchUser, isValidating, authNotice]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

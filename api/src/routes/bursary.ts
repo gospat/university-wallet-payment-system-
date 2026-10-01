@@ -824,9 +824,11 @@ router.get(
 // ---------------------------------------------------------------------------
 // Bursary: Verify receipt by verificationToken OR receiptNumber (inline panel)
 // ---------------------------------------------------------------------------
+const BursaryReceiptVerifyParam = z.object({ tokenOrNumber: z.string().min(1).max(100).trim() });
 router.get(
   '/receipts/verify/:tokenOrNumber',
   requirePermission('VERIFY_RECEIPT'),
+  validateParams(BursaryReceiptVerifyParam),
   catchAsync(async (req: any, res) => {
     const tokenOrNumber = String(req.params.tokenOrNumber || '').trim();
     const row: any = await prisma.receipt.findFirst({
@@ -837,7 +839,7 @@ router.get(
       include: {
         student: { select: { id: true, firstName: true, lastName: true, email: true, matricNumber: true } },
         invoice: { include: { fee: { select: { id: true, name: true, feeCode: true } } } },
-        transaction: { select: { reference: true, paystackReference: true, paystackChannel: true, gateway: true, type: true, amount: true, status: true, createdAt: true } },
+        transaction: { select: { reference: true, paystackReference: true, alatpayReference: true, paystackChannel: true, gateway: true, type: true, amount: true, status: true, createdAt: true } },
       },
     });
 
@@ -867,6 +869,7 @@ router.get(
         paymentChannel: row.paymentChannel,
         paymentMethodDetail: row.paymentMethodDetail,
         paystackReference: row.paystackReference || null,
+        alatpayReference: (row.transaction?.alatpayReference) || null,
         student: row.student,
         invoice: row.invoice ? {
           id: row.invoice.id,

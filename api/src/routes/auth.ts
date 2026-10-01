@@ -14,7 +14,7 @@ const signupSchema = z.object({
   password: z.string().min(8).max(128).trim(),
   firstName: z.string().min(1).max(80).trim(),
   lastName: z.string().min(1).max(80).trim(),
-  matricNumber: z.string().min(3).max(50).trim().optional(),
+  matricNumber: z.string().trim().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).").optional(),
 });
 
 const loginSchema = z.object({

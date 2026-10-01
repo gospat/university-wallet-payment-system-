@@ -22,16 +22,19 @@ export const SessionTiming = {
 
 const GENERIC_LOGIN_ERROR = 'Incorrect email or password';
 
+if (!process.env.JWT_REFRESH_SECRET || typeof process.env.JWT_REFRESH_SECRET !== 'string' || process.env.JWT_REFRESH_SECRET.length === 0) {
+  throw new Error('FATAL: JWT_REFRESH_SECRET environment variable is required and must be set. Do not derive it from JWT_SECRET.');
+}
+
 const getRefreshSecret = (): string => {
-  if (process.env.JWT_REFRESH_SECRET) return process.env.JWT_REFRESH_SECRET;
-  return (process.env.JWT_SECRET as string) + '-refresh';
+  return process.env.JWT_REFRESH_SECRET as string;
 };
 
 const signAccessToken = (id: number, role: Role, permissions: string[]) => {
   return jwt.sign(
     { id, role, permissions, type: 'access' },
     process.env.JWT_SECRET as string,
-    { expiresIn: ACCESS_EXPIRES_IN as any }
+    { expiresIn: ACCESS_EXPIRES_IN as any, algorithm: 'HS256' }
   );
 };
 
@@ -39,7 +42,7 @@ const signRefreshToken = (userId: number, jti: string) => {
   return jwt.sign(
     { userId, jti, type: 'refresh' },
     getRefreshSecret(),
-    { expiresIn: REFRESH_EXPIRES_IN as any }
+    { expiresIn: REFRESH_EXPIRES_IN as any, algorithm: 'HS256' }
   );
 };
 
@@ -110,7 +113,7 @@ export class AuthService {
   static async refreshSession(refreshJWT: string, ipAddress?: string, userAgent?: string) {
     let decoded: any;
     try {
-      decoded = jwt.verify(refreshJWT, getRefreshSecret());
+      decoded = jwt.verify(refreshJWT, getRefreshSecret(), { algorithms: ['HS256'] });
     } catch (err) {
       throw new AppError('Invalid refresh token. Please log in again.', 401);
     }
@@ -238,7 +241,7 @@ export class AuthService {
   static async revokeSingle(userId: number, refreshJWT: string, opts?: { ipAddress?: string; userAgent?: string }) {
     let decoded: any;
     try {
-      decoded = jwt.verify(refreshJWT, getRefreshSecret());
+      decoded = jwt.verify(refreshJWT, getRefreshSecret(), { algorithms: ['HS256'] });
     } catch {
       throw new AppError('Invalid refresh token.', 401);
     }

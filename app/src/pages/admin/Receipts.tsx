@@ -44,11 +44,12 @@ type ReceiptRow = {
   paymentChannel?: string | null;
   paymentMethodDetail?: string | null;
   paystackReference?: string | null;
+  alatpayReference?: string | null;
   qrCodeData?: string | null;
   student?: { id: number; firstName: string; lastName: string; email: string; matricNumber?: string | null } | null;
   invoice?: { id: number; invoiceNumber: string; fee?: { id: number; name: string; feeCode?: string } | null } | null;
   transaction?: {
-    reference: string; paystackChannel?: string | null; gateway?: string; type?: string;
+    reference: string; paystackChannel?: string | null; paystackReference?: string | null; alatpayReference?: string | null; gateway?: string; type?: string;
     amount?: number | string; status?: string; createdAt?: string;
   } | null;
   voidedBy?: { id: number; firstName: string; lastName: string; email: string } | null;
@@ -62,10 +63,10 @@ type VerifyResp = {
   data?: {
     id: number; receiptNumber: string; verificationToken: string;
     paidAmount: number | string; paidAt: string; isVoided: boolean; voidedAt?: string | null;
-    paymentChannel?: string | null; paymentMethodDetail?: string | null; paystackReference?: string | null;
+    paymentChannel?: string | null; paymentMethodDetail?: string | null; paystackReference?: string | null; alatpayReference?: string | null;
     student?: { id: number; firstName: string; lastName: string; email: string; matricNumber?: string | null };
     invoice?: { id: number; invoiceNumber: string; dueDate?: string; session?: string; semester?: string; fee?: { name: string; feeCode?: string } | null } | null;
-    transaction?: { reference?: string; paystackReference?: string; paystackChannel?: string; gateway?: string; type?: string; amount?: number | string; status?: string; createdAt?: string } | null;
+    transaction?: { reference?: string; paystackReference?: string; alatpayReference?: string; paystackChannel?: string; gateway?: string; type?: string; amount?: number | string; status?: string; createdAt?: string } | null;
   };
   branding?: { name: string; address?: string; phone?: string; website?: string; bankName?: string; bankAccount?: string };
 };
@@ -113,11 +114,8 @@ const GatewayPill: React.FC<{ gateway?: string | null }> = ({ gateway }) => {
   );
 };
 
-const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userText: string; onLogout: () => void; goBack: () => void; dashboardTo: string }> = ({ role, brand, userText, onLogout, goBack, dashboardTo }) => {
+const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userText: string; onLogout: () => void; goBack?: () => void; dashboardTo?: string }> = ({ role, brand, userText, onLogout }) => {
   const { user } = useAuth();
-  void user;
-  void goBack;
-  void dashboardTo;
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const verifyMode = searchParams.get('verify') === '1';
@@ -126,7 +124,8 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const activePath = `/${role.toLowerCase()}/receipts`;
 
   // permissions derived from user.permissions (already loaded at protect() time)
-  const perms = Array.isArray((user as any)?.permissions) ? ((user as any).permissions as string[]) : [];
+  const userAny = user as any;
+  const perms = Array.isArray(userAny?.permissions) ? (userAny.permissions as string[]) : [];
   const canVerifyReceipt = perms.includes('VERIFY_RECEIPT') || perms.includes('GENERATE_RECEIPT') || role === 'ADMIN';
 
   const toggleVerifyMode = (on: boolean) => {
@@ -393,14 +392,21 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                           </>
                         )}
                         <div className="md:col-span-2 flex flex-wrap gap-2 pt-2 border-t border-gray-200">
-                          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-                            onClick={() => downloadReceipt(verifyResult.data!.id)}>
-                            Download PDF
-                          </button>
-                          <button className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
-                            onClick={() => openPublicVerify(verifyResult.data!.verificationToken)}>
-                            Open Public Verify Link
-                          </button>
+                          {verifyResult.data && (() => {
+                            const vd = verifyResult.data;
+                            return (
+                              <>
+                                <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                                  onClick={() => downloadReceipt(vd.id)}>
+                                  Download PDF
+                                </button>
+                                <button className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+                                  onClick={() => openPublicVerify(vd.verificationToken)}>
+                                  Open Public Verify Link
+                                </button>
+                              </>
+                            );
+                          })()}
                         </div>
                       </div>
                     )}
@@ -480,7 +486,7 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                 <tr>
                   {[
                     'Receipt #', 'Student', 'Invoice / Fee', 'Paid Amount', 'Paid At',
-                    'Status', 'Payment Method', 'Verification Token', 'Actions',
+                    'Status', 'Payment Method', 'Gateway References', 'Verification Token', 'Actions',
                   ].map((h) => (
                     <th key={h} className="px-4 py-3 text-left font-semibold text-gray-700 whitespace-nowrap">{h}</th>
                   ))}
@@ -488,9 +494,9 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
                 {loading && !loadedOnceRef.current ? (
-                  <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-500">Loading…</td></tr>
+                  <tr><td colSpan={10} className="px-4 py-12 text-center text-gray-500">Loading…</td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-500">No receipts found.</td></tr>
+                  <tr><td colSpan={10} className="px-4 py-12 text-center text-gray-500">No receipts found.</td></tr>
                 ) : rows.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50/60">
                     <td className="px-4 py-3 whitespace-nowrap">
@@ -521,6 +527,31 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                         <GatewayPill gateway={r.transaction?.gateway} />
                         <span className="text-xs text-gray-500">{r.paymentChannel || r.transaction?.paystackChannel || '—'}</span>
                       </div>
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {(() => {
+                        const pRef = r.paystackReference || r.transaction?.paystackReference || null;
+                        const aRef = r.alatpayReference || r.transaction?.alatpayReference || null;
+                        if (!pRef && !aRef) {
+                          return <span className="text-xs text-gray-400 font-medium">—</span>;
+                        }
+                        return (
+                          <div className="flex flex-col gap-1">
+                            {pRef && (
+                              <div>
+                                <div className="text-[10px] uppercase tracking-wide text-blue-500 font-semibold">Paystack</div>
+                                <div className="font-mono text-xs text-gray-800 break-all max-w-[180px]" title={pRef}>{pRef}</div>
+                              </div>
+                            )}
+                            {aRef && (
+                              <div>
+                                <div className="text-[10px] uppercase tracking-wide text-purple-500 font-semibold">ALAT Pay</div>
+                                <div className="font-mono text-xs text-gray-800 break-all max-w-[180px]" title={aRef}>{aRef}</div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <span className="font-mono text-xs text-gray-700 break-all inline-block max-w-[160px]" title={r.verificationToken}>{r.verificationToken}</span>

@@ -272,20 +272,23 @@ async function writeAudit(
 }
 
 router.get('/stats', getDashboardStats);
-router.post('/students', validateBody(CreateStudentSchema), addStudent);
+router.post('/students', requirePermission('CREATE_STUDENT'), validateBody(CreateStudentSchema), addStudent);
 
-router.post('/students/upload', stageStudentUpload);
-router.get('/students/upload/:id', previewStudentUpload);
-router.get('/students/upload/:id/errors.csv', downloadErrorCsv);
-router.post('/students/upload/:id/confirm', confirmStudentUpload);
+router.post('/students/upload', requirePermission('BULK_UPLOAD_STUDENTS'), stageStudentUpload);
+router.get('/students/upload/:id', requirePermission('BULK_UPLOAD_STUDENTS'), previewStudentUpload);
+router.get('/students/upload/:id/errors.csv', requirePermission('BULK_UPLOAD_STUDENTS'), downloadErrorCsv);
+router.post('/students/upload/:id/confirm', requirePermission('BULK_UPLOAD_STUDENTS'), requirePermission('CREATE_STUDENT'), confirmStudentUpload);
 
-router.get('/refunds', adminListRefunds);
+// TODO: Add GET /admin/import-history route with requirePermission('VIEW_IMPORT_HISTORY') middleware
+// when the import-history list endpoint is implemented.
+
+router.get('/refunds', requirePermission('PROCESS_REFUND'), adminListRefunds);
 const RefundIdParam = z.object({ id: z.coerce.number().int().positive() });
-router.post('/refunds/:id/approve', validateParams(RefundIdParam), adminApproveRefund as any);
-router.post('/refunds/:id/reject', validateParams(RefundIdParam), adminRejectRefund as any);
+router.post('/refunds/:id/approve', requirePermission('PROCESS_REFUND'), validateParams(RefundIdParam), adminApproveRefund as any);
+router.post('/refunds/:id/reject', requirePermission('PROCESS_REFUND'), validateParams(RefundIdParam), adminRejectRefund as any);
 
 const AdminTxUpdatePatchBody = z.record(z.any());
-router.patch('/transactions/:id',
+router.patch('/transactions/:id', requirePermission('VERIFY_PAYMENT'),
   validateParams(RefundIdParam),
   validateBody(AdminTxUpdatePatchBody),
   catchAsync(async (req: any, res) => {
@@ -506,7 +509,7 @@ const CreateUserSchema = z
     firstName: z.string().min(1).max(80),
     middleName: z.string().max(80).optional().nullable(),
     lastName: z.string().min(1).max(80),
-    matricNumber: z.string().min(3).max(50).optional().nullable(),
+    matricNumber: z.string().trim().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).").optional().nullable(),
     role: z.enum([Role.ADMIN, Role.BURSARY, Role.STUDENT]).default(Role.STUDENT),
     accountStatus: z.enum([AccountStatus.ACTIVE, AccountStatus.SUSPENDED]).default(AccountStatus.ACTIVE),
     phoneNumber: z.string().max(30).optional().nullable(),
@@ -554,7 +557,7 @@ const UpdateUserSchema = z
     firstName: z.string().min(1).max(80).optional(),
     middleName: z.string().max(80).optional().nullable(),
     lastName: z.string().min(1).max(80).optional(),
-    matricNumber: z.string().min(3).max(50).optional().nullable(),
+    matricNumber: z.string().trim().regex(/^\d{4}\/[A-Z]{3}\/\d{4}$/, "Matric number must match YYYY/AAA/NNNN (e.g. 2023/CSC/0012).").optional().nullable(),
     role: z.enum([Role.ADMIN, Role.BURSARY, Role.STUDENT]).optional(),
     accountStatus: z.enum([AccountStatus.ACTIVE, AccountStatus.SUSPENDED, AccountStatus.GRADUATED, AccountStatus.WITHDRAWN]).optional(),
     phoneNumber: z.string().max(30).optional().nullable(),
@@ -1339,9 +1342,11 @@ router.get(
 // ---------------------------------------------------------------------------
 // Admin: Verify receipt by verificationToken OR receiptNumber (inline panel)
 // ---------------------------------------------------------------------------
+const ReceiptVerifyParam = z.object({ tokenOrNumber: z.string().min(1).max(100).trim() });
 router.get(
   '/receipts/verify/:tokenOrNumber',
   requirePermission('VIEW_RECEIPTS'),
+  validateParams(ReceiptVerifyParam),
   catchAsync(async (req: any, res) => {
     const tokenOrNumber = String(req.params.tokenOrNumber || '').trim();
     const row: any = await prisma.receipt.findFirst({
@@ -1352,7 +1357,7 @@ router.get(
       include: {
         student: { select: { id: true, firstName: true, lastName: true, email: true, matricNumber: true } },
         invoice: { include: { fee: { select: { id: true, name: true, feeCode: true } } } },
-        transaction: { select: { reference: true, paystackReference: true, paystackChannel: true, gateway: true, type: true, amount: true, status: true, createdAt: true } },
+        transaction: { select: { reference: true, paystackReference: true, alatpayReference: true, paystackChannel: true, gateway: true, type: true, amount: true, status: true, createdAt: true } },
       },
     });
 
@@ -1382,6 +1387,7 @@ router.get(
         paymentChannel: row.paymentChannel,
         paymentMethodDetail: row.paymentMethodDetail,
         paystackReference: row.paystackReference || null,
+        alatpayReference: (row.transaction?.alatpayReference) || null,
         student: row.student,
         invoice: row.invoice ? {
           id: row.invoice.id,
@@ -1423,8 +1429,9 @@ const resendCredentialsLimiter = rateLimit({
 const emailTypeValues: readonly string[] = Object.values(EmailType);
 const emailStatusValues: readonly string[] = Object.values(EmailDeliveryStatus);
 
+const TemplateKeyParam = z.object({ templateKey: z.string().min(1).max(100).trim() });
 // 1. GET template by key (ADMIN)
-router.get('/email-templates/:templateKey', catchAsync(async (req: Request, res: Response) => {
+router.get('/email-templates/:templateKey', validateParams(TemplateKeyParam), catchAsync(async (req: Request, res: Response) => {
   const key = String((req.params as any).templateKey || '').trim();
   if (!key) return res.status(400).json({ status: 'fail', message: 'templateKey required' });
   const data = await EmailTemplateService.getByKey(key);
@@ -1432,7 +1439,7 @@ router.get('/email-templates/:templateKey', catchAsync(async (req: Request, res:
 }));
 
 // 2. PATCH template by key (ADMIN)
-router.patch('/email-templates/:templateKey', validateBody(EmailTemplateConfigPatchSchema), catchAsync(async (req: Request, res: Response) => {
+router.patch('/email-templates/:templateKey', validateParams(TemplateKeyParam), validateBody(EmailTemplateConfigPatchSchema), catchAsync(async (req: Request, res: Response) => {
   const key = String((req.params as any).templateKey || '').trim();
   if (!key) return res.status(400).json({ status: 'fail', message: 'templateKey required' });
   const actorId = Number((req as any).user?.id);

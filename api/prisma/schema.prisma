@@ -85,6 +85,15 @@ enum Semester {
   SECOND
 }
 
+enum GeneralLedgerEntryType {
+  PAYMENT_SUCCESS
+  REFUND_ISSUED
+  CONVENIENCE_FEE_INCOME
+  SERVICE_CHARGE_INCOME
+  GATEWAY_FEE_EXPENSE
+  WALLET_CREDIT
+}
+
 enum AssignmentTargetType {
   STUDENT
   PROGRAMME
@@ -199,6 +208,7 @@ model Transaction {
   description         String?
   underpaidReason     String?
   metadata            Json?
+  proofOfPaymentReference String?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -299,6 +309,8 @@ model FeeAssignment {
   overrideAmount   Decimal?             @db.Decimal(15, 2)
   overrideDeadline DateTime?
   noteToStudent    String?              @db.VarChar(2000)
+  session          String?
+  semester         Semester?
   assignedById     Int
   assignedAt       DateTime             @default(now())
   isActive         Boolean              @default(true)
@@ -308,7 +320,35 @@ model FeeAssignment {
   targetStudent    User?                @relation("FeeAssignmentTarget", fields: [targetStudentId], references: [id])
 
   @@index([assignmentType])
+  @@index([targetStudentId, feeId])
   @@map("fee_assignments")
+}
+
+// TASK B3 - DEDICATED ATOMIC COUNTER TABLE (prevents receiptNumber MAX(id)+1 race)
+model Counter {
+  id        String   @id @default("receipt_number")
+  value     Int      @default(1)
+  updatedAt DateTime @updatedAt
+}
+
+// TASK H11 - DOUBLE-ENTRY GENERAL LEDGER
+model GeneralLedger {
+  id                  Int                      @id @default(autoincrement())
+  transactionDate     DateTime                 @default(now())
+  entryType           GeneralLedgerEntryType
+  description         String?
+  amount              Decimal                  @db.Decimal(15, 2)
+  currency            String                   @default("NGN")
+  account             String
+  counterpartyAccount String?
+  transactionId       Int?
+  receiptId           Int?
+  userId              Int?
+  invoiceId           Int?
+  meta                Json?
+  createdAt           DateTime                 @default(now())
+
+  @@index([transactionDate, entryType, account])
 }
 
 model Invoice {
@@ -346,6 +386,10 @@ model Receipt {
   invoiceId         Int?
   studentId         Int
   paidAmount        Decimal     @db.Decimal(15, 2)
+  convenienceFee    Decimal     @default(0) @db.Decimal(15, 2)
+  serviceCharge     Decimal     @default(0) @db.Decimal(15, 2)
+  gatewayFee        Decimal     @default(0) @db.Decimal(15, 2)
+  totalAmount       Decimal     @db.Decimal(15, 2)
   paystackReference String?
   paymentChannel    String?
   paymentMethodDetail String?

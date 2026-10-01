@@ -620,13 +620,6 @@ export class RefundService {
     transaction: { id: number; status: TransactionStatus } | null | undefined,
     attemptedFields: Record<string, any>,
   ) {
-    if (!transaction) return;
-    if (
-      transaction.status !== TransactionStatus.SUCCESS &&
-      transaction.status !== TransactionStatus.REVERSED
-    ) {
-      return;
-    }
     const protectedFields = [
       'amount',
       'reference',
@@ -637,10 +630,22 @@ export class RefundService {
       'type',
       'invoiceId',
       'paystackChannel',
+      'alatpayReference',
+      'alatpaySessionId',
+      'gateway',
+      'proofOfPaymentReference',
+      'receiptId',
     ];
     const touched = protectedFields.filter((k) => k in attemptedFields);
     if (touched.length > 0) {
       throw new AppError(i18n.errors.payment.immutable, 403);
+    }
+    if (!transaction) return;
+    if (
+      transaction.status !== TransactionStatus.SUCCESS &&
+      transaction.status !== TransactionStatus.REVERSED
+    ) {
+      return;
     }
   }
 }

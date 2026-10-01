@@ -81,10 +81,10 @@ function buildRateLimitStore(prefix: string) {
   });
 }
 
-// Force HTTPS redirect (skip in dev; allow /health endpoints over HTTP for k8s probes)
+// Force HTTPS redirect (skip in dev/test; allow /health endpoints over HTTP for k8s probes)
 app.use((req, res, next) => {
-  if (process.env.NODE_ENV === 'development') return next();
-  if (req.path === '/health' || req.path === '/api/v1/health') return next();
+  if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') return next();
+  if (req.path === '/health' || req.path === '/api/v1/health' || req.path === '/healthz') return next();
   const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
   if (!isHttps) {
     return res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
@@ -236,6 +236,18 @@ const webhookLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Public receipt verify: anonymous 60/min/IP. Strict enough to stop enumeration scans,
+// permissive enough for genuine students verifying many receipts. Applies to both public
+// /api/v1/public/verify-receipt route and authenticated admin/bursary verify endpoints.
+const publicReceiptLimiter = rateLimit({
+  store: buildRateLimitStore('rl:pub-rcpt:'),
+  max: 60,
+  windowMs: 60 * 1000,
+  message: 'Too many receipt verification requests, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use('/api/v1', generalLimiter);
 app.use('/api/v1/auth', authLimiter);
 app.use('/api/v1/auth/change-password', authChangePwLimiter);
@@ -244,8 +256,12 @@ app.use('/api/v1/students/payments/verify', paymentLimiter);
 app.use('/api/v1/fee-assignments/bill-student', paymentLimiter);
 app.use('/api/v1/fee-assignments/assignments/generate-invoices', paymentLimiter);
 app.use('/api/v1/webhooks', webhookLimiter);
+app.use('/api/v1/*/receipts/verify', publicReceiptLimiter);
+app.use('/api/v1/students/receipts/:id', publicReceiptLimiter);
+app.use('/api/v1/admin/receipts/:id', publicReceiptLimiter);
+app.use('/api/v1/bursary/receipts/:id', publicReceiptLimiter);
 // Admin bulk-upload endpoints are heavy — apply the mutation limiter.
-app.use(/^\/api\/v1\/(admin|academic|fees)\/.*\/(bulk-import|upload|confirm)$/i, adminMutationLimiter);
+app.use(/^\/api\/v1\/(admin|academic|fees)\/.*\/?bulk-(upload|import)$/i, adminMutationLimiter);
 
 // 4. Logging
 //    - development: morgan('dev') → short colored human-readable logs
@@ -279,6 +295,17 @@ app.use(express.urlencoded({ extended: false, limit: '256kb', parameterLimit: 10
 client.collectDefaultMetrics();
 
 app.get('/api/v1/health', (req, res) => {
+  res.status(200).json({
+    status: 'success',
+    data: {
+      service: 'university-payment-api',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    },
+  });
+});
+
+app.get('/healthz', (req, res) => {
   res.status(200).json({
     status: 'success',
     data: {
@@ -323,7 +350,7 @@ app.get('/api/v1/metrics', async (req, res) => {
 });
 
 // Routes
-app.get('/api/v1/public/verify-receipt/:token', publicVerifyReceipt);
+app.get('/api/v1/public/verify-receipt/:token', publicReceiptLimiter, publicVerifyReceipt);
 app.use('/api/v1/webhooks', webhookRoutes);
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);

@@ -1,10 +1,8 @@
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
-import jwt from 'jsonwebtoken';
 import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { validateParams } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
-import prisma from '../config/database';
 import {
   activateFee,
   cloneFee,
@@ -28,6 +26,7 @@ import {
 } from '../controllers/feeBulkUpload';
 import { buildTwoSheetWorkbook } from '../utils/xlsxTemplate';
 import { csvLineSafe } from '../utils/security';
+import { assertCanManageTemplates } from '../utils/templateAuth';
 
 const router = express.Router();
 
@@ -35,36 +34,9 @@ const router = express.Router();
 
 const FRONTEND_URL_FEES = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-async function templateAuthCheckFees(req: Request, allowedRoles: string[]): Promise<{ ok: boolean; html?: string }> {
-  let token: string | undefined;
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.slice(7);
-  if (!token && typeof (req.query as any).access_token === 'string') {
-    token = (req.query as any).access_token as string;
-  }
-  let userId: number | null = null;
-  let userRole: string | null = null;
-  if (token) {
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as any;
-      if (typeof decoded?.id === 'number') {
-        const u = await prisma.user.findUnique({ where: { id: decoded.id }, select: { id: true, role: true, accountStatus: true } });
-        if (u && u.accountStatus === 'ACTIVE') { userId = u.id; userRole = u.role; }
-      }
-    } catch { /* ignore invalid token — fallback to html login link */ }
-  }
-  if (!userId || !userRole || !allowedRoles.includes(userRole)) {
-    const redirect = encodeURIComponent(req.originalUrl);
-    const html = `<html><head><title>Login Required</title></head><body style="font-family:system-ui,-apple-system,sans-serif;padding:40px;max-width:600px;margin:auto"><h2 style="color:#b91c1c">Login Required</h2><p>Your session expired. Please <a href="${FRONTEND_URL_FEES}/login?redirect=${redirect}" style="color:#2563eb;font-weight:600">click here to log in</a>.</p></body></html>`;
-    return { ok: false, html };
-  }
-  (req as any).user = { id: userId, role: userRole };
-  return { ok: true };
-}
-
 // --- Fees templates (ADMIN | BURSARY) ---
 router.get('/template.csv', catchAsync(async (req: Request, res: Response) => {
-  const auth = await templateAuthCheckFees(req, ['ADMIN', 'BURSARY']);
+  const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL_FEES });
   if (!auth.ok) {
     return res.status(401).type('text/html').send(auth.html!);
   }
@@ -132,7 +104,7 @@ router.get('/template.csv', catchAsync(async (req: Request, res: Response) => {
 }));
 
 router.get('/template.xlsx', catchAsync(async (req: Request, res: Response) => {
-  const auth = await templateAuthCheckFees(req, ['ADMIN', 'BURSARY']);
+  const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL_FEES });
   if (!auth.ok) {
     return res.status(401).type('text/html').send(auth.html!);
   }

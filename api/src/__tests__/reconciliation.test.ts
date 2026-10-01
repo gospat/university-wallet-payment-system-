@@ -190,6 +190,10 @@ describe('AC-D1 Reconciliation Bucket Counts (10-payment fixture)', () => {
           paymentChannel: 'card',
           paidAt: TX_DATE,
           qrCodeData: `https://example.com/verify/${receiptNum}`,
+          convenienceFee: 0,
+          serviceCharge: 0,
+          gatewayFee: 0,
+          totalAmount: Number(tx.amount),
         },
       });
       createdReceiptIds.push(receipt.id);

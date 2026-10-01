@@ -63,7 +63,7 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
 const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm';
 
 const RolesPage: React.FC = () => {
-  const { user, logout } = useAuth();
+  const { user, logout, refetchUser } = useAuth();
   const brand = i18n.portals.admin.dashboardBrand;
   const userText = i18n.portals.admin.dashboardGreeting(
     `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Admin'
@@ -203,6 +203,11 @@ const RolesPage: React.FC = () => {
           message: `+${addedN} added / -${removedN} removed. Changes are live for all users now.`,
           type: 'success',
         });
+      }
+      try {
+        await refetchUser();
+      } catch {
+        /* noop — refresh silently on failure */
       }
       load();
     } catch (err: any) {

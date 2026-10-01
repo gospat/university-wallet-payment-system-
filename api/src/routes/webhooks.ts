@@ -413,15 +413,12 @@ router.post('/alatpay', async (req: Request, res: Response) => {
   }
 
   // ---------------------------------------------------------------------------
-  // Step 2 — HMAC signature verification (LENIENT per production code).
-  // NOTE: Working production AlatpayService.php L296 explicitly states:
-  //   "Signature/Authorization checks are disabled: AlatPay posts without a usable HMAC."
-  // Therefore we NEVER reject with 403 here. We:
-  //   - accept signature header names from working production code: x-alatpay-signature, alatpay-signature, x-signature (compat)
-  //   - if signature is missing/invalid: log WARNING but continue processing & return 200
-  //   - if signature is valid: log INFO
-  // This ensures ALATPAY's backend webhook reachability test probe ALWAYS sees HTTP 200
-  // so their /payment/initialize activation gate passes.
+  // Step 2 — HMAC signature verification (AUTHORITATIVE).
+  // HMAC is the authoritative accept/reject decision. We:
+  //   - accept signature header names: x-alatpay-signature, alatpay-signature, x-signature (compat)
+  //   - if signature is missing/invalid: return HTTP 403 with { message: 'Invalid HMAC' } and STOP processing
+  //   - if signature is valid: continue processing
+  // IP whitelist check remains WARN-only; HMAC failure hard-blocks.
   // ---------------------------------------------------------------------------
   const rawBody: Buffer | string =
     (req as any).rawBody instanceof Buffer
@@ -438,12 +435,12 @@ router.post('/alatpay', async (req: Request, res: Response) => {
   if (!signature || !verifyAlatpayHmac(rawBody, signature)) {
     // eslint-disable-next-line no-console
     console.warn(
-      `[webhook:alatpay] signature ${signature ? 'INVALID' : 'MISSING'} (prod code L296 AlatPay HMACs are unreliable) — continuing anyway. bodyLen=${bodyLen} headers.sig=${signature ? 'present' : 'none'}`,
+      `[webhook:alatpay] signature ${signature ? 'INVALID' : 'MISSING'} — REJECTING with 403. bodyLen=${bodyLen} headers.sig=${signature ? 'present' : 'none'}`,
     );
-  } else {
-    // eslint-disable-next-line no-console
-    console.info(`[webhook:alatpay] signature VALID. bodyLen=${bodyLen}`);
+    return res.status(403).json({ message: 'Invalid HMAC' });
   }
+  // eslint-disable-next-line no-console
+  console.info(`[webhook:alatpay] signature VALID. bodyLen=${bodyLen}`);
 
   // ---------------------------------------------------------------------------
   // Step 3 — Parse envelope + extract event/transaction references.

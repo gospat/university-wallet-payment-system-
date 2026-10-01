@@ -202,7 +202,9 @@ const ASSIGNMENT_SELECT = {
   targetStudentId: true, targetProgramme: true, targetDepartment: true,
   targetFaculty: true, targetLevel: true, targetSession: true, targetStudentType: true,
   overrideAmount: true, overrideDeadline: true, noteToStudent: true, assignedById: true, assignedAt: true, isActive: true,
-  fee: { select: { id: true, feeCode: true, name: true, amount: true, academicSession: true, paymentDeadline: true } },
+  session: true,
+  semester: true,
+  fee: { select: { id: true, feeCode: true, name: true, amount: true, academicSession: true, semester: true, paymentDeadline: true } },
   assignedBy: { select: { id: true, email: true, firstName: true, lastName: true } },
   targetStudent: { select: { id: true, matricNumber: true, firstName: true, lastName: true } },
 } as const;
@@ -290,7 +292,7 @@ export class FeeAssignmentService {
     const userId = (req as any)?.user?.id ?? null;
     if (!userId) throw new AppError(i18n.errors.auth.notPermitted, 401);
 
-    const fee = await prisma.fee.findFirst({ where: { id: input.feeId }, select: { id: true, isActive: true, academicSession: true } });
+    const fee = await prisma.fee.findFirst({ where: { id: input.feeId }, select: { id: true, isActive: true, academicSession: true, semester: true } });
     if (!fee) throw new AppError(i18n.errors.fee.notFound, 400);
     if (!fee.isActive) throw new AppError(i18n.errors.fee.notFound, 400);
 
@@ -314,7 +316,22 @@ export class FeeAssignmentService {
       noteToStudent: (input as any).noteToStudent ?? null,
       assignedBy: { connect: { id: userId } },
       isActive: input.isActive ?? true,
+      session: fee.academicSession ?? null,
+      semester: (fee.semester ?? null) as any,
     };
+
+    // TASK H13: Duplicate protection for STUDENT-targeted catalogue assignments.
+    // Composite unique (targetStudentId, feeId) enforced at service level since FK nullable.
+    if (input.assignmentType === AssignmentTargetType.STUDENT && input.targetStudentId) {
+      const existing = await prisma.feeAssignment.findFirst({
+        where: { targetStudentId: input.targetStudentId, feeId: input.feeId, isActive: true },
+        select: ASSIGNMENT_SELECT as any,
+      });
+      if (existing) {
+        return existing;
+      }
+    }
+
     const created = await prisma.feeAssignment.create({ data, select: ASSIGNMENT_SELECT as any });
     await writeAudit(req, { action: auditActions.feeAssigned, entityType: 'FEE_ASSIGNMENT', entityId: created.id, newValue: created });
     return created;
@@ -458,24 +475,41 @@ export class FeeAssignmentService {
       const overrideAmount = input.overrideAmount !== undefined ? new Prisma.Decimal(String(input.overrideAmount)) : null;
       const overrideDeadline = input.overrideDeadline ?? null;
 
-      // Step 4 — ALWAYS CREATE a NEW FeeAssignment per bill request.
-      // Same-student, same-fee, same-category MULTIPLE bills are supported per user requirement.
+      // Step 4 — FeeAssignment for STUDENT target.
+      // TASK H13:
+      //   - Denormalize session + semester from parent Fee into FeeAssignment row
+      //   - For existing catalogue fee (not ad-hoc), enforce (targetStudentId, feeId) uniqueness:
+      //     if ACTIVE row already exists, re-use it rather than creating duplicate.
+      //   - Ad-hoc fees are always newly created in this tx so uniqueness guarantees no conflict.
       // HTTP-level idempotency (to catch accidental double-submit within 2 seconds) is handled
-      // by Idempotency-Key header middleware elsewhere — NOT by business-dedupe here.
+      // by Idempotency-Key header middleware elsewhere.
       let assignmentCreated = true;
-      const assignment = await tx.feeAssignment.create({
-        data: {
-          fee: { connect: { id: feeId } },
-          assignmentType: AssignmentTargetType.STUDENT,
-          targetStudent: { connect: { id: student.id } },
-          overrideAmount: overrideAmount ?? undefined,
-          overrideDeadline: overrideDeadline ?? undefined,
-          noteToStudent: input.noteToStudent ?? null,
-          assignedBy: { connect: { id: actorUserId } },
-          isActive: true,
-        },
-        select: ASSIGNMENT_SELECT as any,
-      });
+      let assignment: any = null;
+      if (!adhocFeeCreated && feeId) {
+        assignment = await tx.feeAssignment.findFirst({
+          where: { targetStudentId: student.id, feeId: feeId, isActive: true },
+          select: ASSIGNMENT_SELECT as any,
+        });
+      }
+      if (assignment == null) {
+        assignment = await tx.feeAssignment.create({
+          data: {
+            fee: { connect: { id: feeId } },
+            assignmentType: AssignmentTargetType.STUDENT,
+            targetStudent: { connect: { id: student.id } },
+            overrideAmount: overrideAmount ?? undefined,
+            overrideDeadline: overrideDeadline ?? undefined,
+            noteToStudent: input.noteToStudent ?? null,
+            assignedBy: { connect: { id: actorUserId } },
+            isActive: true,
+            session: fee.academicSession ?? null,
+            semester: (fee.semester ?? null) as any,
+          },
+          select: ASSIGNMENT_SELECT as any,
+        });
+      } else {
+        assignmentCreated = false;
+      }
 
       // Step 5 — ALWAYS CREATE a new UNPAID Invoice per direct bill posting.
       // Multiple direct bills = multiple separate invoice rows. Each has unique reference + idempotencyKey fingerprint.

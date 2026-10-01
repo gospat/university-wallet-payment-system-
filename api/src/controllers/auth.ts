@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { AuthService } from '../services/auth';
+import { AuthService, SessionTiming } from '../services/auth';
 import { catchAsync } from '../utils/catchAsync';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
@@ -15,6 +15,22 @@ import { randomHex, isConsumedOrMissing, markConsumed } from '../services/passwo
 
 export const signup = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
   const { user, token, accessToken, refreshToken, expiresInMs } = await AuthService.signup(req.body);
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.cookie('access_token', accessToken, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/api',
+    maxAge: SessionTiming.ACCESS_EXPIRES_MS,
+  });
+  res.cookie('refresh_token', refreshToken, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/api/auth/refresh',
+    expires: new Date(Date.now() + SessionTiming.REFRESH_EXPIRES_MS),
+  });
 
   res.status(201).json({
     status: 'success',
@@ -33,6 +49,22 @@ export const login = catchAsync(async (req: Request, res: Response, next: NextFu
     reqUa(req),
     req.body?.audience as Role | undefined,
   );
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.cookie('access_token', accessToken, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/api',
+    maxAge: SessionTiming.ACCESS_EXPIRES_MS,
+  });
+  res.cookie('refresh_token', refreshToken, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/api/auth/refresh',
+    expires: new Date(Date.now() + SessionTiming.REFRESH_EXPIRES_MS),
+  });
 
   res.status(200).json({
     status: 'success',
@@ -56,6 +88,22 @@ export const refresh = [
       reqIp(req),
       reqUa(req)
     );
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.cookie('access_token', accessToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      path: '/api',
+      maxAge: SessionTiming.ACCESS_EXPIRES_MS,
+    });
+    res.cookie('refresh_token', refreshToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      path: '/api/auth/refresh',
+      expires: new Date(Date.now() + SessionTiming.REFRESH_EXPIRES_MS),
+    });
 
     res.status(200).json({
       status: 'success',

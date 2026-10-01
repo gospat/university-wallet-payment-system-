@@ -126,8 +126,19 @@ const hasPermission = (
   userPermissions?: string[],
   role?: Role,
 ): boolean => {
-  if (role === 'ADMIN') return true;
   if (!requiresPermission) return true;
+  const adminAllowed = new Set([
+    'MANAGE_USERS',
+    'MANAGE_ROLES',
+    'SYSTEM_SETTINGS',
+    'PAYSTACK_CONFIG',
+    'AUDIT_LOGS_VIEW_FULL',
+  ]);
+  if (role === 'ADMIN') {
+    if (adminAllowed.has(requiresPermission)) return true;
+    if (!userPermissions || userPermissions.length === 0) return false;
+    return userPermissions.includes(requiresPermission);
+  }
   if (!userPermissions || userPermissions.length === 0) return false;
   return userPermissions.includes(requiresPermission);
 };
@@ -268,7 +279,7 @@ const NavItemRow: React.FC<{
   const styles = ROLE_STYLES[role];
   const Icon = item.icon;
   const active = isActive(item.to, activePath, item.exact);
-  const badgeValue = item.counterKey ? item.badge : item.badge;
+  const badgeValue = item.badge;
 
   const baseRowClass = [
     'h-10 w-full flex items-center justify-between px-4 text-sm cursor-pointer',
@@ -373,6 +384,17 @@ const PortalShell: React.FC<PortalShellProps> = ({
   const navGroups = role === 'STUDENT'
     ? buildStudentNav(navCounters)
     : buildAdminNav(role, navCounters, userPermissions);
+
+  const visibleNavGroups = useMemo(
+    () =>
+      navGroups
+        .map((g) => ({
+          ...g,
+          visibleItems: g.items.filter((item) => hasPermission(item.requiresPermission, userPermissions, role)),
+        }))
+        .filter((g) => g.visibleItems.length > 0),
+    [navGroups, userPermissions, role],
+  );
 
   const logoutItem: NavItem = {
     to: '#',
@@ -562,12 +584,20 @@ const PortalShell: React.FC<PortalShellProps> = ({
       </div>
 
       <nav className="flex-1 overflow-y-auto pb-4 pr-1 scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
-        {navGroups.map((group, gi) => {
-          const visibleItems = group.items.filter((item) =>
-            hasPermission(item.requiresPermission, userPermissions, role),
-          );
-          if (visibleItems.length === 0) return null;
-          return (
+        {visibleNavGroups.length === 0 ? (
+          <div className="px-4 pt-6 pb-4">
+            <div
+              role="alert"
+              className="rounded-xl border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 text-sm"
+            >
+              <div className="font-semibold mb-1">No menu items available</div>
+              <p className="text-xs leading-relaxed text-amber-800">
+                No menu items available for your role. Contact an administrator to request additional permissions.
+              </p>
+            </div>
+          </div>
+        ) : (
+          visibleNavGroups.map((group, gi) => (
             <div key={gi}>
               {group.title && (
                 <div className="px-4 pt-4 pb-2">
@@ -580,7 +610,7 @@ const PortalShell: React.FC<PortalShellProps> = ({
                 </div>
               )}
               <div>
-                {visibleItems.map((item, ii) => (
+                {group.visibleItems.map((item, ii) => (
                   <NavItemRow
                     key={`${gi}-${ii}`}
                     item={item}
@@ -591,8 +621,8 @@ const PortalShell: React.FC<PortalShellProps> = ({
                 ))}
               </div>
             </div>
-          );
-        })}
+          ))
+        )}
 
         <div className="pt-4 mt-2 border-t border-gray-100">
           <NavItemRow

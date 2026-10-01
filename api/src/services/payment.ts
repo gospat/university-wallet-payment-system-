@@ -322,6 +322,54 @@ export class PaymentService {
     }
   }
 
+  private static pickAlatpayBestMatch<T extends { id: number; status: any; updatedAt: any; alatpayReference?: string | null }>(
+    rows: T[],
+    lookupRef: string
+  ): T | null {
+    if (!rows || rows.length === 0) return null;
+    const scoreStatus = (s: any): number => {
+      if (s === TransactionStatus.SUCCESS) return 20000000;
+      if (s === TransactionStatus.PENDING) return 10000000;
+      return 0;
+    };
+    const sorted = [...rows].sort((a, b) => {
+      const tA = a.updatedAt ? new Date(a.updatedAt as any).getTime() : 0;
+      const tB = b.updatedAt ? new Date(b.updatedAt as any).getTime() : 0;
+      if (tB !== tA) return tB - tA;
+      const sA = scoreStatus(a.status);
+      const sB = scoreStatus(b.status);
+      if (sA !== sB) return sB - sA;
+      return 0;
+    });
+    if (sorted.length > 1 && lookupRef) {
+      const top = sorted[0];
+      const topUpdatedAt = top.updatedAt ? new Date(top.updatedAt as any).getTime() : 0;
+      const topStatusScore = scoreStatus(top.status);
+      const tied = sorted.filter(r => {
+        const u = r.updatedAt ? new Date(r.updatedAt as any).getTime() : 0;
+        const s = scoreStatus(r.status);
+        return u === topUpdatedAt && s === topStatusScore;
+      });
+      if (tied.length > 1) {
+        const ids = tied.map(t => t.id);
+        const refs = tied
+          .map(t => (t as any).alatpayReference || (t as any).paystackReference || (t as any).reference || '')
+          .filter(Boolean);
+        console.error(JSON.stringify({
+          level: 'error',
+          msg: 'Duplicate ALATPAY transaction matches for lookup ref — tie-break chose first.',
+          lookupRef: lookupRef,
+          duplicateCount: tied.length,
+          duplicateIds: ids,
+          duplicateReferences: refs,
+          pickedId: tied[0].id,
+          at: new Date().toISOString(),
+        }, null, 2));
+      }
+    }
+    return sorted[0];
+  }
+
   // -----------------------------------------------------------------------
   // Verify payment — called both by GET /student/payments/verify/:ref AND
   // by the Paystack / ALAT Pay webhook handler. Idempotent (safe to call twice).
@@ -338,10 +386,12 @@ export class PaymentService {
         { alatpayReference: ref },
       ],
     };
-    const preTx = await prisma.transaction.findFirst({
+    const preRows = await prisma.transaction.findMany({
       where: lookupWhere,
-      select: { id: true, gateway: true, reference: true, paystackReference: true, alatpayReference: true, metadata: true },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: { id: true, gateway: true, reference: true, paystackReference: true, alatpayReference: true, metadata: true, status: true, updatedAt: true },
     });
+    const preTx = PaymentService.pickAlatpayBestMatch(preRows, ref);
     if (!preTx) throw new AppError(i18n.errors.payment.transactionNotFound, 404);
     const txGateway: PaymentGateway = preTx.gateway ?? PaymentGateway.ALATPAY;
     const provider = getPaymentProvider(txGateway);
@@ -394,15 +444,17 @@ export class PaymentService {
         ...(transactionId && Number.isFinite(transactionId) ? [{ id: transactionId }] : []),
       ],
     };
-    const initialTx: any = await prisma.transaction.findFirst({
+    const initialRows: any[] = await prisma.transaction.findMany({
       where: txWhere,
+      orderBy: [{ updatedAt: 'desc' }],
       select: {
         id: true, reference: true, status: true, userId: true, invoiceId: true,
         expectedAmount: true, amount: true, metadata: true, gateway: true,
-        paystackReference: true, alatpayReference: true,
+        paystackReference: true, alatpayReference: true, updatedAt: true,
         user: { select: { id: true, email: true, firstName: true, lastName: true, matricNumber: true, role: true } },
       },
     });
+    const initialTx: any = PaymentService.pickAlatpayBestMatch(initialRows, ref);
     if (!initialTx) throw new AppError(i18n.errors.payment.transactionNotFound, 404);
     if (opts.assertStudentId !== undefined && Number(initialTx.userId) !== Number(opts.assertStudentId)) {
       throw new AppError(i18n.errors.payment.notYourPayment, 404);
@@ -611,15 +663,46 @@ export class PaymentService {
         });
       }
 
-      // 7. Receipt row creation
-      //    - Receipt counter: max(id)+1
-      const receiptCounter = await (tx.receipt.aggregate({ _max: { id: true } }) as Promise<{ _max: { id: number | null } }>);
-      const nextId = (receiptCounter._max.id ?? 0) + 1;
-      const receiptNumber = generateReceiptReference(nextId);
+      // 7a. TASK B3 — Atomic receipt counter via dedicated Counter table
+      //     (eliminates MAX(id)+1 race under concurrent verifyPayment/webhook calls).
+      const counterRow = await (tx as any).counter.upsert({
+        where: { id: 'receipt_number' },
+        update: { value: { increment: 1 } },
+        create: { id: 'receipt_number', value: 2 },
+        select: { value: true },
+      });
+      const counterValue = Number(counterRow.value ?? 1);
+      const sessionRaw =
+        (latest.invoice?.session as string | undefined | null)
+        ?? (latest.metadata?.session as string | undefined | null)
+        ?? (latest.user as any)?.academicSession as string | undefined | null
+        ?? '';
+      const sessionYearMatch = /^(\d{4})\/\d{4}$/.exec(String(sessionRaw || ''));
+      const academicYearShort = sessionYearMatch ? sessionYearMatch[1].slice(2) : String(new Date().getFullYear()).slice(2);
+      const receiptNumber = `COUNTER-${counterValue}-${academicYearShort}`;
+
       const verificationToken = generateVerificationToken();
       const qrUrl = `${process.env.APP_BASE_URL ?? 'http://localhost:3001'}/public/verify-receipt/${verificationToken}`;
       const paystackRef = txGateway === PaymentGateway.PAYSTACK ? providerRef : latest.paystackReference ?? null;
       const methodDetail = paystackCardType ? paystackCardType : paystackBank ? paystackBank : (txGateway === PaymentGateway.ALATPAY ? (channel ?? 'ALAT Pay') : channel);
+
+      // 7b. TASK H12 — Fee columns on Receipt (structural invariant)
+      const convenienceFee = money(Number((amountBreakdown as any).convenienceFee ?? 0));
+      const serviceChargeRow = money(Number(amountBreakdown.serviceCharge ?? 0));
+      const gatewayFeeRow = money(Number(amountBreakdown.gatewayFee ?? 0));
+      const totalAmount = money(baseAmount + convenienceFee + serviceChargeRow + gatewayFeeRow);
+
+      // Structural invariant: receipt.totalAmount must equal tx.amount
+      // (paidNaira is what provider verified; guard against drift)
+      const invariantTxAmount = money(Number(paidNaira ?? latest.amount ?? totalAmount));
+      const invariantOk = Math.abs(totalAmount - invariantTxAmount) <= 0.02;
+      if (!invariantOk) {
+        throw new AppError(
+          `Receipt totalAmount invariant failed (${totalAmount.toFixed(2)} vs tx ${invariantTxAmount.toFixed(2)}); aborting receipt creation.`,
+          500,
+        );
+      }
+
       const receiptRow = await tx.receipt.create({
         data: {
           receiptNumber,
@@ -628,6 +711,10 @@ export class PaymentService {
           invoiceId: latest.invoiceId ?? null,
           studentId: latest.userId,
           paidAmount: baseAmount,
+          convenienceFee,
+          serviceCharge: serviceChargeRow,
+          gatewayFee: gatewayFeeRow,
+          totalAmount,
           paystackReference: paystackRef,
           paymentChannel: gatewayLabel(txGateway, channel),
           paymentMethodDetail: methodDetail,
@@ -639,9 +726,139 @@ export class PaymentService {
         action: i18n.auditActions.receiptGenerated,
         entityType: 'RECEIPT',
         entityId: receiptRow.id,
-        newValue: { receiptNumber, paidAmount: baseAmount, studentId: latest.userId, gateway: txGateway },
-        details: { transactionId: latest.id },
+        newValue: {
+          receiptNumber,
+          paidAmount: baseAmount,
+          convenienceFee,
+          serviceCharge: serviceChargeRow,
+          gatewayFee: gatewayFeeRow,
+          totalAmount,
+          studentId: latest.userId,
+          gateway: txGateway,
+        },
+        details: { transactionId: latest.id, counterValue, invariantTxAmount },
       });
+
+      // 7c. TASK H11 — DOUBLE-ENTRY GENERAL LEDGER (balanced DR = CR exactly)
+      //     Event: PAYMENT_SUCCESS
+      //     (1) Dr CASH_CLEARING           = totalAmount
+      //     (2) Cr STUDENT_RECEIVABLE      = baseAmount
+      //     (3) Cr CONVENIENCE_FEE_INCOME  = convenienceFee (if >0)
+      //     (4) Cr SERVICE_CHARGE_INCOME   = serviceChargeRow
+      //     (5) Dr GATEWAY_FEE_EXPENSE     = gatewayFeeRow  (contra: net cash clearing is base+convenience+service)
+      //     Check: totalDebits  = CASH_CLEARING(totalAmount) + GATEWAY_FEE_EXPENSE(gatewayFeeRow)
+      //            totalCredits = STUDENT_RECEIVABLE(baseAmount) + CONVENIENCE_FEE_INCOME(convenienceFee)
+      //                           + SERVICE_CHARGE_INCOME(serviceChargeRow)
+      //                           + GATEWAY_FEE contra credit (gatewayFeeRow)  [paid to provider]
+      //     To keep equation DR=CR exactly we write CASH_CLEARING NET of gatewayFee:
+      //       Dr CASH_CLEARING (totalAmount - gatewayFeeRow)  ... net cash to us
+      //       Dr GATEWAY_FEE_EXPENSE  gatewayFeeRow           ... expense borne
+      //       Cr STUDENT_RECEIVABLE    baseAmount
+      //       Cr CONVENIENCE_FEE_INCOME convenienceFee
+      //       Cr SERVICE_CHARGE_INCOME  serviceChargeRow
+      //     => DR = (totalAmount - gatewayFee) + gatewayFee = totalAmount ; CR = base + convenience + service = totalAmount ✓
+      try {
+        const glTransactionDate = paidAt ?? new Date();
+        const glEntries: Array<any> = [];
+        const glDrCashClearingNet = money(totalAmount - gatewayFeeRow);
+        if (glDrCashClearingNet > 0) {
+          glEntries.push({
+            transactionDate: glTransactionDate,
+            entryType: 'PAYMENT_SUCCESS' as any,
+            description: `Payment received (gateway net) — ${latest.reference}`,
+            amount: glDrCashClearingNet,
+            currency: 'NGN',
+            account: 'CASH_CLEARING',
+            counterpartyAccount: 'STUDENT_RECEIVABLE',
+            transactionId: latest.id,
+            receiptId: receiptRow.id,
+            userId: latest.userId,
+            invoiceId: latest.invoiceId ?? undefined,
+            meta: { side: 'DEBIT', gateway: txGateway, providerRef } as any,
+          });
+        }
+        if (gatewayFeeRow > 0) {
+          glEntries.push({
+            transactionDate: glTransactionDate,
+            entryType: 'GATEWAY_FEE_EXPENSE' as any,
+            description: `Payment gateway fee — ${txGateway} — ${latest.reference}`,
+            amount: gatewayFeeRow,
+            currency: 'NGN',
+            account: 'GATEWAY_FEE_EXPENSE',
+            counterpartyAccount: 'CASH_CLEARING',
+            transactionId: latest.id,
+            receiptId: receiptRow.id,
+            userId: latest.userId,
+            invoiceId: latest.invoiceId ?? undefined,
+            meta: { side: 'DEBIT', gateway: txGateway, providerRef } as any,
+          });
+        }
+        if (baseAmount > 0) {
+          glEntries.push({
+            transactionDate: glTransactionDate,
+            entryType: 'PAYMENT_SUCCESS' as any,
+            description: `Student fee applied to receivable — ${latest.reference}`,
+            amount: baseAmount,
+            currency: 'NGN',
+            account: 'STUDENT_RECEIVABLE',
+            counterpartyAccount: 'CASH_CLEARING',
+            transactionId: latest.id,
+            receiptId: receiptRow.id,
+            userId: latest.userId,
+            invoiceId: latest.invoiceId ?? undefined,
+            meta: { side: 'CREDIT', gateway: txGateway, providerRef } as any,
+          });
+        }
+        if (convenienceFee > 0) {
+          glEntries.push({
+            transactionDate: glTransactionDate,
+            entryType: 'CONVENIENCE_FEE_INCOME' as any,
+            description: `Convenience fee income — ${latest.reference}`,
+            amount: convenienceFee,
+            currency: 'NGN',
+            account: 'CONVENIENCE_FEE_INCOME',
+            counterpartyAccount: 'CASH_CLEARING',
+            transactionId: latest.id,
+            receiptId: receiptRow.id,
+            userId: latest.userId,
+            invoiceId: latest.invoiceId ?? undefined,
+            meta: { side: 'CREDIT', gateway: txGateway, providerRef } as any,
+          });
+        }
+        if (serviceChargeRow > 0) {
+          glEntries.push({
+            transactionDate: glTransactionDate,
+            entryType: 'SERVICE_CHARGE_INCOME' as any,
+            description: `University service charge income — ${latest.reference}`,
+            amount: serviceChargeRow,
+            currency: 'NGN',
+            account: 'SERVICE_CHARGE_INCOME',
+            counterpartyAccount: 'CASH_CLEARING',
+            transactionId: latest.id,
+            receiptId: receiptRow.id,
+            userId: latest.userId,
+            invoiceId: latest.invoiceId ?? undefined,
+            meta: { side: 'CREDIT', gateway: txGateway, providerRef } as any,
+          });
+        }
+        if (glEntries.length > 0) {
+          // Sanity: sum DEBITS === sum CREDITS (within 0.01)
+          let sumDr = 0;
+          let sumCr = 0;
+          for (const e of glEntries) {
+            const side: string = (e.meta as any)?.side ?? '';
+            if (side === 'DEBIT') sumDr += Number(e.amount);
+            else if (side === 'CREDIT') sumCr += Number(e.amount);
+          }
+          const drift = Math.abs(sumDr - sumCr);
+          if (drift > 0.02) {
+            console.warn('[verifyPayment:GL] drift=' + drift.toFixed(2) + ' sumDr=' + sumDr.toFixed(2) + ' sumCr=' + sumCr.toFixed(2));
+          }
+          await (tx as any).generalLedger.createMany({ data: glEntries, skipDuplicates: true });
+        }
+      } catch (glErr) {
+        console.warn('[verifyPayment:GL] GL write failed (non-fatal, tx already committed inner):', (glErr as Error)?.message?.slice(0, 200));
+      }
 
       // 8. Audit paymentVerified success
       await writeAudit(opts.req, {
