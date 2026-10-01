@@ -27,14 +27,29 @@ const ROLE_META: Record<'ADMIN' | 'BURSARY', { name: string; description: string
   },
 };
 
-const PERMISSION_CATEGORIES = ['Students', 'Fees', 'Payments', 'Admin'] as const;
+const PERMISSION_CATEGORIES = [
+  'Dashboard',
+  'Students',
+  'Fees',
+  'Payments',
+  'Direct Billing',
+  'Receipts',
+  'Academic Structure',
+  'Reconciliation',
+  'Admin',
+] as const;
 type PermissionCategory = typeof PERMISSION_CATEGORIES[number];
 
 const normalizeCategory = (raw: string): PermissionCategory => {
   const up = raw.toUpperCase();
+  if (up.includes('DASHBOARD')) return 'Dashboard';
   if (up.includes('STUDENT')) return 'Students';
   if (up.includes('FEE') || up.includes('BILL') || up.includes('INVOICE')) return 'Fees';
-  if (up.includes('PAYMENT') || up.includes('RECEIPT') || up.includes('REFUND') || up.includes('TRANSACTION')) return 'Payments';
+  if (up.includes('DIRECT') || up.includes('BILLING')) return 'Direct Billing';
+  if (up.includes('RECEIPT')) return 'Receipts';
+  if (up.includes('PAYMENT') || up.includes('REFUND') || up.includes('TRANSACTION')) return 'Payments';
+  if (up.includes('ACADEMIC') || up.includes('COLLEGE') || up.includes('DEPARTMENT') || up.includes('PROGRAMME') || up.includes('PROGRAM')) return 'Academic Structure';
+  if (up.includes('RECON')) return 'Reconciliation';
   return 'Admin';
 };
 
@@ -101,7 +116,17 @@ const RolesPage: React.FC = () => {
   };
 
   const groupPermsByCategory = <T extends { category: string }>(perms: T[]): Record<PermissionCategory, T[]> => {
-    const result: Record<PermissionCategory, T[]> = { Students: [], Fees: [], Payments: [], Admin: [] };
+    const result: Record<PermissionCategory, T[]> = {
+      Dashboard: [],
+      Students: [],
+      Fees: [],
+      Payments: [],
+      'Direct Billing': [],
+      Receipts: [],
+      'Academic Structure': [],
+      Reconciliation: [],
+      Admin: [],
+    };
     perms.forEach((p) => {
       result[normalizeCategory(p.category)].push(p);
     });

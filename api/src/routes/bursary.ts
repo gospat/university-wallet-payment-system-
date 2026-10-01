@@ -22,8 +22,8 @@ router.use(restrictTo('BURSARY', 'ADMIN'));
 //   Full approve/reject lives on routes/admin.ts (ADMIN only).
 // ---------------------------------------------------------------------------
 // Refund endpoints return 400 "disabled" via RefundService guard (endpoints mounted for backwards-compat API surface audit trails)
-router.get('/refunds', bursaryListRefunds);
-router.post('/refunds', bursaryRequestRefund as any);
+router.get('/refunds', requirePermission('PROCESS_REFUND'), bursaryListRefunds);
+router.post('/refunds', requirePermission('PROCESS_REFUND'), bursaryRequestRefund as any);
 
 const withdrawalIdParams = z.object({ id: z.coerce.number().int().positive() });
 
@@ -35,6 +35,7 @@ const withdrawalIdParams = z.object({ id: z.coerce.number().int().positive() });
 // ---------------------------------------------------------------------------
 const TxUpdatePatchBody = z.record(z.any());
 router.patch('/transactions/:id',
+  requirePermission('VERIFY_PAYMENT'),
   validateParams(withdrawalIdParams),
   validateBody(TxUpdatePatchBody),
   catchAsync(async (req: any, res) => {
@@ -69,7 +70,7 @@ const WebhookListSchema = z.object({
   q: z.string().max(255).trim().optional(),
 });
 
-router.get('/webhooks/events', validateQuery(WebhookListSchema), catchAsync(async (req: any, res) => {
+router.get('/webhooks/events', requirePermission('VIEW_PAYMENTS'), validateQuery(WebhookListSchema), catchAsync(async (req: any, res) => {
   const query = req.query as any;
   const page = query.page ?? 1;
   const pageSize = query.pageSize ?? 50;
@@ -115,7 +116,7 @@ router.get('/webhooks/events', validateQuery(WebhookListSchema), catchAsync(asyn
 }));
 
 const WebhookEventParam = z.object({ id: z.coerce.number().int().positive() });
-router.post('/webhooks/events/:id/reprocess', validateParams(WebhookEventParam), catchAsync(async (req: any, res) => {
+router.post('/webhooks/events/:id/reprocess', requirePermission('VIEW_PAYMENTS'), validateParams(WebhookEventParam), catchAsync(async (req: any, res) => {
   const id = Number(req.params.id);
   const ev = await prisma.webhookEvent.findUnique({ where: { id } });
   if (!ev) return res.status(404).json({ status: 'fail', message: 'Webhook event not found' });
@@ -133,7 +134,7 @@ const DashboardSummarySchema = z.object({
   dateTo: z.coerce.date().optional(),
 });
 
-router.get('/dashboard/summary', validateQuery(DashboardSummarySchema), catchAsync(async (req: any, res) => {
+router.get('/dashboard/summary', requirePermission('VIEW_DASHBOARD'), validateQuery(DashboardSummarySchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo } = req.query as any;
   const paidWhere: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
   if (dateFrom) paidWhere.createdAt = { ...(paidWhere.createdAt || {}), gte: dateFrom };
@@ -212,7 +213,7 @@ router.get('/dashboard/summary', validateQuery(DashboardSummarySchema), catchAsy
 
 const DashboardStatsSchema = z.object({});
 
-router.get('/dashboard/stats', validateQuery(DashboardStatsSchema), catchAsync(async (_req: any, res) => {
+router.get('/dashboard/stats', requirePermission('VIEW_DASHBOARD'), validateQuery(DashboardStatsSchema), catchAsync(async (_req: any, res) => {
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfWeek = new Date(startOfToday);
@@ -272,7 +273,7 @@ const DashboardByCategorySchema = z.object({
   dateTo: z.coerce.date().optional(),
 });
 
-router.get('/dashboard/by-category', validateQuery(DashboardByCategorySchema), catchAsync(async (req: any, res) => {
+router.get('/dashboard/by-category', requirePermission('VIEW_DASHBOARD'), validateQuery(DashboardByCategorySchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo } = req.query as any;
   const where: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
   if (dateFrom) where.createdAt = { ...(where.createdAt || {}), gte: dateFrom };
@@ -309,7 +310,7 @@ const DashboardTrendSchema = z.object({
   groupBy: z.enum(['day', 'week', 'month']).default('day').optional(),
 });
 
-router.get('/dashboard/trend', validateQuery(DashboardTrendSchema), catchAsync(async (req: any, res) => {
+router.get('/dashboard/trend', requirePermission('VIEW_DASHBOARD'), validateQuery(DashboardTrendSchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo, groupBy } = req.query as any;
   const unit: 'day' | 'week' | 'month' = groupBy || 'day';
 
@@ -384,7 +385,7 @@ const CollectionsReportSchema = z.object({
   pageSize: z.coerce.number().int().positive().max(500).default(100).optional(),
 });
 
-router.get('/reports/collections', validateQuery(CollectionsReportSchema), catchAsync(async (req: any, res) => {
+router.get('/reports/collections', requirePermission('VIEW_RECONCILIATION_REPORTS'), validateQuery(CollectionsReportSchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo, format, categoryId, college, level, studentId, page, pageSize } = req.query as any;
   const where: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
   if (dateFrom) where.createdAt = { ...(where.createdAt || {}), gte: dateFrom };
@@ -825,7 +826,7 @@ router.get(
 // ---------------------------------------------------------------------------
 router.get(
   '/receipts/verify/:tokenOrNumber',
-  requirePermission('VIEW_RECEIPTS'),
+  requirePermission('VERIFY_RECEIPT'),
   catchAsync(async (req: any, res) => {
     const tokenOrNumber = String(req.params.tokenOrNumber || '').trim();
     const row: any = await prisma.receipt.findFirst({

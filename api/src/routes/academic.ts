@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import formidable, { Fields, Files, Part } from 'formidable';
 import jwt from 'jsonwebtoken';
-import { protect, restrictTo } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
 import { AppError } from '../utils/AppError';

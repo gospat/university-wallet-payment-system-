@@ -2,17 +2,32 @@ import { Role } from '@prisma/client';
 import prisma from '../config/database';
 
 export const PERMISSION_DEFS: { key: string; name: string; category: string; description?: string }[] = [
+  { key: 'VIEW_DASHBOARD', name: 'View Dashboard', category: 'Dashboard' },
   { key: 'VIEW_STUDENTS', name: 'View Students', category: 'Students' },
   { key: 'CREATE_STUDENT', name: 'Create Student', category: 'Students' },
   { key: 'BULK_UPLOAD_STUDENTS', name: 'Bulk Upload Students', category: 'Students' },
-  { key: 'CREATE_FEE', name: 'Create Fee', category: 'Fees' },
-  { key: 'EDIT_FEE', name: 'Edit Fee', category: 'Fees' },
+  { key: 'VIEW_IMPORT_HISTORY', name: 'View Import History', category: 'Students' },
+  { key: 'VIEW_BILL_CATEGORIES', name: 'View Bill Categories', category: 'Fees' },
+  { key: 'VIEW_BILLS_CATALOGUE', name: 'View Bills Catalogue', category: 'Fees' },
+  { key: 'CREATE_FEE', name: 'Create Bill / Fee', category: 'Fees' },
+  { key: 'EDIT_FEE', name: 'Edit Bill / Fee', category: 'Fees' },
+  { key: 'BULK_UPLOAD_FEES', name: 'Bulk Upload Bills', category: 'Fees' },
+  { key: 'ASSIGN_FEES', name: 'Assign Bills to Students', category: 'Fees' },
   { key: 'VIEW_PAYMENTS', name: 'View Payments', category: 'Payments' },
   { key: 'VERIFY_PAYMENT', name: 'Verify Payment', category: 'Payments' },
-  { key: 'GENERATE_RECEIPT', name: 'Generate Receipt', category: 'Payments' },
+  { key: 'DIRECT_BILL_STUDENT', name: 'Bill a Student (Direct Billing)', category: 'Direct Billing' },
+  { key: 'VIEW_DIRECT_BILLS_LOG', name: 'View Direct Bills Log', category: 'Direct Billing' },
+  { key: 'VIEW_RECEIPTS', name: 'View Receipts', category: 'Receipts' },
+  { key: 'GENERATE_RECEIPT', name: 'Generate Receipt', category: 'Receipts' },
+  { key: 'VERIFY_RECEIPT', name: 'Verify Receipt Authenticity', category: 'Receipts' },
   { key: 'PROCESS_REFUND', name: 'Process Refund', category: 'Payments' },
+  { key: 'VIEW_COLLEGES', name: 'View Colleges', category: 'Academic Structure' },
+  { key: 'VIEW_DEPARTMENTS', name: 'View Departments', category: 'Academic Structure' },
+  { key: 'VIEW_PROGRAMMES', name: 'View Programmes', category: 'Academic Structure' },
+  { key: 'VIEW_RECONCILIATION', name: 'View Reconciliation Dashboard', category: 'Reconciliation' },
+  { key: 'VIEW_RECONCILIATION_REPORTS', name: 'View Reconciliation Reports', category: 'Reconciliation' },
   { key: 'MANAGE_USERS', name: 'Manage Users', category: 'Admin' },
-  { key: 'MANAGE_ROLES', name: 'Manage Roles', category: 'Admin' },
+  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin' },
   { key: 'SYSTEM_SETTINGS', name: 'System Settings', category: 'Admin' },
   { key: 'PAYSTACK_CONFIG', name: 'Payment Configuration', category: 'Admin' },
   { key: 'AUDIT_LOGS_VIEW_FULL', name: 'Audit Logs (Full)', category: 'Admin' },
@@ -31,7 +46,7 @@ const BURSARY_EXCLUDED = new Set([
 
 const BURSARY_PERMISSION_KEYS = ALL_PERMISSION_KEYS.filter(
   (k) => !BURSARY_EXCLUDED.has(k),
-).concat('AUDIT_LOGS_VIEW_LIMITED');
+);
 
 export async function seedPermissions() {
   for (const def of PERMISSION_DEFS) {

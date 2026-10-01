@@ -1,5 +1,5 @@
 import express from 'express';
-import { protect, restrictTo } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import {
   createDirectStudentBill,
   createFeeAssignment,
@@ -16,13 +16,13 @@ const router = express.Router();
 router.use(protect);
 
 // ADMIN | BURSARY may read, create, patch assignments and trigger generates.
-router.get('/', restrictTo('ADMIN', 'BURSARY'), listFeeAssignments);
-router.get('/:id', restrictTo('ADMIN', 'BURSARY'), getFeeAssignment);
-router.post('/', restrictTo('ADMIN', 'BURSARY'), createFeeAssignment);
-router.patch('/:id', restrictTo('ADMIN', 'BURSARY'), updateFeeAssignment);
-router.delete('/:id', restrictTo('ADMIN', 'BURSARY'), deleteFeeAssignment);
-router.post('/:id/generate-invoices', restrictTo('ADMIN', 'BURSARY'), generateInvoices);
-router.post('/manual-student', restrictTo('ADMIN', 'BURSARY'), manualStudentInvoice);
-router.post('/student-bill', restrictTo('ADMIN', 'BURSARY'), createDirectStudentBill);
+router.get('/', requirePermission('ASSIGN_FEES'), listFeeAssignments);
+router.get('/:id', requirePermission('ASSIGN_FEES'), getFeeAssignment);
+router.post('/', requirePermission('ASSIGN_FEES'), createFeeAssignment);
+router.patch('/:id', requirePermission('ASSIGN_FEES'), updateFeeAssignment);
+router.delete('/:id', requirePermission('ASSIGN_FEES'), deleteFeeAssignment);
+router.post('/:id/generate-invoices', requirePermission('ASSIGN_FEES'), generateInvoices);
+router.post('/manual-student', requirePermission('DIRECT_BILL_STUDENT'), manualStudentInvoice);
+router.post('/student-bill', requirePermission('DIRECT_BILL_STUDENT'), createDirectStudentBill);
 
 export default router;

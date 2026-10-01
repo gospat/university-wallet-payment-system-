@@ -118,12 +118,26 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   void user;
   void goBack;
   void dashboardTo;
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const verifyMode = searchParams.get('verify') === '1';
   const baseEndpoint = role === 'ADMIN' ? '/admin/receipts' : '/bursary/receipts';
   const verifyEndpoint = role === 'ADMIN' ? '/admin/receipts/verify' : '/bursary/receipts/verify';
   const activePath = `/${role.toLowerCase()}/receipts`;
+
+  // permissions derived from user.permissions (already loaded at protect() time)
+  const perms = Array.isArray((user as any)?.permissions) ? ((user as any).permissions as string[]) : [];
+  const canVerifyReceipt = perms.includes('VERIFY_RECEIPT') || perms.includes('GENERATE_RECEIPT') || role === 'ADMIN';
+
+  const toggleVerifyMode = (on: boolean) => {
+    const next = new URLSearchParams(searchParams);
+    if (on) next.set('verify', '1'); else next.delete('verify');
+    setSearchParams(next, { replace: false });
+    if (!on) {
+      setVerifyResult(null);
+      setVerifyError('');
+    }
+  };
 
   useEffect(() => {
     setErrorMsg('');
@@ -243,23 +257,37 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   };
 
   return (
-    <PortalShell brand={brand} userText={userText} role={role} onLogout={onLogout} activePath={activePath} navCounters={navCounts}>
+    <PortalShell brand={brand} userText={userText} role={role} onLogout={onLogout} activePath={activePath} navCounters={navCounts} userPermissions={perms}>
       <div className="w-full space-y-6">
         <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">
-              {verifyMode ? 'Verify Receipt' : 'All Receipts'}
-            </h1>
+            <h1 className="text-2xl font-bold text-gray-900">Receipts</h1>
             <p className="text-sm text-gray-500 mt-1">
-              {verifyMode
-                ? 'Enter a receipt number or verification token to verify authenticity and view details.'
-                : role === 'ADMIN'
-                  ? 'Manage, download, and verify all generated fee receipts.'
-                  : 'Manage and download finance-issued fee receipts.'}
+              {role === 'ADMIN'
+                ? 'Manage, download, and verify all generated fee receipts.'
+                : 'Manage and download finance-issued fee receipts.'}
             </p>
           </div>
-          {!verifyMode && (
-            <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="inline-flex rounded-xl border border-gray-200 bg-white overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggleVerifyMode(false)}
+                className={`px-4 py-2 text-sm font-semibold transition ${!verifyMode ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-50'}`}
+              >
+                All Receipts
+              </button>
+              {canVerifyReceipt && (
+                <button
+                  type="button"
+                  onClick={() => toggleVerifyMode(true)}
+                  className={`px-4 py-2 text-sm font-semibold transition ${verifyMode ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-50'}`}
+                >
+                  Verify Receipt
+                </button>
+              )}
+            </div>
+            {!verifyMode && (
               <a
                 href={receiptsExportUrl()}
                 download
@@ -267,8 +295,8 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               >
                 <Download className="h-4 w-4" /> CSV export
               </a>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {errorMsg && (
@@ -278,8 +306,8 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           </div>
         )}
 
-        {/* Verify Receipt inline card (only when ?verify=1) */}
-        {verifyMode && (
+        {/* Verify Receipt panel (tab selected) */}
+        {verifyMode && canVerifyReceipt && (
           <div className="bg-white border border-gray-200 rounded-2xl p-6 space-y-5">
             <div className="flex items-start gap-3">
               <div className="bg-blue-50 p-3 rounded-xl text-blue-600 flex-shrink-0">
@@ -507,9 +535,9 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                           onClick={() => openPublicVerify(r.verificationToken)}>
                           Public Verify Link
                         </button>
-                        {!r.isVoided && (
+                        {canVerifyReceipt && !r.isVoided && (
                           <button className="text-amber-700 hover:text-amber-900 text-xs font-medium"
-                            onClick={() => { setVerifyInput(r.verificationToken); if (!verifyMode) window.location.hash = ''; }}>
+                            onClick={() => { setVerifyInput(r.verificationToken); if (!verifyMode) toggleVerifyMode(true); }}>
                             Quick Verify
                           </button>
                         )}

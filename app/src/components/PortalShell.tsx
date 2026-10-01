@@ -155,51 +155,50 @@ const buildAdminNav = (
     {
       title: 'DASHBOARD',
       items: [
-        { to: role === 'BURSARY' ? '/bursary/dashboard' : '/admin/dashboard', icon: LayoutDashboard, label: 'Dashboard', exact: true },
+        { to: role === 'BURSARY' ? '/bursary/dashboard' : '/admin/dashboard', icon: LayoutDashboard, label: 'Dashboard', exact: true, requiresPermission: 'VIEW_DASHBOARD' },
       ],
     },
     {
       title: i18n.sidebar.groups.studentManagement,
       headingIcon: GraduationCap,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/students' : '/admin/students', icon: User, label: 'All Students', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/students?view=create' : '/admin/students?view=create', icon: User, label: 'Add Student', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/students?view=upload' : '/admin/students?view=upload', icon: User, label: 'Bulk Upload', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/students?view=history' : '/admin/students?view=history', icon: User, label: 'Import History', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/students' : '/admin/students', icon: User, label: 'All Students', sub: true, requiresPermission: 'VIEW_STUDENTS' },
+        { to: role === 'BURSARY' ? '/bursary/students?view=create' : '/admin/students?view=create', icon: User, label: 'Add Student', sub: true, requiresPermission: 'CREATE_STUDENT' },
+        { to: role === 'BURSARY' ? '/bursary/students?view=upload' : '/admin/students?view=upload', icon: User, label: 'Bulk Upload', sub: true, requiresPermission: 'BULK_UPLOAD_STUDENTS' },
+        { to: role === 'BURSARY' ? '/bursary/students?view=history' : '/admin/students?view=history', icon: User, label: 'Import History', sub: true, requiresPermission: 'VIEW_IMPORT_HISTORY' },
       ],
     },
     {
       title: 'BILLS & INVOICING',
       headingIcon: Banknote,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/fees?tab=categories' : '/admin/fees?tab=categories', icon: Banknote, label: 'Bill Categories', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/fees?tab=fees' : '/admin/fees?tab=fees', icon: Banknote, label: 'Bills Catalogue', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/fees?tab=create' : '/admin/fees?tab=create', icon: Banknote, label: 'Create Bill', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/fees?tab=upload' : '/admin/fees?tab=upload', icon: Banknote, label: 'Bulk Upload Bills', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/fees?tab=assignments' : '/admin/fees?tab=assignments', icon: Banknote, label: 'Bill Assignments', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/fees?tab=categories' : '/admin/fees?tab=categories', icon: Banknote, label: 'Bill Categories', sub: true, requiresPermission: 'VIEW_BILL_CATEGORIES' },
+        { to: role === 'BURSARY' ? '/bursary/fees?tab=fees' : '/admin/fees?tab=fees', icon: Banknote, label: 'Bills Catalogue', sub: true, requiresPermission: 'VIEW_BILLS_CATALOGUE' },
+        { to: role === 'BURSARY' ? '/bursary/fees?tab=create' : '/admin/fees?tab=create', icon: Banknote, label: 'Create Bill', sub: true, requiresPermission: 'CREATE_FEE' },
+        { to: role === 'BURSARY' ? '/bursary/fees?tab=upload' : '/admin/fees?tab=upload', icon: Banknote, label: 'Bulk Upload Bills', sub: true, requiresPermission: 'BULK_UPLOAD_FEES' },
+        { to: role === 'BURSARY' ? '/bursary/fees?tab=assignments' : '/admin/fees?tab=assignments', icon: Banknote, label: 'Bill Assignments', sub: true, requiresPermission: 'ASSIGN_FEES' },
       ],
     },
     {
       title: i18n.sidebar.groups.payments,
       headingIcon: CreditCard,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/payments' : '/admin/payments', icon: CreditCard, label: 'Payments', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/payments' : '/admin/payments', icon: CreditCard, label: 'Payments', sub: true, requiresPermission: 'VIEW_PAYMENTS' },
       ],
     },
     {
       title: 'DIRECT BILLING',
       headingIcon: UserPlus,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/direct-billing?tab=bill' : '/admin/direct-billing?tab=bill', icon: UserPlus, label: 'Bill a Student', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/direct-billing?tab=assigned' : '/admin/direct-billing?tab=assigned', icon: ListFilter, label: 'Direct Bills Log', sub: true, requiresPermission: role === 'BURSARY' ? 'AUDIT_LOGS_VIEW_LIMITED' : undefined },
+        { to: role === 'BURSARY' ? '/bursary/direct-billing?tab=bill' : '/admin/direct-billing?tab=bill', icon: UserPlus, label: 'Bill a Student', sub: true, requiresPermission: 'DIRECT_BILL_STUDENT' },
+        { to: role === 'BURSARY' ? '/bursary/direct-billing?tab=assigned' : '/admin/direct-billing?tab=assigned', icon: ListFilter, label: 'Direct Bills Log', sub: true, requiresPermission: 'VIEW_DIRECT_BILLS_LOG' },
       ],
     },
     {
       title: i18n.sidebar.groups.receipts,
       headingIcon: Receipt,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/receipts' : '/admin/receipts', icon: Receipt, label: 'All Receipts', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/receipts?verify=1' : '/admin/receipts?verify=1', icon: Receipt, label: 'Verify Receipt', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/receipts' : '/admin/receipts', icon: Receipt, label: 'Receipts', sub: true, requiresPermission: 'VIEW_RECEIPTS' },
         ...(role === 'BURSARY' && userPermissions?.includes('AUDIT_LOGS_VIEW_LIMITED')
           ? [{
               to: '/bursary/audit-logs',
@@ -215,9 +214,9 @@ const buildAdminNav = (
       title: i18n.sidebar.groups.academicStructure,
       headingIcon: School,
       items: [
-        { to: role === 'BURSARY' ? '/bursary/academic/faculties' : '/admin/academic/faculties', icon: School, label: 'Colleges', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/academic/departments' : '/admin/academic/departments', icon: School, label: 'Departments', sub: true },
-        { to: role === 'BURSARY' ? '/bursary/academic/programmes' : '/admin/academic/programmes', icon: School, label: 'Programmes', sub: true },
+        { to: role === 'BURSARY' ? '/bursary/academic/faculties' : '/admin/academic/faculties', icon: School, label: 'Colleges', sub: true, requiresPermission: 'VIEW_COLLEGES' },
+        { to: role === 'BURSARY' ? '/bursary/academic/departments' : '/admin/academic/departments', icon: School, label: 'Departments', sub: true, requiresPermission: 'VIEW_DEPARTMENTS' },
+        { to: role === 'BURSARY' ? '/bursary/academic/programmes' : '/admin/academic/programmes', icon: School, label: 'Programmes', sub: true, requiresPermission: 'VIEW_PROGRAMMES' },
       ],
     },
   ];
@@ -242,8 +241,8 @@ const buildAdminNav = (
       title: i18n.sidebar.groups.reconciliation,
       headingIcon: Scale,
       items: [
-        { to: '/bursary/reconciliation', icon: Scale, label: 'Dashboard', sub: true },
-        { to: '/bursary/reconciliation?view=reports', icon: Scale, label: 'Reports', sub: true },
+        { to: '/bursary/reconciliation', icon: Scale, label: 'Dashboard', sub: true, requiresPermission: 'VIEW_RECONCILIATION' },
+        { to: '/bursary/reconciliation?view=reports', icon: Scale, label: 'Reports', sub: true, requiresPermission: 'VIEW_RECONCILIATION_REPORTS' },
       ],
     });
   }

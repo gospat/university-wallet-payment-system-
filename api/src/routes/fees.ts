@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { protect, restrictTo } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { validateParams } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
 import prisma from '../config/database';
@@ -232,27 +232,27 @@ router.use(protect);
 router.use(restrictTo('ADMIN', 'BURSARY'));
 
 // FeeCategory CRUD — ADMIN | BURSARY
-router.get('/categories', listFeeCategories);
-router.get('/categories/:id', getFeeCategory);
-router.post('/categories', restrictTo('ADMIN', 'BURSARY'), createFeeCategory);
-router.patch('/categories/:id', restrictTo('ADMIN', 'BURSARY'), updateFeeCategory);
-router.delete('/categories/:id', restrictTo('ADMIN', 'BURSARY'), deleteFeeCategory);
+router.get('/categories', requirePermission('VIEW_BILL_CATEGORIES'), listFeeCategories);
+router.get('/categories/:id', requirePermission('VIEW_BILL_CATEGORIES'), getFeeCategory);
+router.post('/categories', requirePermission('EDIT_FEE'), createFeeCategory);
+router.patch('/categories/:id', requirePermission('EDIT_FEE'), updateFeeCategory);
+router.delete('/categories/:id', requirePermission('EDIT_FEE'), deleteFeeCategory);
 
 // Fee CRUD
-router.get('/', listFees);
-router.get('/:id', getFee);
-router.post('/', restrictTo('ADMIN', 'BURSARY'), createFee);
-router.patch('/:id', restrictTo('ADMIN', 'BURSARY'), updateFee);
-router.delete('/:id', restrictTo('ADMIN', 'BURSARY'), deleteFee);
-router.post('/:id/clone', restrictTo('ADMIN', 'BURSARY'), cloneFee);
-router.post('/:id/activate', restrictTo('ADMIN', 'BURSARY'), activateFee);
-router.post('/:id/disable', restrictTo('ADMIN', 'BURSARY'), disableFee);
+router.get('/', requirePermission('VIEW_BILLS_CATALOGUE'), listFees);
+router.get('/:id', requirePermission('VIEW_BILLS_CATALOGUE'), getFee);
+router.post('/', requirePermission('CREATE_FEE'), createFee);
+router.patch('/:id', requirePermission('EDIT_FEE'), updateFee);
+router.delete('/:id', requirePermission('EDIT_FEE'), deleteFee);
+router.post('/:id/clone', requirePermission('CREATE_FEE'), cloneFee);
+router.post('/:id/activate', requirePermission('EDIT_FEE'), activateFee);
+router.post('/:id/disable', requirePermission('EDIT_FEE'), disableFee);
 
 // Fee bulk upload (reuses admin stage/preview/confirm pattern)
 const BulkIdParam = z.object({ id: z.string().min(3).max(100).trim() });
-router.post('/bulk-upload', stageFeeBulkUpload as any);
-router.get('/bulk-upload/:id', previewFeeBulkUpload as any);
-router.post('/bulk-upload/:id/confirm', confirmFeeBulkUpload as any);
-router.get('/bulk-upload/:id/errors.csv', validateParams(BulkIdParam), downloadFeeErrorCsv);
+router.post('/bulk-upload', requirePermission('BULK_UPLOAD_FEES'), stageFeeBulkUpload as any);
+router.get('/bulk-upload/:id', requirePermission('BULK_UPLOAD_FEES'), previewFeeBulkUpload as any);
+router.post('/bulk-upload/:id/confirm', requirePermission('BULK_UPLOAD_FEES'), confirmFeeBulkUpload as any);
+router.get('/bulk-upload/:id/errors.csv', requirePermission('BULK_UPLOAD_FEES'), validateParams(BulkIdParam), downloadFeeErrorCsv);
 
 export default router;
