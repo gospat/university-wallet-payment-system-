@@ -129,6 +129,64 @@ enum EmailDeliveryStatus {
   RETRIED
 }
 
+enum SettlementStatus {
+  PENDING_SETTLEMENT
+  SETTLED
+  MATCHED
+  PARTIALLY_MATCHED
+  VARIANCE
+  UNMATCHED
+  UNDER_REVIEW
+}
+
+enum ReportExportFormat {
+  XLSX
+  PDF
+  CSV
+  JSON
+}
+
+enum ReportExportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ReportType {
+  DASHBOARD_SUMMARY
+  DAILY_COLLECTIONS
+  MONTHLY_COLLECTIONS
+  REVENUE_BY_BILL
+  PAYMENT_REGISTER
+  STUDENT_STATEMENT
+  BILL_COLLECTION_PERFORMANCE
+  OUTSTANDING_DEBTORS
+  HIERARCHICAL_REVENUE
+  PAYMENT_GATEWAY
+  SETTLEMENT
+  RECONCILIATION_EXCEPTIONS
+  REFUND
+  CHARGES_FEE_INCOME
+  GENERAL_LEDGER
+  RECEIPT_REGISTER
+  TRANSACTION_STATUS
+  COMPARATIVE
+  EXPORT_CENTRE
+  SCHEDULED
+  AUDIT_TRAIL
+}
+
+enum ScheduleReportFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  CUSTOM_CRON
+}
+
 model User {
   id                  Int            @id @default(autoincrement())
   email               String         @unique
@@ -172,6 +230,8 @@ model User {
   refundRequests      Refund[]       @relation("RefundRequester")
   refundApprovals     Refund[]       @relation("RefundApprover")
   importBatches       StudentImport[] @relation("ImportCreator")
+  importRunsCreated   ImportRun[]     @relation("ImportRunCreator")
+  importRowsAsStudent  ImportRow[]     @relation("ImportRowStudent")
   feesCreated         Fee[]          @relation("FeeCreator")
   assignmentsCreated  FeeAssignment[] @relation("FeeAssignmentCreator")
   assignmentTargets   FeeAssignment[] @relation("FeeAssignmentTarget")
@@ -182,6 +242,10 @@ model User {
   emailTemplateConfigUpdates EmailTemplateConfig[] @relation("EmailConfigUpdater")
   emailRecipientOf    EmailDeliveryLog[] @relation("EmailDeliveryRecipient")
   emailTriggeredByMe  EmailDeliveryLog[] @relation("EmailDeliveryTriggeredBy")
+  reconciledSettlements Settlement[] @relation("SettlementReconciler")
+  reportExportsGenerated ReportExport[] @relation("ReportExportGenerator")
+  scheduledReportsCreated ScheduledReport[] @relation("ScheduledReportCreator")
+  scheduledReportsPaused ScheduledReport[] @relation("ScheduledReportPauser")
 
   @@index([accountStatus])
   @@index([college, department, program, level])
@@ -216,6 +280,7 @@ model Transaction {
   invoice             Invoice?          @relation(fields: [invoiceId], references: [id])
   originalForRefunds  Refund[]
   receipts            Receipt[]
+  settlement          Settlement?       @relation("TxSettlement")
 
   @@index([userId, createdAt])
   @@index([status, createdAt])
@@ -450,6 +515,64 @@ model StudentImport {
   @@map("student_imports")
 }
 
+enum ImportRunStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum ImportRowStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model ImportRun {
+  id           Int              @id @default(autoincrement())
+  uuid         String           @unique
+  fileName     String
+  filePath     String
+  status       ImportRunStatus  @default(PENDING)
+  createdById  Int
+  startedAt    DateTime         @default(now())
+  finishedAt   DateTime?
+  totalRows    Int              @default(0)
+  successCount Int              @default(0)
+  failCount    Int              @default(0)
+
+  createdBy    User             @relation("ImportRunCreator", fields: [createdById], references: [id])
+  rows         ImportRow[]
+
+  @@index([createdById])
+  @@index([startedAt])
+  @@map("import_runs")
+}
+
+model ImportRow {
+  id           Int              @id @default(autoincrement())
+  importRunId  Int
+  rowNumber    Int
+  firstName    String
+  lastName     String
+  email        String?          @db.VarChar(254)
+  matricNumber String
+  status       ImportRowStatus  @default(PENDING)
+  errorMessage String?          @db.Text
+  studentId    Int?
+  passwordSent Boolean          @default(false)
+
+  importRun    ImportRun        @relation(fields: [importRunId], references: [id], onDelete: Cascade)
+  student      User?            @relation("ImportRowStudent", fields: [studentId], references: [id], onDelete: SetNull)
+
+  @@unique([importRunId, rowNumber])
+  @@index([importRunId])
+  @@index([status])
+  @@index([studentId])
+  @@map("import_rows")
+}
+
+
 model Refund {
   id                      Int              @id @default(autoincrement())
   refundNumber            String           @unique
@@ -663,4 +786,110 @@ model EmailDeliveryLog {
   @@index([recipientId, createdAt])
   @@index([studentImportId])
   @@map("email_delivery_logs")
+}
+
+// ==============================================================
+// REPORTS MODULE — Settlement tracking model (R11)
+// Links a SUCCESS transaction to its actual gateway settlement event.
+// ==============================================================
+model Settlement {
+  id                    Int              @id @default(autoincrement())
+  settlementRef         String           @unique @db.VarChar(80)
+  transactionId         Int              @unique
+  transaction           Transaction      @relation("TxSettlement", fields: [transactionId], references: [id])
+  gateway               PaymentGateway
+  paymentAmount         Decimal          @db.Decimal(15, 2)
+  gatewayFee            Decimal          @default(0) @db.Decimal(15, 2)
+  convenienceFee        Decimal          @default(0) @db.Decimal(15, 2)
+  serviceCharge         Decimal          @default(0) @db.Decimal(15, 2)
+  expectedSettlement    Decimal          @db.Decimal(15, 2)  // paymentAmount − gatewayFee (what provider should credit)
+  actualSettlement      Decimal?         @db.Decimal(15, 2)  // what actually landed in the university bank acct
+  variance              Decimal?         @db.Decimal(15, 2)  // actualSettlement − expectedSettlement (signed)
+  paymentDate           DateTime         // tx createdAt or paidAt
+  expectedSettlementDate DateTime?
+  settlementDate        DateTime?        // date the funds were actually credited (bank statement date)
+  bankStatementRef      String?          @db.VarChar(120)    // bank statement / batch reference
+  status                SettlementStatus @default(PENDING_SETTLEMENT)
+  reconciledById        Int?
+  reconciledBy          User?            @relation("SettlementReconciler", fields: [reconciledById], references: [id], onDelete: SetNull)
+  reconciledAt          DateTime?
+  notes                 String?          @db.VarChar(2000)
+  metadata              Json?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@index([status, createdAt])
+  @@index([gateway, paymentDate])
+  @@index([settlementDate])
+  @@index([transactionId])
+  @@map("settlements")
+}
+
+// ==============================================================
+// REPORTS MODULE — ReportExport audit log model (R21 auditability)
+// Records every export ever generated regardless of sync / async path.
+// ==============================================================
+model ReportExport {
+  id             Int                  @id @default(autoincrement())
+  reportUuid     String               @unique @db.VarChar(64)
+  reportType     ReportType
+  reportName     String?              @db.VarChar(200)
+  format         ReportExportFormat
+  status         ReportExportStatus   @default(COMPLETED)
+  generatedById  Int
+  generatedBy    User                 @relation("ReportExportGenerator", fields: [generatedById], references: [id])
+  dateRangeStart DateTime?
+  dateRangeEnd   DateTime?
+  filters        Json?                // serialized filter snapshot
+  rowCount       Int                  @default(0)
+  fileSizeBytes  BigInt?
+  fileChecksum   String?              @db.VarChar(128)
+  storagePath    String?              @db.VarChar(500)  // if stored on disk / object storage
+  downloadUrl    String?              @db.VarChar(1000) // signed URL if async
+  errorMessage   String?              @db.VarChar(2000)
+  jobId          String?              @db.VarChar(128)   // BullMQ job id if async
+  scheduledReportId Int?
+  scheduledReport   ScheduledReport?   @relation(fields: [scheduledReportId], references: [id], onDelete: SetNull)
+  createdAt      DateTime             @default(now())
+  expiresAt      DateTime?            // cleanup date for async storage
+
+  @@index([reportType, createdAt])
+  @@index([generatedById, createdAt])
+  @@index([status, createdAt])
+  @@index([format, createdAt])
+  @@index([scheduledReportId])
+  @@map("report_exports")
+}
+
+// ==============================================================
+// REPORTS MODULE — Scheduled / recurring report config (R20)
+// ==============================================================
+model ScheduledReport {
+  id             Int                      @id @default(autoincrement())
+  name           String                   @db.VarChar(200)
+  reportType     ReportType
+  description    String?                  @db.VarChar(1000)
+  frequency      ScheduleReportFrequency  @default(MONTHLY)
+  cronExpression String?                  @db.VarChar(120) // only if CUSTOM_CRON
+  filters        Json?
+  format         ReportExportFormat       @default(XLSX)
+  recipients     Json?                    // string[] of email addresses
+  subjectLine    String?                  @db.VarChar(255)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdById    Int
+  createdBy      User                     @relation("ScheduledReportCreator", fields: [createdById], references: [id])
+  isActive       Boolean                  @default(true)
+  pausedAt       DateTime?
+  pausedById     Int?
+  pausedBy       User?                    @relation("ScheduledReportPauser", fields: [pausedById], references: [id], onDelete: SetNull)
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  reportExports  ReportExport[]
+
+  @@index([isActive, nextRunAt])
+  @@index([reportType, frequency])
+  @@index([createdById])
+  @@map("scheduled_reports")
 }
