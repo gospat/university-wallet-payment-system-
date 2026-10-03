@@ -1,0 +1,20 @@
+{
+  "name": "university-payment-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "description": "University Payment Gateway — api + app monorepo",
+  "scripts": {
+    "dev:api": "cd api && npm run dev",
+    "dev:app": "cd app && npm run dev",
+    "build:api": "cd api && npm run build",
+    "build:app": "cd app && npm run build",
+    "tsc:api": "cd api && npx tsc --strict --noEmit -p tsconfig.json",
+    "tsc:app": "cd app && npx tsc --strict --noEmit -p tsconfig.json",
+    "prisma:generate": "cd api && npx prisma generate",
+    "prisma:validate": "cd api && npx prisma validate",
+    "prisma:seed": "cd api && npx prisma db seed"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

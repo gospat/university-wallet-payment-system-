@@ -1,0 +1,895 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+  BURSARY
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  GRADUATED
+  WITHDRAWN
+}
+
+enum StudentType {
+  UNDERGRADUATE
+  POSTGRADUATE
+  PART_TIME
+  JUPEB
+  OTHER
+}
+
+enum EntryMode {
+  UTME
+  DIRECT_ENTRY
+  TRANSFER
+  OTHER
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  FEE_PAYMENT
+  REFUND
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  UNDERPAID
+  OVERPAID
+  REVERSED
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  PENDING
+  FAILED
+  REVERSED
+  REFUNDED
+  CANCELLED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PAID
+  FAILED
+}
+
+enum PaymentGateway {
+  PAYSTACK
+  ALATPAY
+}
+
+enum Semester {
+  FIRST
+  SECOND
+}
+
+enum GeneralLedgerEntryType {
+  PAYMENT_SUCCESS
+  REFUND_ISSUED
+  CONVENIENCE_FEE_INCOME
+  SERVICE_CHARGE_INCOME
+  GATEWAY_FEE_EXPENSE
+  WALLET_CREDIT
+}
+
+enum AssignmentTargetType {
+  STUDENT
+  PROGRAMME
+  DEPARTMENT
+  FACULTY
+  LEVEL
+  SESSION
+  STUDENT_TYPE
+}
+
+enum EmailType {
+  STUDENT_CREDENTIALS
+  PASSWORD_RESET
+  PAYMENT_SUCCESSFUL
+  FEE_ASSIGNED
+  BILL_CREATED
+  REFUND_REQUESTED
+  REFUND_APPROVED
+  REFUND_REJECTED
+  OTHER
+}
+
+enum EmailProviderType {
+  RESEND
+  SMTP
+  MOCK
+}
+
+enum EmailDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  RETRIED
+}
+
+enum SettlementStatus {
+  PENDING_SETTLEMENT
+  SETTLED
+  MATCHED
+  PARTIALLY_MATCHED
+  VARIANCE
+  UNMATCHED
+  UNDER_REVIEW
+}
+
+enum ReportExportFormat {
+  XLSX
+  PDF
+  CSV
+  JSON
+}
+
+enum ReportExportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ReportType {
+  DASHBOARD_SUMMARY
+  DAILY_COLLECTIONS
+  MONTHLY_COLLECTIONS
+  REVENUE_BY_BILL
+  PAYMENT_REGISTER
+  STUDENT_STATEMENT
+  BILL_COLLECTION_PERFORMANCE
+  OUTSTANDING_DEBTORS
+  HIERARCHICAL_REVENUE
+  PAYMENT_GATEWAY
+  SETTLEMENT
+  RECONCILIATION_EXCEPTIONS
+  REFUND
+  CHARGES_FEE_INCOME
+  GENERAL_LEDGER
+  RECEIPT_REGISTER
+  TRANSACTION_STATUS
+  COMPARATIVE
+  EXPORT_CENTRE
+  SCHEDULED
+  AUDIT_TRAIL
+}
+
+enum ScheduleReportFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  CUSTOM_CRON
+}
+
+model User {
+  id                  Int            @id @default(autoincrement())
+  email               String         @unique
+  password            String
+  firstName           String
+  middleName          String?
+  lastName            String
+  matricNumber        String?        @unique
+  admissionNumber     String?
+  jambNumber          String?
+  college             String?
+  department          String?
+  program             String?
+  level               Int?
+  academicSession     String?
+  facultyId           Int?
+  departmentId        Int?
+  programmeId         Int?
+  levelId             Int?
+  academicSessionId   Int?
+  studentType         StudentType?
+  entryMode           EntryMode?
+  admissionYear       Int?
+  graduationYear      Int?
+  phoneNumber         String?
+  address             String?
+  role                Role           @default(STUDENT)
+  accountStatus       AccountStatus  @default(ACTIVE)
+  lastLoginAt         DateTime?
+  failedLoginAttempts Int            @default(0)
+  lockedUntil         DateTime?
+  mustChangePassword  Boolean        @default(false)
+  studentImportId     Int?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  transactions        Transaction[]
+  auditLogs           AuditLog[]
+  invoices            Invoice[]
+  receipts            Receipt[]      @relation("ReceiptStudentOwner")
+  refundRequests      Refund[]       @relation("RefundRequester")
+  refundApprovals     Refund[]       @relation("RefundApprover")
+  importBatches       StudentImport[] @relation("ImportCreator")
+  importRunsCreated   ImportRun[]     @relation("ImportRunCreator")
+  importRowsAsStudent  ImportRow[]     @relation("ImportRowStudent")
+  feesCreated         Fee[]          @relation("FeeCreator")
+  assignmentsCreated  FeeAssignment[] @relation("FeeAssignmentCreator")
+  assignmentTargets   FeeAssignment[] @relation("FeeAssignmentTarget")
+  voidedReceipts      Receipt[]      @relation("ReceiptVoidedBy")
+  feeCategoriesCreated FeeCategory[] @relation("FeeCategoryCreator")
+  adminNotificationsRead AdminNotification[] @relation("AdminNotifReader")
+  refreshTokens       RefreshToken[]
+  emailTemplateConfigUpdates EmailTemplateConfig[] @relation("EmailConfigUpdater")
+  emailRecipientOf    EmailDeliveryLog[] @relation("EmailDeliveryRecipient")
+  emailTriggeredByMe  EmailDeliveryLog[] @relation("EmailDeliveryTriggeredBy")
+  reconciledSettlements Settlement[] @relation("SettlementReconciler")
+  reportExportsGenerated ReportExport[] @relation("ReportExportGenerator")
+  scheduledReportsCreated ScheduledReport[] @relation("ScheduledReportCreator")
+  scheduledReportsPaused ScheduledReport[] @relation("ScheduledReportPauser")
+
+  @@index([accountStatus])
+  @@index([college, department, program, level])
+  @@index([academicSession])
+  @@index([role])
+  @@map("users")
+}
+
+model Transaction {
+  id                  Int               @id @default(autoincrement())
+  reference           String            @unique
+  idempotencyKey      String?           @unique
+  userId              Int
+  invoiceId           Int?
+  gateway             PaymentGateway    @default(PAYSTACK)
+  paystackReference   String?           @unique
+  paystackChannel     String?
+  alatpayReference    String?           @unique
+  alatpaySessionId    String?
+  expectedAmount      Decimal?          @db.Decimal(15, 2)
+  amount              Decimal           @db.Decimal(15, 2)
+  type                TransactionType
+  status              TransactionStatus @default(PENDING)
+  description         String?
+  underpaidReason     String?
+  metadata            Json?
+  proofOfPaymentReference String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  user                User              @relation(fields: [userId], references: [id])
+  invoice             Invoice?          @relation(fields: [invoiceId], references: [id])
+  originalForRefunds  Refund[]
+  receipts            Receipt[]
+  settlement          Settlement?       @relation("TxSettlement")
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([invoiceId])
+  @@map("transactions")
+}
+
+model AuditLog {
+  id        Int       @id @default(autoincrement())
+  userId    Int?
+  action    String
+  entityType String?
+  entityId   String?
+  oldValue  Json?
+  newValue  Json?
+  details   Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  user      User?     @relation(fields: [userId], references: [id])
+
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+model FeeCategory {
+  id          Int       @id @default(autoincrement())
+  name        String
+  code        String    @unique
+  description String?
+  createdAt   DateTime  @default(now())
+  createdById Int?
+  createdBy   User?     @relation("FeeCategoryCreator", fields: [createdById], references: [id])
+  fees        Fee[]
+
+  @@index([code])
+  @@map("fee_categories")
+}
+
+model Fee {
+  id               Int                 @id @default(autoincrement())
+  feeCode          String
+  name             String
+  description      String?
+  categoryId       Int
+  amount           Decimal             @db.Decimal(15, 2)
+  currency         String              @default("NGN")
+  academicSession  String
+  semester         Semester?
+  college          String?
+  department       String?
+  program          String?
+  level            Int?
+  facultyId        Int?
+  departmentId     Int?
+  programmeId      Int?
+  levelId          Int?
+  academicSessionId Int?
+  studentType      StudentType?
+  isMandatory      Boolean             @default(true)
+  paymentDeadline  DateTime?
+  isActive         Boolean             @default(true)
+  createdById      Int
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  category         FeeCategory         @relation(fields: [categoryId], references: [id])
+  createdBy        User                @relation("FeeCreator", fields: [createdById], references: [id])
+  assignments      FeeAssignment[]
+  invoices         Invoice[]
+
+  @@unique([feeCode, academicSession, program, level])
+  @@index([academicSession])
+  @@index([isActive])
+  @@map("fees")
+}
+
+model FeeAssignment {
+  id               Int                  @id @default(autoincrement())
+  feeId            Int
+  assignmentType   AssignmentTargetType
+  targetStudentId  Int?
+  targetProgramme  String?
+  targetDepartment String?
+  targetFaculty    String?
+  targetLevel      Int?
+  targetSession    String?
+  targetStudentType StudentType?
+  overrideAmount   Decimal?             @db.Decimal(15, 2)
+  overrideDeadline DateTime?
+  noteToStudent    String?              @db.VarChar(2000)
+  session          String?
+  semester         Semester?
+  assignedById     Int
+  assignedAt       DateTime             @default(now())
+  isActive         Boolean              @default(true)
+
+  fee              Fee                  @relation(fields: [feeId], references: [id])
+  assignedBy       User                 @relation("FeeAssignmentCreator", fields: [assignedById], references: [id])
+  targetStudent    User?                @relation("FeeAssignmentTarget", fields: [targetStudentId], references: [id])
+
+  @@index([assignmentType])
+  @@index([targetStudentId, feeId])
+  @@map("fee_assignments")
+}
+
+// TASK B3 - DEDICATED ATOMIC COUNTER TABLE (prevents receiptNumber MAX(id)+1 race)
+model Counter {
+  id        String   @id @default("receipt_number")
+  value     Int      @default(1)
+  updatedAt DateTime @updatedAt
+}
+
+// TASK H11 - DOUBLE-ENTRY GENERAL LEDGER
+model GeneralLedger {
+  id                  Int                      @id @default(autoincrement())
+  transactionDate     DateTime                 @default(now())
+  entryType           GeneralLedgerEntryType
+  description         String?
+  amount              Decimal                  @db.Decimal(15, 2)
+  currency            String                   @default("NGN")
+  account             String
+  counterpartyAccount String?
+  transactionId       Int?
+  receiptId           Int?
+  userId              Int?
+  invoiceId           Int?
+  meta                Json?
+  createdAt           DateTime                 @default(now())
+
+  @@index([transactionDate, entryType, account])
+}
+
+model Invoice {
+  id            Int           @id @default(autoincrement())
+  invoiceNumber String        @unique
+  studentId     Int
+  feeId         Int
+  amountDue     Decimal       @db.Decimal(15, 2)
+  amountPaid    Decimal       @default(0.00) @db.Decimal(15, 2)
+  status        InvoiceStatus @default(UNPAID)
+  dueDate       DateTime?
+  session       String
+  semester      Semester?
+  paidAt        DateTime?
+  idempotencyKey String?     @unique
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  student       User          @relation(fields: [studentId], references: [id])
+  fee           Fee           @relation(fields: [feeId], references: [id])
+  transactions  Transaction[]
+  receipts      Receipt[]
+
+  @@index([studentId, status])
+  @@index([session])
+  @@index([status, createdAt])
+  @@map("invoices")
+}
+
+model Receipt {
+  id                Int         @id @default(autoincrement())
+  receiptNumber     String      @unique
+  verificationToken String      @unique
+  transactionId     Int
+  invoiceId         Int?
+  studentId         Int
+  paidAmount        Decimal     @db.Decimal(15, 2)
+  convenienceFee    Decimal     @default(0) @db.Decimal(15, 2)
+  serviceCharge     Decimal     @default(0) @db.Decimal(15, 2)
+  gatewayFee        Decimal     @default(0) @db.Decimal(15, 2)
+  totalAmount       Decimal     @db.Decimal(15, 2)
+  paystackReference String?
+  paymentChannel    String?
+  paymentMethodDetail String?
+  paidAt            DateTime
+  generatedAt       DateTime    @default(now())
+  qrCodeData        String?
+  isVoided          Boolean     @default(false)
+  voidedById        Int?
+  voidedAt          DateTime?
+
+  transaction       Transaction @relation(fields: [transactionId], references: [id])
+  invoice           Invoice?    @relation(fields: [invoiceId], references: [id])
+  student           User        @relation("ReceiptStudentOwner", fields: [studentId], references: [id])
+  voidedBy          User?       @relation("ReceiptVoidedBy", fields: [voidedById], references: [id])
+  refundedIn        Refund[]
+
+  @@index([transactionId])
+  @@index([receiptNumber])
+  @@index([studentId, paidAt])
+  @@map("receipts")
+}
+
+model WebhookEvent {
+  id                   Int       @id @default(autoincrement())
+  paystackEventId      String?   @unique
+  alatpayEventId       String?   @unique
+  eventType            String
+  transactionReference String?
+  payload              Json
+  isProcessed          Boolean   @default(false)
+  processedAt          DateTime?
+  attempts             Int       @default(0)
+  lastError            String?
+  createdAt            DateTime  @default(now())
+
+  @@index([transactionReference, eventType])
+  @@index([isProcessed])
+  @@map("webhook_events")
+}
+
+model StudentImport {
+  id               Int      @id @default(autoincrement())
+  importNumber     String   @unique
+  uploadedById     Int
+  fileName         String
+  totalRecords     Int      @default(0)
+  successfulRecords Int     @default(0)
+  failedRecords    Int      @default(0)
+  duplicateRecords Int      @default(0)
+  duplicateStrategy String   @default("SKIP")
+  errorReport      Json?
+  createdAt        DateTime @default(now())
+
+  uploadedBy       User     @relation("ImportCreator", fields: [uploadedById], references: [id])
+  deliveryLogs     EmailDeliveryLog[]
+
+  @@index([createdAt])
+  @@map("student_imports")
+}
+
+enum ImportRunStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum ImportRowStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model ImportRun {
+  id           Int              @id @default(autoincrement())
+  uuid         String           @unique
+  fileName     String
+  filePath     String
+  status       ImportRunStatus  @default(PENDING)
+  createdById  Int
+  startedAt    DateTime         @default(now())
+  finishedAt   DateTime?
+  totalRows    Int              @default(0)
+  successCount Int              @default(0)
+  failCount    Int              @default(0)
+
+  createdBy    User             @relation("ImportRunCreator", fields: [createdById], references: [id])
+  rows         ImportRow[]
+
+  @@index([createdById])
+  @@index([startedAt])
+  @@map("import_runs")
+}
+
+model ImportRow {
+  id           Int              @id @default(autoincrement())
+  importRunId  Int
+  rowNumber    Int
+  firstName    String
+  lastName     String
+  email        String?          @db.VarChar(254)
+  matricNumber String
+  status       ImportRowStatus  @default(PENDING)
+  errorMessage String?          @db.Text
+  studentId    Int?
+  passwordSent Boolean          @default(false)
+
+  importRun    ImportRun        @relation(fields: [importRunId], references: [id], onDelete: Cascade)
+  student      User?            @relation("ImportRowStudent", fields: [studentId], references: [id], onDelete: SetNull)
+
+  @@unique([importRunId, rowNumber])
+  @@index([importRunId])
+  @@index([status])
+  @@index([studentId])
+  @@map("import_rows")
+}
+
+
+model Refund {
+  id                      Int              @id @default(autoincrement())
+  refundNumber            String           @unique
+  originalTransactionId   Int
+  originalReceiptId       Int?
+  requestedAmount         Decimal          @db.Decimal(15, 2)
+  reason                  String
+  status                  RefundStatus     @default(REQUESTED)
+  requestedById           Int
+  approvedById            Int?
+  paidAt                  DateTime?
+  paystackRefundReference String?
+  notes                   Json?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+
+  originalTransaction     Transaction      @relation(fields: [originalTransactionId], references: [id])
+  originalReceipt         Receipt?         @relation(fields: [originalReceiptId], references: [id])
+  requestedBy             User             @relation("RefundRequester", fields: [requestedById], references: [id])
+  approvedBy              User?            @relation("RefundApprover", fields: [approvedById], references: [id])
+
+  @@index([status, createdAt])
+  @@map("refunds")
+}
+
+model Faculty {
+  id         Int         @id @default(autoincrement())
+  name       String      @unique @db.VarChar(150)
+  code       String?     @unique @db.VarChar(30)
+  deanEmail  String?     @db.VarChar(150)
+  isActive   Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  departments Department[]
+}
+
+model Department {
+  id         Int        @id @default(autoincrement())
+  name       String     @db.VarChar(150)
+  code       String?    @db.VarChar(30)
+  facultyId  Int
+  faculty    Faculty    @relation(fields: [facultyId], references: [id], onDelete: Restrict)
+  headEmail  String?    @db.VarChar(150)
+  isActive   Boolean    @default(true)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  programmes Programme[]
+  @@unique([facultyId, name])
+}
+
+model Programme {
+  id               Int        @id @default(autoincrement())
+  name             String     @db.VarChar(150)
+  code             String?    @db.VarChar(30)
+  departmentId     Int
+  department       Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  durationYears    Int?       @default(4)
+  coordinatorEmail String?    @db.VarChar(150)
+  isActive         Boolean    @default(true)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  levels           Level[]
+  @@unique([departmentId, name])
+}
+
+model Level {
+  id           Int       @id @default(autoincrement())
+  level        String    @db.VarChar(20)
+  programmeId  Int?
+  programme    Programme? @relation(fields: [programmeId], references: [id], onDelete: SetNull)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  @@unique([programmeId, level])
+}
+
+model AcademicSession {
+  id         Int       @id @default(autoincrement())
+  name       String    @unique @db.VarChar(20)
+  startDate  DateTime?
+  endDate    DateTime?
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model Permission {
+  id              Int            @id @default(autoincrement())
+  key             String         @unique @db.VarChar(64)
+  name            String         @db.VarChar(120)
+  description     String?        @db.VarChar(255)
+  category        String?        @db.VarChar(40)
+  createdAt       DateTime       @default(now())
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  id           Int        @id @default(autoincrement())
+  role         Role
+  permissionId Int
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+  @@unique([role, permissionId])
+}
+
+model AdminNotification {
+  id         Int       @id @default(autoincrement())
+  type       String    @db.VarChar(40)
+  title      String    @db.VarChar(200)
+  body       String?   @db.Text
+  severity   String    @default("INFO") @db.VarChar(20)
+  readAt     DateTime?
+  readBy     Int?
+  readByUser User?     @relation("AdminNotifReader", fields: [readBy], references: [id], onDelete: SetNull)
+  metadata   Json?
+  createdAt  DateTime  @default(now())
+  @@index([type])
+  @@index([createdAt])
+}
+
+model SystemSettings {
+  id                    Int      @id @default(1)
+  universityName        String   @default("University Payment Platform") @db.VarChar(200)
+  universityLogoUrl     String?  @db.VarChar(500)
+  universityAddress     String?  @db.VarChar(500)
+  universityPhone       String?  @db.VarChar(40)
+  universityEmail       String?  @db.VarChar(150)
+  universityWebsite     String?  @db.VarChar(200)
+  universityFaviconUrl  String?  @db.VarChar(500)
+  paystackLiveEnabled   Boolean  @default(false)
+  activePaymentGateway  PaymentGateway @default(PAYSTACK)
+  largePaymentThreshold Decimal? @db.Decimal(15, 2) @default(500000)
+  importErrorThreshold  Int      @default(10)
+  receiptFooterText     String?  @db.VarChar(500)
+  receiptBursarName         String?  @db.VarChar(190)
+  receiptBursarTitle        String?  @db.VarChar(190)
+  receiptBursarSignatureUrl String?  @db.VarChar(500)
+  receiptPrefix         String   @default("REC") @db.VarChar(10)
+  paymentRefPrefix      String   @default("PAY") @db.VarChar(10)
+  emailProviderForceSmtp Boolean? @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  updatedById           Int?
+}
+
+model RefreshToken {
+  id          BigInt    @id @default(autoincrement())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token       String    @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model EmailTemplateConfig {
+  id                Int      @id @default(autoincrement())
+  templateKey       String   @unique @db.VarChar(80)
+  senderName        String   @default("University Bursary") @db.VarChar(120)
+  senderAddress     String   @default("noreply@university.edu.ng") @db.VarChar(254)
+  replyToAddress    String?  @db.VarChar(254)
+  portalLoginUrl    String   @default("https://portal.university.edu.ng/login") @db.VarChar(500)
+  subjectLine       String   @default("Your University Account Has Been Created") @db.VarChar(200)
+  greeting          String   @default("Dear {{studentName}},") @db.VarChar(200)
+  paragraph         String   @db.MediumText
+  buttonLabel       String   @default("Access Student Portal") @db.VarChar(60)
+  forceChangeNotice String   @db.MediumText
+  closing           String   @db.MediumText
+  accentColor       String?  @db.VarChar(9)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  updatedById       Int?
+  updatedBy         User?    @relation("EmailConfigUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([templateKey])
+  @@map("email_template_configs")
+}
+
+model EmailDeliveryLog {
+  id                   BigInt               @id @default(autoincrement())
+  emailType            EmailType
+  toAddress            String               @db.VarChar(254)
+  recipientId          Int?
+  recipient            User?                @relation("EmailDeliveryRecipient", fields: [recipientId], references: [id], onDelete: SetNull)
+  triggeredByAdminId   Int?
+  triggeredByAdmin     User?                @relation("EmailDeliveryTriggeredBy", fields: [triggeredByAdminId], references: [id], onDelete: SetNull)
+  studentImportId      Int?
+  studentImport        StudentImport?       @relation(fields: [studentImportId], references: [id], onDelete: SetNull)
+  idempotencyKey       String               @unique @db.VarChar(128)
+  provider             EmailProviderType
+  status               EmailDeliveryStatus  @default(PENDING)
+  resendMessageId      String?              @unique @db.VarChar(120)
+  smtpMessageId        String?              @db.VarChar(400)
+  attempts             Int                  @default(0)
+  lastError            String?              @db.VarChar(2000)
+  retryAfter           DateTime?
+  payloadSummary       Json?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  @@index([emailType, createdAt])
+  @@index([status, createdAt])
+  @@index([recipientId, createdAt])
+  @@index([studentImportId])
+  @@map("email_delivery_logs")
+}
+
+// ==============================================================
+// REPORTS MODULE — Settlement tracking model (R11)
+// Links a SUCCESS transaction to its actual gateway settlement event.
+// ==============================================================
+model Settlement {
+  id                    Int              @id @default(autoincrement())
+  settlementRef         String           @unique @db.VarChar(80)
+  transactionId         Int              @unique
+  transaction           Transaction      @relation("TxSettlement", fields: [transactionId], references: [id])
+  gateway               PaymentGateway
+  paymentAmount         Decimal          @db.Decimal(15, 2)
+  gatewayFee            Decimal          @default(0) @db.Decimal(15, 2)
+  convenienceFee        Decimal          @default(0) @db.Decimal(15, 2)
+  serviceCharge         Decimal          @default(0) @db.Decimal(15, 2)
+  expectedSettlement    Decimal          @db.Decimal(15, 2)  // paymentAmount − gatewayFee (what provider should credit)
+  actualSettlement      Decimal?         @db.Decimal(15, 2)  // what actually landed in the university bank acct
+  variance              Decimal?         @db.Decimal(15, 2)  // actualSettlement − expectedSettlement (signed)
+  paymentDate           DateTime         // tx createdAt or paidAt
+  expectedSettlementDate DateTime?
+  settlementDate        DateTime?        // date the funds were actually credited (bank statement date)
+  bankStatementRef      String?          @db.VarChar(120)    // bank statement / batch reference
+  status                SettlementStatus @default(PENDING_SETTLEMENT)
+  reconciledById        Int?
+  reconciledBy          User?            @relation("SettlementReconciler", fields: [reconciledById], references: [id], onDelete: SetNull)
+  reconciledAt          DateTime?
+  notes                 String?          @db.VarChar(2000)
+  metadata              Json?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@index([status, createdAt])
+  @@index([gateway, paymentDate])
+  @@index([settlementDate])
+  @@index([transactionId])
+  @@map("settlements")
+}
+
+// ==============================================================
+// REPORTS MODULE — ReportExport audit log model (R21 auditability)
+// Records every export ever generated regardless of sync / async path.
+// ==============================================================
+model ReportExport {
+  id             Int                  @id @default(autoincrement())
+  reportUuid     String               @unique @db.VarChar(64)
+  reportType     ReportType
+  reportName     String?              @db.VarChar(200)
+  format         ReportExportFormat
+  status         ReportExportStatus   @default(COMPLETED)
+  generatedById  Int
+  generatedBy    User                 @relation("ReportExportGenerator", fields: [generatedById], references: [id])
+  dateRangeStart DateTime?
+  dateRangeEnd   DateTime?
+  filters        Json?                // serialized filter snapshot
+  rowCount       Int                  @default(0)
+  fileSizeBytes  BigInt?
+  fileChecksum   String?              @db.VarChar(128)
+  storagePath    String?              @db.VarChar(500)  // if stored on disk / object storage
+  downloadUrl    String?              @db.VarChar(1000) // signed URL if async
+  errorMessage   String?              @db.VarChar(2000)
+  jobId          String?              @db.VarChar(128)   // BullMQ job id if async
+  scheduledReportId Int?
+  scheduledReport   ScheduledReport?   @relation(fields: [scheduledReportId], references: [id], onDelete: SetNull)
+  createdAt      DateTime             @default(now())
+  expiresAt      DateTime?            // cleanup date for async storage
+
+  @@index([reportType, createdAt])
+  @@index([generatedById, createdAt])
+  @@index([status, createdAt])
+  @@index([format, createdAt])
+  @@index([scheduledReportId])
+  @@map("report_exports")
+}
+
+// ==============================================================
+// REPORTS MODULE — Scheduled / recurring report config (R20)
+// ==============================================================
+model ScheduledReport {
+  id             Int                      @id @default(autoincrement())
+  name           String                   @db.VarChar(200)
+  reportType     ReportType
+  description    String?                  @db.VarChar(1000)
+  frequency      ScheduleReportFrequency  @default(MONTHLY)
+  cronExpression String?                  @db.VarChar(120) // only if CUSTOM_CRON
+  filters        Json?
+  format         ReportExportFormat       @default(XLSX)
+  recipients     Json?                    // string[] of email addresses
+  subjectLine    String?                  @db.VarChar(255)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdById    Int
+  createdBy      User                     @relation("ScheduledReportCreator", fields: [createdById], references: [id])
+  isActive       Boolean                  @default(true)
+  pausedAt       DateTime?
+  pausedById     Int?
+  pausedBy       User?                    @relation("ScheduledReportPauser", fields: [pausedById], references: [id], onDelete: SetNull)
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  reportExports  ReportExport[]
+
+  @@index([isActive, nextRunAt])
+  @@index([reportType, frequency])
+  @@index([createdById])
+  @@map("scheduled_reports")
+}

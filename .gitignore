@@ -1,0 +1,40 @@
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+.env
+.env.local
+.env.*.local
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build output
+dist/
+build/
+.cache/
+out/
+.next/
+.nuxt/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Logs + tmp
+logs/
+*.log
+/tmp/
+/api/logs/
+/api/tmp/
+
+# Prisma generated (regenerated on CI via prisma generate)
+/api/prisma/generated/
+/app/prisma/generated/
