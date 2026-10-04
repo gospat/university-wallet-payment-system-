@@ -1,12 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  Loader2,
-  ShieldCheck,
-  X,
-  CheckCircle2,
-  AlertTriangle,
-  ExternalLink,
-} from 'lucide-react';
+import { Loader2, ShieldCheck, X, CheckCircle2, AlertTriangle, ExternalLink } from 'lucide-react';
 import { studentFeeApi, type InvoiceDetailResponse } from '../services/studentFees';
 
 const formatNgn = (n: number | string | null | undefined): string => {
@@ -28,7 +21,9 @@ export interface HostedCheckoutModalProps {
   reference?: string;
   onSuccessNavigate?: () => void;
 }
+
 type BodyMode = 'loading' | 'iframe' | 'closed';
+
 type FetchedInvoiceState = {
   invoiceNumber: string | null;
   amountDue: number | null;
@@ -81,7 +76,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     const close = onClose;
     window.setTimeout(() => {
       try { navigate?.(); } catch {}
-      try { close?.(); } catch {}
+      try { close(); } catch {}
     }, 900);
   }, [clearPolling, onClose, onSuccessNavigate]);
 
@@ -98,7 +93,8 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
       if (status === 'PAID' || amountPaidNum >= amountDueNum) {
         handleSuccess();
       }
-    } catch {}
+    } catch {
+    }
   }, [invoiceId, handleSuccess]);
 
   const fetchInvoiceDetail = useCallback(async () => {
@@ -119,17 +115,22 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
         feeName: inv.fee?.name ?? null,
         gateway: (inv as any).gateway ?? null,
       });
-    } catch {}
+    } catch {
+    }
   }, [invoiceId]);
 
   const forcePollOnce = useCallback(async () => {
     setPolling(true);
-    try { await runPoll(); } finally {
+    try {
+      await runPoll();
+    } finally {
       window.setTimeout(() => setPolling(false), 500);
     }
   }, [runPoll]);
 
-  const markLoaded = useCallback(() => { setMode('iframe'); }, []);
+  const markLoaded = useCallback(() => {
+    setMode('iframe');
+  }, []);
 
   useEffect(() => {
     if (!isOpen) {
@@ -147,27 +148,39 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     setShowCancelConfirm(false);
     settledRef.current = false;
     setFetchedInvoice(null);
+
     fetchInvoiceDetail();
+
     if (typeof checkoutUrl === 'string' && checkoutUrl.startsWith('http')) {
       try {
         popupRef.current = window.open(
           checkoutUrl,
           'hostedCheckout',
-          'width=500,height=760,resizable,scrollbars,status,menubar=no,toolbar=no,location=yes',
+          'width=500,height=760,resizable,scrollbars,status,menubar=no,toolbar=no,location=yes'
         );
       } catch {}
     }
+
     window.setTimeout(() => {
       if (settledRef.current) return;
       markLoaded();
     }, 400);
+
     if (invoiceId) {
-      pollIntervalRef.current = window.setInterval(() => { runPoll(); }, 3000);
+      pollIntervalRef.current = window.setInterval(() => {
+        runPoll();
+      }, 3000);
     }
-    return () => { clearPolling(); };
+
+    return () => {
+      clearPolling();
+    };
   }, [isOpen, checkoutUrl, invoiceId, clearPolling, runPoll, markLoaded, fetchInvoiceDetail]);
 
-  const handleCancelClick = () => setShowCancelConfirm(true);
+  const handleCancelClick = () => {
+    setShowCancelConfirm(true);
+  };
+
   const confirmCancel = () => {
     setShowCancelConfirm(false);
     clearPolling();
@@ -220,13 +233,19 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
                   </div>
                 )}
                 {displayInvoiceNumber && displayInvoiceNumber !== '' && displayInvoiceNumber !== 'undefined' && (
-                  <div className="text-xs text-gray-500 font-mono">Invoice #{displayInvoiceNumber}</div>
+                  <div className="text-xs text-gray-500 font-mono">
+                    Invoice #{displayInvoiceNumber}
+                  </div>
                 )}
                 {fetchedInvoice?.feeName && (
-                  <div className="text-sm text-gray-700 font-medium">{fetchedInvoice.feeName}</div>
+                  <div className="text-sm text-gray-700 font-medium">
+                    {fetchedInvoice.feeName}
+                  </div>
                 )}
                 {fetchedInvoice?.session && (
-                  <div className="text-xs text-gray-500">Academic Session: {fetchedInvoice.session}</div>
+                  <div className="text-xs text-gray-500">
+                    Academic Session: {fetchedInvoice.session}
+                  </div>
                 )}
                 {fetchedInvoice && fetchedInvoice.amountDue != null && fetchedInvoice.amountPaid != null && (
                   <div className="text-xs text-gray-500 space-y-0.5 border border-gray-100 rounded-lg px-4 py-3 bg-gray-50/50 mt-2">
@@ -285,7 +304,9 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
                   {statusType === 'success' ? 'Payment received' : statusType === 'error' ? 'Checkout ended' : 'Checkout closed'}
                 </h3>
                 <p className="text-sm text-gray-600 mb-4">{statusMessage || 'No status.'}</p>
-                {reference && <p className="text-xs text-gray-500 font-mono mb-4">Ref: {reference}</p>}
+                {reference && (
+                  <p className="text-xs text-gray-500 font-mono mb-4">Ref: {reference}</p>
+                )}
                 <div className="flex items-center justify-center gap-3 flex-wrap">
                   <button
                     type="button"
@@ -304,7 +325,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
                           const w = window.open(
                             checkoutUrl,
                             'hostedCheckout',
-                            'width=500,height=760,resizable,scrollbars,status,menubar=no,toolbar=no,location=yes',
+                            'width=500,height=760,resizable,scrollbars,status,menubar=no,toolbar=no,location=yes'
                           );
                           popupRef.current = w;
                         } catch {}

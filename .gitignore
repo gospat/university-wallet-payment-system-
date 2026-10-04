@@ -1,40 +1,145 @@
+# ============================================================
+# Secrets & Local Environment — NEVER commit these
+# ============================================================
+.env
+.env.local
+.env.*.local
+!**/.env.example
+
+# Server-only .env files (backend)
+api/.env
+api/.env.*.local
+!api/.env.example
+
+# Frontend local .env files (contain VITE public keys — still local-only)
+app/.env.local
+app/.env.*.local
+!app/.env.example
+
+# Private keys, certificates, tokens
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+*.secret
+secrets.json
+secrets.*.json
+
+# ============================================================
+# Dependencies
+# ============================================================
 node_modules/
+bower_components/
+jspm_packages/
+
+# ============================================================
+# Build Artifacts
+# ============================================================
+# TypeScript build output
+dist/
+build/
+out/
+**/*.tsbuildinfo
+!src/**/i18n/**  # keep source i18n files (i18n/en.ts etc.)
+
+# Vite / esbuild caches
+.vite/
+.vite-cache/
+.esbuild/
+.parcel-cache/
+.cache/
+
+# Prisma generated client output
+# prisma/client generated files are typically tracked for CI,
+# but if you generate on CI/CD, uncomment next line:
+# api/generated/
+# api/prisma/generated/
+# api/node_modules/.prisma/
+# api/node_modules/prisma/
+
+# ============================================================
+# Runtime Caches & Logs
+# ============================================================
+# Logs
+logs/
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+lerna-debug.log*
 
-.env
-.env.local
-.env.*.local
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
 
-# OS/editor
-.DS_Store
-Thumbs.db
-.vscode/
+# Redis dumps
+dump.rdb
+
+# MySQL dumps / backups
+*.sql
+*.sql.gz
+backup/
+dumps/
+
+# ============================================================
+# Testing Tools (Temporary / Local-Only)
+# ============================================================
+# Puppeteer / Chrome local profiles (large, contain secrets)
+.puppeteer-smoke/
+.puppeteer-user-data/
+.puppeteer/
+puppeteer-user-data/
+
+# E2E output (screenshots, videos, traces)
+e2e-output/
+screenshots/
+videos/
+traces/
+test-results/
+playwright-report/
+
+# Temporary probe / debug scripts (never commit)
+api/_*.js
+api/_*.mjs
+api/_*.cjs
+api/_*.ts
+app/_*.js
+app/_*.ts
+api/diag*.cjs
+api/diag*.mjs
+api/diag*.js
+app/diag*.cjs
+app/diag*.mjs
+app/diag*.js
+
+# Trae IDE local metadata (specs, session memory — never commit)
+.trae/
+
+# Local test sandbox
+api/tmp/
+tmp/
+temp/
 .idea/
+.vscode/
 *.swp
 *.swo
 
-# Build output
-dist/
-build/
-.cache/
-out/
-.next/
-.nuxt/
-
-# Test / coverage
+# Coverage output
 coverage/
 .nyc_output/
+*.lcov
 
-# Logs + tmp
-logs/
-*.log
-/tmp/
-/api/logs/
-/api/tmp/
-
-# Prisma generated (regenerated on CI via prisma generate)
-/api/prisma/generated/
-/app/prisma/generated/
+# ============================================================
+# OS & Editor
+# ============================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

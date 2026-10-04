@@ -1,0 +1,207 @@
+// =============================================================================
+// API String Catalog — English (en)
+// Centralized strings for user-facing AppError messages, audit events,
+// email templates, and webhook responses.
+//
+// New code MUST reference this file for user-facing messages.
+// Avoid constructing user-visible strings inline in controllers/services.
+// =============================================================================
+
+export const errors = {
+  auth: {
+    notLoggedIn: 'You are not logged in! Please log in to get access.',
+    unauthenticated: 'You are not logged in! Please log in to get access.',
+    invalidToken: 'Invalid token. Please log in again.',
+    wrongTokenTypeAccess: 'Invalid token type. Please use an access token.',
+    wrongTokenTypeRefresh: 'Invalid token type. Please use a refresh token.',
+    tokenUserGone: 'The user belonging to this token no longer exists.',
+    accountInactive: 'This account is no longer active. Please contact the administrator.',
+    accountSuspended: 'Your account has been suspended. Please contact the administrator.',
+    accountGraduated: 'This account has been marked as graduated. Please contact alumni services.',
+    noCredentials: 'Please provide email and password',
+    badCredentials: 'Incorrect email or password',
+    accountLocked: (minutes: number) =>
+      `Account temporarily locked due to too many failed attempts. Try again in ${minutes} minute(s).`,
+    emailExists: 'Email already exists',
+    matricExists: 'A student with this matriculation number already exists',
+    matricNotFound: (matric: string) =>
+      `No active student found with matriculation number "${matric}".`,
+    passwordIncorrect: 'Current password is incorrect.',
+    passwordSame: 'New password must differ from current password.',
+    passwordTooShort: 'New password must be at least 8 characters.',
+    userNotFound: 'User not found',
+    notPermitted: 'You do not have permission to perform this action',
+    rateLimited: 'Too many requests. Please try again later.',
+  },
+  receipt: {
+    statementFailed: 'Failed to generate statement',
+    receiptFailed: 'Failed to generate receipt',
+  },
+  fee: {
+    notFound: 'Fee configuration not found',
+    codeExists: 'A fee with this code already exists for the given session/programme/level',
+    categoryExists: 'A fee category with this code already exists',
+    categoryInUse: (n: number) =>
+      n === 1
+        ? 'Cannot delete: 1 fee references this category'
+        : `Cannot delete: ${n} fees reference this category`,
+    versionedFee:
+      'Fee is versioned and has linked invoices or payment transactions. Clone this fee instead to create a new version with updated terms.',
+  },
+  invoice: {
+    notFound: 'Invoice not found',
+    alreadyPaid: 'This invoice has already been paid in full',
+    amountMismatch: 'Transaction amount does not match the expected invoice amount',
+  },
+  assignment: {
+    invalidTarget: 'Fee assignment target configuration is invalid',
+    assignmentTypeRequiresFields: (t: string, fields: string[]) =>
+      `Assignment type "${t}" requires all of the following fields: ${fields.join(', ')}.`,
+    assignmentNotFound: 'Fee assignment not found',
+    directBillFeeOrAdhoc: 'Provide exactly one of feeId (existing fee) or adhocFeeName + overrideAmount (new ad-hoc charge).',
+    directBillAdhocName: 'Ad-hoc charge name is required (max 160 characters).',
+    directBillAdhocAmount: 'Ad-hoc amount must be a positive number (max NGN 99,999,999.99).',
+    directBillMatric: 'matricNumber is required and cannot be blank.',
+  },
+  upload: {
+    fileRequired: 'Please upload a CSV or XLSX file',
+    unsupportedFormat: 'Unsupported file format. Please upload a CSV or XLSX file.',
+    missingColumns: (cols: string[]) =>
+      `Missing required columns: ${cols.join(', ')}`,
+    importFailed: 'Student import failed. Please check the file and try again.',
+  },
+  webhook: {
+    invalidSignature: 'Invalid webhook signature',
+    eventAlreadyProcessed: 'Webhook event already processed',
+    missingEventId: 'Missing Paystack event id',
+    enqueueFailed: 'Failed to enqueue webhook event for processing',
+    notFound: 'Webhook event not found',
+  },
+  paystack: {
+    initFailed: 'Unable to initialize payment. Please try again.',
+    verifyFailed: 'Payment verification failed.',
+    statusNotSuccess: 'Payment was not completed successfully.',
+    amountMismatch: 'Payment amount does not match the expected amount.',
+  },
+  payment: {
+    amountFieldNotAllowed: 'Field "amount" is not allowed in this request. Omit it to pay the full invoice balance, or use "partialAmount" for a partial payment.',
+    invoiceNotFound: 'Invoice not found',
+    invoiceNotPayable: 'This invoice cannot be paid — it may be cancelled, refunded, or already paid in full.',
+    transactionNotFound: 'Payment transaction not found',
+    invalidPartialAmount: 'Partial payment amount must be a positive number',
+    notYourPayment: 'Payment transaction not found',
+    underpaid: 'Payment received was less than the expected amount. Please contact the bursary.',
+    overpaid: 'Payment received was greater than the expected amount. Please contact the bursary.',
+    failed: 'Payment failed or was cancelled. Please try again.',
+    pending: 'Payment is still being processed. Please check again in a few moments.',
+    immutable: 'Completed transactions are immutable. Request a refund instead to reverse a payment.',
+  },
+  refund: {
+    notFound: 'Refund record not found',
+    transactionNotSuccessful: 'Refund can only be requested against a SUCCESSFUL payment',
+    amountExceedsOriginal: 'Refund amount cannot exceed the original payment amount',
+    invalidAmount: 'Refund amount must be a positive number',
+    reasonRequired: 'Refund reason is required',
+    notesRequired: 'Rejection notes are required',
+    statusNotRequestable: 'Refund cannot be requested for this transaction — a refund already exists or transaction is not eligible',
+    statusNotPending: 'Refund is not in a requestable state',
+    statusNotRequested: 'Refund is not in REQUESTED state',
+    paystackFailed: 'Unable to submit refund to Paystack. Please try again.',
+    noPaystackReference: 'Original transaction has no Paystack reference to refund against',
+  },
+  export: {
+    generationFailed: 'Unable to generate export file.',
+  },
+  server: {
+    generic: 'An unexpected error occurred.',
+    notFound: 'The requested resource was not found.',
+  },
+  students: {
+    invalidProgrammeId: 'The selected Programme does not exist. Please choose a Programme from the dropdown list under Academic Structure → Programmes.',
+    invalidLevelId: 'The selected Level does not exist. Please choose a Level from the dropdown list or add it under Academic Structure → Levels.',
+    invalidSessionId: 'The selected Academic Session does not exist. Please choose a Session from the dropdown list or add it under Academic Structure → Sessions.',
+  },
+} as const;
+
+export const auditActions = {
+  login: 'LOGIN',
+  loginFailed: 'LOGIN_FAILED',
+  loginWrongAudience: 'LOGIN_WRONG_AUDIENCE',
+  sessionRefreshed: 'SESSION_REFRESHED',
+  logoutAll: 'LOGOUT_ALL',
+  logout: 'LOGOUT',
+  accountSuspended: 'ACCOUNT_SUSPENDED',
+  accountReactivated: 'ACCOUNT_REACTIVATED',
+  studentSelfSignup: 'STUDENT_SELF_SIGNUP',
+  studentCreated: 'STUDENT_CREATED',
+  studentBulkImported: 'STUDENT_BULK_IMPORTED',
+  feeBulkImported: 'FEE_BULK_IMPORTED',
+  studentUpdated: 'STUDENT_UPDATED',
+  passwordChanged: 'PASSWORD_CHANGED',
+  passwordResetRequested: 'PASSWORD_RESET_REQUESTED',
+  passwordResetCompleted: 'PASSWORD_RESET_COMPLETED',
+  feeCategoryCreated: 'FEE_CATEGORY_CREATED',
+  feeCategoryUpdated: 'FEE_CATEGORY_UPDATED',
+  feeCategoryDeleted: 'FEE_CATEGORY_DELETED',
+  feeCreated: 'FEE_CREATED',
+  feeUpdated: 'FEE_UPDATED',
+  feeCloned: 'FEE_CLONED',
+  feeActivated: 'FEE_ACTIVATED',
+  feeDisabled: 'FEE_DISABLED',
+  feeDeleted: 'FEE_DELETED',
+  feeAssigned: 'FEE_ASSIGNED',
+  feeAssignmentUpdated: 'FEE_ASSIGNMENT_UPDATED',
+  feeAssignmentDeleted: 'FEE_ASSIGNMENT_DELETED',
+  feeAssignmentDisabled: 'FEE_ASSIGNMENT_DISABLED',
+  feeAssignmentEnabled: 'FEE_ASSIGNMENT_ENABLED',
+  invoicesGenerated: 'INVOICES_GENERATED',
+  invoiceGenerated: 'INVOICE_GENERATED',
+  invoiceUpdated: 'INVOICE_UPDATED',
+  paymentInitiated: 'PAYMENT_INITIATED',
+  paymentVerified: 'PAYMENT_VERIFIED',
+  paymentUnderpaid: 'PAYMENT_UNDERPAID',
+  paymentOverpaid: 'PAYMENT_OVERPAID',
+  paymentFailed: 'PAYMENT_FAILED',
+  paymentReversed: 'PAYMENT_REVERSED',
+  refundRequested: 'REFUND_REQUESTED',
+  refundApproved: 'REFUND_APPROVED',
+  refundRejected: 'REFUND_REJECTED',
+  refundProcessed: 'REFUND_PROCESSED',
+  refundFailed: 'REFUND_FAILED',
+  refundCompleted: 'REFUND_COMPLETED',
+  webhookEnqueued: 'WEBHOOK_ENQUEUED',
+  webhookProcessed: 'WEBHOOK_PROCESSED',
+  webhookFailed: 'WEBHOOK_FAILED',
+  reportExported: 'REPORT_EXPORTED',
+  receiptGenerated: 'RECEIPT_GENERATED',
+  receiptVoided: 'RECEIPT_VOIDED',
+  receiptEmailed: 'RECEIPT_EMAILED',
+  roleChanged: 'ROLE_CHANGED',
+  configChanged: 'CONFIG_CHANGED',
+  facultyCreated: 'FACULTY_CREATED',
+  facultyUpdated: 'FACULTY_UPDATED',
+  facultyDeactivated: 'FACULTY_DEACTIVATED',
+  facultyDeleted: 'FACULTY_DELETED',
+  departmentCreated: 'DEPARTMENT_CREATED',
+  departmentUpdated: 'DEPARTMENT_UPDATED',
+  departmentDeactivated: 'DEPARTMENT_DEACTIVATED',
+  departmentDeleted: 'DEPARTMENT_DELETED',
+  programmeCreated: 'PROGRAMME_CREATED',
+  programmeUpdated: 'PROGRAMME_UPDATED',
+  programmeDeactivated: 'PROGRAMME_DEACTIVATED',
+  programmeDeleted: 'PROGRAMME_DELETED',
+} as const;
+
+export const receipts = {
+  title: 'Official Payment Receipt',
+  subtitle: 'University Payment Management Platform',
+  generatedBy: 'Generated automatically by the University Finance System',
+  verification: (code: string) => `Verification: ${code}`,
+  paid: 'PAID',
+  pending: 'PENDING',
+  void: 'VOID',
+  refunded: 'REFUNDED',
+} as const;
+
+export const i18n = { errors, auditActions, receipts } as const;
+export default i18n;

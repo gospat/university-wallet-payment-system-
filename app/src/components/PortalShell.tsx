@@ -129,8 +129,25 @@ const hasPermission = (
 ): boolean => {
   if (!requiresPermission) return true;
 
+  // === DEFENSE-IN-DEPTH: ADMIN ROLE VISIBILITY = UNRESTRICTED =====================
+  // Admin is the super-user who assigns roles/permissions to everyone else.
+  // We must NEVER collapse the admin sidebar to only the 6 Administration nav items
+  // (Users/Roles/Permissions/Settings/PayConfig/AuditLogs) even if the JWT permissions
+  // claim is malformed, missing, or empty — that would lock Admin out of all
+  // operational pages (Dashboard, Students, Bills, Payments, Receipts, …), which is
+  // exactly the bug reported in the screenshot.
+  //
+  // Server-side Express requirePermission() middleware still enforces granular perms
+  // for the actual HTTP routes; this function ONLY controls frontend sidebar VISIBILITY.
+  // Admin sees all nav groups; backend still authorizes each request.
   if (role === 'ADMIN') return true;
+  // ================================================================================
 
+  // Non-admin roles (BURSARY, STUDENT): strict array-based gate.
+  // BURSARY_EXCLUDED keys (MANAGE_USERS, MANAGE_ROLES, PAYSTACK_CONFIG,
+  // SYSTEM_SETTINGS, AUDIT_LOGS_VIEW_FULL, REPORTS_SCHEDULE) are never present in
+  // the BURSARY rolePermissions seed table, so the array lookup will naturally
+  // return false and hide Administration + Scheduled Reports items from Bursary.
   if (!userPermissions || userPermissions.length === 0) return false;
   return userPermissions.includes(requiresPermission);
 };
@@ -154,6 +171,14 @@ const buildAdminNav = (
   _counters?: Record<string, number>,
   userPermissions?: string[],
 ): NavGroup[] => {
+  // Build the full 9-group sidebar tree for both ADMIN and BURSARY roles.
+  // BURSARY gets /bursary/* paths; ADMIN gets /admin/* paths.
+  // Visibility of each NavItem is enforced at RENDER TIME via hasPermission()
+  // which reads userPermissions (exactly the set admin ticked in Roles UI).
+  // This means: admin de-selects a permission → item is hidden; admin
+  // selects a permission → item is shown. RBAC triple-gate (T8 AC-5) is
+  // preserved because routes/reports.ts + PrivateRoute both re-check permissions
+  // server-side, so even if a URL is typed manually, it is still denied.
   const bursary = role === 'BURSARY';
   const prefix = bursary ? '/bursary' : '/admin';
 
@@ -161,6 +186,7 @@ const buildAdminNav = (
     { to: `${prefix}/receipts`, icon: Receipt, label: 'Receipts', sub: true, requiresPermission: 'VIEW_RECEIPTS' },
   ];
 
+  // BURSARY limited audit logs (if granted AUDIT_LOGS_VIEW_LIMITED)
   if (bursary && userPermissions?.includes('AUDIT_LOGS_VIEW_LIMITED')) {
     receiptItems.push({
       to: '/bursary/audit-logs',
@@ -170,6 +196,7 @@ const buildAdminNav = (
       requiresPermission: 'AUDIT_LOGS_VIEW_LIMITED',
     });
   }
+  // Admin action items on receipts
   if (!bursary) {
     receiptItems.unshift({
       to: `${prefix}/receipts?view=generate`,
@@ -242,11 +269,20 @@ const buildAdminNav = (
     },
   ];
 
+  // BURSARY only: Reconciliation group is added last so it appears after
+  // the permission-selected items above. If admin grants VIEW_RECONCILIATION
+  // or REPORTS_*, these will appear. Otherwise hasPermission() hides them.
   if (bursary) {
     groups.push({
       title: i18n.sidebar.groups.reconciliation,
       headingIcon: Scale,
       items: [
+        // Distinct reconciliation dashboard at /bursary/reconciliation — deliberately
+        // uses a different LABEL than the main operational "Dashboard" at
+        // /bursary/dashboard so the Bursary sidebar does NOT show two items both
+        // called "Dashboard". Two pages exist with different purposes (per App.tsx
+        // routes): general operational overview (Dashboard) vs reconciliation/settlement
+        // view (Reconciliation Overview).
         { to: '/bursary/reconciliation', icon: Scale, label: 'Reconciliation Overview', sub: true, requiresPermission: 'VIEW_RECONCILIATION' },
         { to: '/bursary/reports/centre', icon: BarChart3, label: 'Reports Centre', sub: true, requiresPermission: 'REPORTS_VIEW_COLLECTIONS' },
         { to: '/bursary/reports/exceptions', icon: Shield, label: 'Reconciliation Exceptions', sub: true, requiresPermission: 'REPORTS_VIEW_RECONCILIATION' },
@@ -257,6 +293,9 @@ const buildAdminNav = (
     });
   }
 
+  // ADMIN only: Administration group (sensitive user/role/config management).
+  // BURSARY never has these perms (BURSARY_EXCLUDED set in permissionSeed.ts
+  // pre-sweep DELETE). hasPermission() will also double-guard render.
   if (!bursary) {
     groups.push({
       title: i18n.sidebar.groups.administration,

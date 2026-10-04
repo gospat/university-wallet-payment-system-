@@ -57,6 +57,7 @@ const ActivePill: React.FC<{ value: boolean; }> = ({ value }) => (
   </span>
 );
 
+// ---------------- initialToForm helper (scope-safe, outside component) ----------------
 function initialToForm(x: FeeOut | undefined, categories: CategoryOut[]): CreateFeeInput {
   return {
     feeCode: x?.feeCode ?? '',
@@ -76,6 +77,7 @@ function initialToForm(x: FeeOut | undefined, categories: CategoryOut[]): Create
   };
 }
 
+// ---------------- Fee CRUD: popup modal OR full-page standalone card ----------------
 type FeeFormProps = {
   open: boolean;
   kind: 'create' | 'edit';
@@ -85,7 +87,9 @@ type FeeFormProps = {
   onSubmit: (body: CreateFeeInput) => Promise<void> | void;
   submitting?: boolean;
   frozen?: boolean;
+  /** Render as full-page card (no modal chrome) instead of a popup dialog. */
   standalone?: boolean;
+  /** Optional back-link callback (only shown when standalone=true). */
   onBack?: () => void;
 };
 const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onClose, onSubmit, submitting, frozen, standalone, onBack }) => {
@@ -110,6 +114,7 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
 
   const selectedCat = categories.find((c) => c.id === Number(form.categoryId));
 
+  // ---------------- Shared header banner ----------------
   const headerBanner = (
     <div className={standalone ? 'mb-6' : '-mx-6 -mt-4 mb-5'}>
       <div className={`bg-gradient-to-r from-indigo-600 via-indigo-600 to-blue-600 text-white ${standalone ? 'rounded-2xl' : 'rounded-t-2xl'} px-6 py-4 border-b border-white/10`}>
@@ -135,6 +140,7 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
             <div>Fill basic fields · 3 easy sections</div>
           </div>
         </div>
+        {/* Stepper */}
         <div className="mt-4 flex items-center gap-2 text-[11.5px] font-medium">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 backdrop-blur px-3 py-1 border border-white/10 text-white">
             <span className="h-4 w-4 rounded-full bg-white/25 border border-white/30 flex items-center justify-center text-[9.5px] font-bold">1</span>
@@ -155,6 +161,7 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
     </div>
   );
 
+  // ---------------- Footer actions (Cancel / Submit) ----------------
   const actions = (
     <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 sm:gap-3 pt-1 w-full">
       <div className="flex items-center gap-2 text-xs text-gray-500 flex-1">
@@ -179,8 +186,10 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
     </div>
   );
 
+  // ---------------- Shared body content (all sections) wrapped in <form> ----------------
   const body = (
     <form id="fee-form" onSubmit={submitHandler} className="space-y-5 text-sm">
+      {/* Section 1: Basics */}
       <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
         <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between gap-3 bg-gradient-to-br from-gray-50 to-white">
           <div className="flex items-center gap-3">
@@ -268,6 +277,7 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
         </div>
       </section>
 
+      {/* Section 2: Scope */}
       <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
         <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between gap-3 bg-gradient-to-br from-gray-50 to-white">
           <div className="flex items-center gap-3">
@@ -336,6 +346,7 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
         </div>
       </section>
 
+      {/* Section 3: Advanced toggle */}
       <section className="rounded-2xl border border-gray-200 bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)] overflow-hidden">
         <button
           type="button"
@@ -408,6 +419,7 @@ const FeeForm: React.FC<FeeFormProps> = ({ open, kind, initial, categories, onCl
     </form>
   );
 
+  // ---------------- DUAL-MODE RENDER ----------------
   if (standalone) {
     return (
       <div className="w-full">
@@ -478,6 +490,7 @@ const CloneFeeModal: React.FC<{
         </div>
       </div>
     }>
+      {/* Header */}
       <div className="-mx-6 -mt-4 mb-5">
         <div className="bg-gradient-to-r from-indigo-600 via-indigo-600 to-blue-600 text-white rounded-t-2xl px-6 py-4 border-b border-white/10">
           <div className="flex items-start gap-3.5">
@@ -497,12 +510,13 @@ const CloneFeeModal: React.FC<{
         </div>
       </div>
 
+      {/* Summary row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
         {[
           { label: 'Amount', value: `₦${Number(fee.amount).toLocaleString()}`, tone: 'from-emerald-50 to-white border-emerald-100 text-emerald-800' },
           { label: 'Session', value: fee.academicSession, tone: 'from-indigo-50 to-white border-indigo-100 text-indigo-800' },
           { label: 'Scope', value: fee.college || fee.department || fee.program ? (fee.program || fee.department || fee.college)?.slice(0, 22) || 'All' : 'All students', tone: 'from-blue-50 to-white border-blue-100 text-blue-800' },
-          { label: 'Status', value: fee.isActive ? 'Active' : 'Inactive', tone: fee.isActive ? 'from-emerald-50 to-white border-emerald-100 text-emerald-800' : 'from-slate-50 to-white border-slate-100 text-slate-800' },
+          { label: 'Status', value: fee.isActive ? 'Active' : 'Inactive', tone: `from-${fee.isActive ? 'emerald' : 'slate'}-50 to-white border-${fee.isActive ? 'emerald' : 'slate'}-100 text-${fee.isActive ? 'emerald' : 'slate'}-800` },
         ].map((s) => (
           <div key={s.label} className={`rounded-xl border px-3.5 py-2.5 bg-gradient-to-br ${s.tone}`}>
             <div className="text-[10.5px] uppercase tracking-wider font-semibold opacity-80">{s.label}</div>
@@ -563,6 +577,7 @@ const CloneFeeModal: React.FC<{
   );
 };
 
+// ---------------- Category modal ----------------
 const CategoryModal: React.FC<{
   open: boolean; kind: 'create' | 'edit'; initial?: CategoryOut; onClose: () => void; onSubmit: (body: CreateCategoryInput) => Promise<void> | void; submitting?: boolean;
 }> = ({ open, kind, initial, onClose, onSubmit, submitting }) => {
@@ -593,8 +608,10 @@ const CategoryModal: React.FC<{
   );
 };
 
+// ---------------- Assignment wizard types ----------------
 type AssignmentWizardState = { step: 1 | 2 | 3 | 4 | 5; noteToStudent?: string | null; } & Partial<CreateAssignmentInput>;
 
+// ---------------- Wizard student target: matric input (primary) + numeric studentId fallback ----------------
 const StudentTargetField: React.FC<{
   state: AssignmentWizardState;
   set: (patch: Partial<CreateAssignmentInput>) => void;
@@ -607,6 +624,7 @@ const StudentTargetField: React.FC<{
     state.targetStudentId != null,
   );
   useEffect(() => {
+    /* sync: if numeric studentId appears externally, fall back to numeric UI */
     if (state.targetStudentId != null && !useNumeric && matric === '') {
       setUseNumeric(true);
     }
@@ -663,6 +681,8 @@ const StudentTargetField: React.FC<{
     </div>
   );
 };
+
+// ---------------- Assignment wizard modal ----------------
 
 const AssignmentWizardModal: React.FC<{
   open: boolean; fees: FeeOut[]; initial?: FeeAssignmentOut; onClose: () => void; onSubmit: (body: CreateAssignmentInput, force: boolean, generateNow: boolean) => Promise<GenerateResp | null | undefined> | void; submitting?: boolean;
@@ -860,7 +880,7 @@ const AssignmentWizardModal: React.FC<{
     <Modal isOpen={open} title={t.wizardTitle} onClose={onClose} footer={
       <div className="flex justify-between items-center">
         <div>
-          {state.step > 1 && <button onClick={() => goTo(Math.max(1, (state.step as number) - 1) as any)} className="px-3 py-1.5 rounded-md border border-gray-300 text-sm mr-2">Back</button>}
+          {state.step > 1 && <button onClick={() => goTo(Math.max(1, (state.step as number) - 1) as any)} className="px-3 py-1.5 rounded-md border border-gray-300 text-sm mr-2">{tC.cancel === 'Cancel' ? 'Back' : 'Back'}</button>}
         </div>
         <div className="flex gap-2">
           <button onClick={onClose} className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-800">{tC.cancel}</button>
@@ -981,7 +1001,7 @@ const AssignmentWizardModal: React.FC<{
         <div className="space-y-4">
           <dl className="grid grid-cols-2 gap-3 text-sm">
             <div><dt className="text-gray-500 text-xs">{adminFees.assignments.headerType}</dt><dd className="font-medium">{type?.label ?? state.assignmentType}</dd></div>
-            <div><dt className="text-gray-500 text-xs">Fee</dt><dd className="font-medium">{fees.find((f) => f.id === state.feeId)?.feeCode ?? '—'}</dd></div>
+            <div><dt className="text-gray-500 text-xs">{adminFees.categories.headerFeesCount === 'Linked Fees' ? 'Fee' : 'Fee'}</dt><dd className="font-medium">{fees.find((f) => f.id === state.feeId)?.feeCode ?? '—'}</dd></div>
             <div className="col-span-2"><dt className="text-gray-500 text-xs">{adminFees.assignments.headerTarget}</dt><dd className="font-medium">{type ? `${type.label} = ${(state as any)[type.field] ?? ''}` : '—'}</dd></div>
             {state.overrideAmount !== undefined && <div><dt className="text-gray-500 text-xs">{adminFees.assignments.overrideAmount}</dt><dd>{fmtNgn(state.overrideAmount)}</dd></div>}
             {state.overrideDeadline !== undefined && <div><dt className="text-gray-500 text-xs">{adminFees.assignments.overrideDeadline}</dt><dd>{toISODate(state.overrideDeadline)}</dd></div>}
@@ -997,6 +1017,7 @@ const AssignmentWizardModal: React.FC<{
   );
 };
 
+// ---------------- Bulk Upload Wizard ----------------
 const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
   const t = adminFees.upload;
   const [stageId, setStageId] = useState<string | null>(null);
@@ -1183,6 +1204,7 @@ const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
   }
 };
 
+// ---------------- Field helper ----------------
 const Field: React.FC<{ label: string; full?: boolean; children: React.ReactNode; }> = ({ label, children, full }) => (
   <div className={full ? 'md:col-span-2' : ''}>
     <label className="block text-xs text-gray-600 mb-1 font-medium">{label}</label>
@@ -1190,6 +1212,7 @@ const Field: React.FC<{ label: string; full?: boolean; children: React.ReactNode
   </div>
 );
 
+// ---------------- AdminFeesPage root ----------------
 export type FeeTab = 'fees' | 'categories' | 'assignments' | 'upload' | 'create';
 
 const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userText: string; onLogout: () => void; goBack: () => void; dashboardTo: string; initialTab?: FeeTab; }> = ({ role, brand, userText, onLogout, goBack, dashboardTo, initialTab }) => {
@@ -1263,9 +1286,11 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   });
   const closeConfirm = () => setConfirm((s) => ({ ...s, isOpen: false }));
 
+  // shared
   const [categories, setCategories] = useState<CategoryOut[]>([]);
   const [fees, setFees] = useState<FeeOut[]>([]);
 
+  // ---------------- Fees list state ----------------
   const [feesLoading, setFeesLoading] = useState(false);
   const [feesResp, setFeesResp] = useState<{ total: number; page: number; pageSize: number; } | null>(null);
   const fq = useFeeQueryState();
@@ -1297,6 +1322,7 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   const [assignSubmitting, setAssignSubmitting] = useState(false);
   const [directBillModalOpen, setDirectBillModalOpen] = useState(false);
 
+  // ---------------- Categories list state ----------------
   const [catsLoading, setCatsLoading] = useState(false);
   const [catsResp, setCatsResp] = useState<{ total: number; page: number; pageSize: number; } | null>(null);
   const cq = useCategoryQueryState();
@@ -1308,6 +1334,7 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   }, [cq.sigkey]);
   useEffect(() => { if (activeTab === 'categories') loadCategoriesList(); }, [activeTab, loadCategoriesList]);
 
+  // ---------------- Assignments list state ----------------
   const [assignments, setAssignments] = useState<FeeAssignmentOut[]>([]);
   const [assignResp, setAssignResp] = useState<{ total: number; page: number; pageSize: number; } | null>(null);
   const [assignLoading, setAssignLoading] = useState(false);
@@ -1352,15 +1379,20 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             <div className="flex flex-wrap gap-2">
               <div className="flex rounded-lg border border-gray-200 bg-white p-1">
                 {(['fees', 'categories', 'assignments', 'upload'] as const).map((t) => {
-                  const labelMap: Record<string, string> = {
-                    fees: 'Bills', categories: 'Categories', assignments: 'Bill Assignments', upload: 'Bulk Upload',
+                  const labelMap = {
+                    fees: 'Bills',
+                    categories: 'Categories',
+                    assignments: 'Bill Assignments',
+                    upload: 'Bulk Upload',
                   };
                   return (
                     <button
                       key={t}
                       onClick={() => setSearchParams({ tab: t })}
                       className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                        activeTab === t ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'
+                        activeTab === t
+                          ? 'bg-blue-600 text-white'
+                          : 'text-gray-700 hover:bg-gray-100'
                       }`}
                     >
                       {labelMap[t]}
@@ -1523,16 +1555,25 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             }}
             onToggleActive={async (a) => {
               try {
-                if (a.isActive) { await feeApi.disableAssignment(a.id); }
-                else { await feeApi.enableAssignment(a.id); }
+                if (a.isActive) {
+                  await feeApi.disableAssignment(a.id);
+                } else {
+                  await feeApi.enableAssignment(a.id);
+                }
                 await loadAssignments();
-              } catch (e: any) { onMutateErr('Toggle active failed', e); }
+              } catch (e: any) {
+                onMutateErr('Toggle active failed', e);
+              }
             }}
             onDelete={async (a) => {
               const ok = window.confirm('Cannot be undone. Related UNPAID invoices removed.');
               if (!ok) return;
-              try { await feeApi.deleteAssignment(a.id); await loadAssignments(); }
-              catch (e: any) { onMutateErr('Delete assignment failed', e); }
+              try {
+                await feeApi.deleteAssignment(a.id);
+                await loadAssignments();
+              } catch (e: any) {
+                onMutateErr('Delete assignment failed', e);
+              }
             }}
           />
         )}
@@ -1588,7 +1629,8 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             notify('Fee cloned', newCode, 'success');
             setCloneModal({ open: false });
             await loadFees();
-          } catch (e: any) { onMutateErr('Clone failed', e); }
+          }
+          catch (e: any) { onMutateErr('Clone failed', e); }
           finally { setFeeSubmitting(false); }
         }}
       />
@@ -1730,6 +1772,7 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   );
 };
 
+// ---------------- Query state hooks ----------------
 function useFeeQueryState() {
   const [q, setQ] = useState('');
   const [category, setCategory] = useState('');
@@ -1755,6 +1798,7 @@ function useFeeQueryState() {
   if (semester) query.semester = semester;
   if (isActive) query.isActive = isActive === 'true';
   if (isMandatory) query.isMandatory = isMandatory === 'true';
+
   const sigkey = [q, category, college, department, program, studentType, semester, isActive, isMandatory, page, pageSize, sort, order].join('|');
   return { query, sigkey, reset,
     bind: { q, setQ, category, setCategory, college, setCollege, department, setDepartment, program, setProgram, studentType, setStudentType, semester, setSemester, isActive, setIsActive, isMandatory, setIsMandatory, page, setPage, pageSize, setPageSize, sort, setSort, order, setOrder },
@@ -1789,6 +1833,7 @@ function useAssignmentQueryState() {
   return { query, sigkey, q, setQ, type, setType, feeId, setFeeId, studentType, setStudentType, isActive, setIsActive, page, setPage, pageSize, setPageSize };
 }
 
+// ---------------- List views ----------------
 const FeesList: React.FC<{
   fq: ReturnType<typeof useFeeQueryState>;
   loading: boolean;
@@ -1806,6 +1851,7 @@ const FeesList: React.FC<{
   const tC = adminFees.common;
   const totalPages = Math.max(1, Math.ceil((resp?.total ?? 0) / (resp?.pageSize ?? 25)));
   const b = fq.bind;
+
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
@@ -1861,6 +1907,7 @@ const FeesList: React.FC<{
           </div>
         </div>
       </div>
+
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
@@ -1878,8 +1925,12 @@ const FeesList: React.FC<{
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {loading && <tr><td colSpan={9} className="text-center py-10 text-gray-500">Loading…</td></tr>}
-              {!loading && fees.length === 0 && <tr><td colSpan={9} className="text-center py-10 text-gray-500">{t.empty}</td></tr>}
+              {loading && (
+                <tr><td colSpan={9} className="text-center py-10 text-gray-500">Loading…</td></tr>
+              )}
+              {!loading && fees.length === 0 && (
+                <tr><td colSpan={9} className="text-center py-10 text-gray-500">{t.empty}</td></tr>
+              )}
               {fees.map((f) => {
                 const cat = categories.find((c) => c.id === f.categoryId) ?? f.category;
                 const scope = [f.college, f.department, f.program, f.level ? `${f.level}L` : null, f.studentType, f.semester ? (semesterLabels as any)[f.semester] : null].filter(Boolean).join(' · ') || 'All';
@@ -1903,7 +1954,12 @@ const FeesList: React.FC<{
                           ) : (
                             <button onClick={() => onActivate(f)} className="text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">{t.activateAction}</button>
                           )}
-                          <button type="button" onClick={() => onDelete(f)} title="Delete" className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors">
+                          <button
+                            type="button"
+                            onClick={() => onDelete(f)}
+                            title="Delete"
+                            className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+                          >
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
@@ -2001,8 +2057,18 @@ const AssignmentsList: React.FC<{
   const totalPages = Math.max(1, Math.ceil((resp?.total ?? 0) / (resp?.pageSize ?? 25)));
   const TYPES = ['STUDENT','PROGRAMME','DEPARTMENT','FACULTY','STUDENT_TYPE'] as const;
 
+  const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['PAID','REVERSED','REFUNDED','CANCELLED']);
+  const LOCK_TOOLTIP = 'Locked: invoice has already been settled.';
+
   const isDirectBill = (a: FeeAssignmentOut) =>
     a.assignmentType === 'STUDENT' && a.targetStudentId != null;
+
+  const isLocked = (a: FeeAssignmentOut): boolean => {
+    if (!isDirectBill(a)) return false;
+    const status = a.invoice?.status;
+    if (!status) return false;
+    return TERMINAL_STATUSES.has(String(status).toUpperCase());
+  };
 
   const matricOf = (a: FeeAssignmentOut) => a.targetStudent?.matricNumber ?? null;
   const fullNameOf = (a: FeeAssignmentOut) =>
@@ -2072,6 +2138,8 @@ const AssignmentsList: React.FC<{
               const direct = isDirectBill(a);
               const matric = matricOf(a);
               const studentName = fullNameOf(a);
+              const locked = isLocked(a);
+              const displayInvoiceNumber = a.invoice?.invoiceNumber;
               return (
                 <tr key={a.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-gray-900 whitespace-nowrap">
@@ -2109,39 +2177,78 @@ const AssignmentsList: React.FC<{
                     {a.overrideAmount ? <div>{fmtNgn(a.overrideAmount)}</div> : null}
                     {a.overrideDeadline ? <div>{fmtDate(a.overrideDeadline)}</div> : (!a.overrideAmount ? <span className="text-gray-400">—</span> : null)}
                   </td>
-                  <td className="px-4 py-3"><ActivePill value={a.isActive} /></td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <ActivePill value={locked ? true : a.isActive} />
+                      {locked && (
+                        <span
+                          className="text-[10px] font-bold text-gray-500"
+                          title={LOCK_TOOLTIP}
+                        >
+                          🔒
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-right">
                     {canMutate && (
                       <div className="flex items-center justify-end gap-1 text-xs">
-                        <button onClick={() => onEdit(a)} className="text-blue-700 hover:text-blue-900 px-2 py-1 rounded hover:bg-blue-50">{t.editAction}</button>
+                        <button
+                          onClick={() => { if (!locked) onEdit(a); }}
+                          disabled={locked}
+                          title={locked ? LOCK_TOOLTIP : undefined}
+                          className={`px-2 py-1 rounded ${
+                            locked
+                              ? 'bg-gray-100 border border-gray-200 text-gray-400 opacity-50 cursor-not-allowed'
+                              : 'text-blue-700 hover:text-blue-900 hover:bg-blue-50'
+                          }`}
+                        >
+                          {t.editAction}
+                        </button>
                         {!direct && (
                           <button onClick={() => onGenerate(a)} className="text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded hover:bg-emerald-50">{t.generateAction}</button>
                         )}
                         {direct && (
                           <span
-                            className="text-[10px] uppercase tracking-wide text-gray-400 px-2 py-1"
-                            title="Direct bills auto-generate an invoice at creation; use Bill a Student again to adjust."
+                            className="text-[10px] uppercase tracking-wide px-2 py-1"
+                            title={locked ? LOCK_TOOLTIP : 'Direct bills auto-generate an invoice at creation; use Bill a Student again to adjust.'}
                           >
-                            INV AUTO
+                            {locked ? (
+                              <span className="inline-flex items-center gap-1 text-gray-500 font-bold">
+                                🔒 {displayInvoiceNumber || 'INV AUTO'}
+                              </span>
+                            ) : (
+                              <span className="text-gray-400">
+                                {displayInvoiceNumber || 'INV AUTO'}
+                              </span>
+                            )}
                           </span>
                         )}
                         <button
                           type="button"
-                          onClick={() => onToggleActive(a)}
-                          title={a.isActive ? 'Disable' : 'Enable'}
-                          className={`inline-flex items-center justify-center h-8 w-8 rounded-md border border-transparent transition-colors ${
-                            a.isActive
-                              ? 'text-amber-700 hover:text-amber-800 hover:bg-amber-50 hover:border-amber-200'
-                              : 'text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 hover:border-emerald-200'
+                          onClick={() => { if (!locked) onToggleActive(a); }}
+                          disabled={locked}
+                          title={locked ? LOCK_TOOLTIP : ((locked ? true : a.isActive) ? 'Disable' : 'Enable')}
+                          className={`inline-flex items-center justify-center h-8 w-8 rounded-md border transition-colors ${
+                            locked
+                              ? 'bg-gray-100 border-gray-200 text-gray-400 opacity-50 cursor-not-allowed'
+                              : (locked ? true : a.isActive)
+                                ? 'text-amber-700 hover:text-amber-800 hover:bg-amber-50 border-transparent hover:border-amber-200'
+                                : 'text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 border-transparent hover:border-emerald-200'
                           }`}
                         >
                           <Power className="h-4 w-4" />
                         </button>
                         <button
                           type="button"
-                          onClick={() => onDelete(a)}
-                          title="Delete"
-                          className="inline-flex items-center justify-center h-8 w-8 rounded-md text-gray-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+                          onClick={() => { if (!locked) onDelete(a); }}
+                          disabled={locked}
+                          title={locked ? LOCK_TOOLTIP : 'Delete'}
+                          className={`inline-flex items-center justify-center h-8 w-8 rounded-md border transition-colors ${
+                            locked
+                              ? 'bg-gray-100 border-gray-200 text-gray-400 opacity-50 cursor-not-allowed'
+                              : 'text-gray-600 hover:text-red-700 hover:bg-red-50 border-transparent hover:border-red-200'
+                          }`}
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
