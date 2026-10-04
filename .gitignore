@@ -84,6 +84,8 @@ dump.rdb
 *.sql.gz
 backup/
 dumps/
+# Allowlist: Prisma forward migrations (tracked + versioned, never ad-hoc dumps)
+!api/prisma/migrations/*/migration.sql
 
 # ============================================================
 # Testing Tools (Temporary / Local-Only)

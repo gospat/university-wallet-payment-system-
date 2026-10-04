@@ -22,17 +22,19 @@ CREATE INDEX `transactions_invoiceId_status_idx`
 CREATE INDEX `receipts_paidAt_isVoided_idx`
   ON `receipts` (`paidAt`, `isVoided`);
 
--- receipts: student + paidAt for statement (R6)
-CREATE INDEX `receipts_studentId_paidAt_idx`
-  ON `receipts` (`studentId`, `paidAt`);
+-- [SKIPPED] receipts: student + paidAt for statement (R6)
+--   Index `receipts_studentId_paidAt_idx` on (`studentId`, `paidAt`) already exists
+--   in the deployed production schema (from baseline 89e2cdd), column-identical.
+--   Skip CREATE to avoid MySQL "Duplicate key name" error on first apply.
 
 -- invoices: session + status for outstanding/debtors (R8) and collection perf (R7)
 CREATE INDEX `invoices_session_status_idx`
   ON `invoices` (`session`, `status`);
 
--- invoices: studentId + status for per-student billing (R6/R8)
-CREATE INDEX `invoices_studentId_status_idx`
-  ON `invoices` (`studentId`, `status`);
+-- [SKIPPED] invoices: studentId + status for per-student billing (R6/R8)
+--   Index `invoices_studentId_status_idx` on (`studentId`, `status`) already exists
+--   in the deployed production schema (from baseline 89e2cdd), column-identical.
+--   Skip CREATE to avoid MySQL "Duplicate key name" error on first apply.
 
 -- invoices: feeId + session for revenue-by-bill rollup (R4/R7/R9)
 CREATE INDEX `invoices_feeId_session_idx`
@@ -48,9 +50,10 @@ CREATE INDEX `GeneralLedger_transactionId_idx`
 CREATE INDEX `GeneralLedger_receiptId_idx`
   ON `GeneralLedger` (`receiptId`);
 
--- refunds: status + createdAt (R13)
-CREATE INDEX `refunds_status_createdAt_idx`
-  ON `refunds` (`status`, `createdAt`);
+-- [SKIPPED] refunds: status + createdAt (R13)
+--   Index `refunds_status_createdAt_idx` on (`status`, `createdAt`) already exists
+--   in the deployed production schema (from baseline 89e2cdd), column-identical.
+--   Skip CREATE to avoid MySQL "Duplicate key name" error on first apply.
 
 -- webhook events status (R12 exception "local missing at provider" / "provider missing locally")
 CREATE INDEX `webhook_events_transactionReference_isProcessed_idx`
