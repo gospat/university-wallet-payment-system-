@@ -339,8 +339,34 @@ export class FeeAssignmentService {
   }
 
   static async update(id: number, patch: UpdateFeeAssignmentInput, req?: ReqLike) {
-    const existing = await prisma.feeAssignment.findFirst({ where: { id } });
+    const existing = await prisma.feeAssignment.findFirst({
+      where: { id },
+      include: { fee: { select: { id: true, amount: true, paymentDeadline: true, academicSession: true, semester: true } } },
+    });
     if (!existing) throw new AppError(i18n.errors.assignment.assignmentNotFound, 404);
+
+    const hasAmountOrDeadlineChange =
+      patch.overrideAmount !== undefined || patch.overrideDeadline !== undefined;
+
+    const TERMINAL_STATUSES: ReadonlyArray<string> = ['PAID', 'CANCELLED', 'REFUNDED', 'REVERSED'];
+
+    if (hasAmountOrDeadlineChange && existing.targetStudentId && existing.fee) {
+      const terminalInvoices = await prisma.invoice.findMany({
+        where: {
+          studentId: existing.targetStudentId,
+          feeId: existing.feeId,
+          status: { in: TERMINAL_STATUSES as any },
+          createdAt: { gte: new Date(String(existing.assignedAt)) },
+        },
+        select: { id: true, status: true, amountDue: true, invoiceNumber: true },
+      });
+      if (terminalInvoices.length > 0) {
+        throw new AppError(
+          'Cannot update a direct-bill assignment linked to a paid invoice. Create a new assignment instead.',
+          409,
+        );
+      }
+    }
 
     const data: Prisma.FeeAssignmentUpdateInput = {};
     if (patch.targetProgramme !== undefined) data.targetProgramme = patch.targetProgramme ?? null;
@@ -358,6 +384,58 @@ export class FeeAssignmentService {
     if (patch.isActive !== undefined) data.isActive = patch.isActive;
 
     const updated = await prisma.feeAssignment.update({ where: { id }, data, select: ASSIGNMENT_SELECT as any });
+
+    if (hasAmountOrDeadlineChange && existing.targetStudentId && existing.fee) {
+      const newOverrideAmount = patch.overrideAmount !== undefined
+        ? Number(patch.overrideAmount)
+        : (existing.overrideAmount != null ? Number(existing.overrideAmount) : null);
+      const targetAmount = newOverrideAmount != null
+        ? Number(newOverrideAmount)
+        : Number(existing.fee.amount);
+      const targetDue = patch.overrideDeadline !== undefined
+        ? patch.overrideDeadline
+        : (existing.overrideDeadline ?? existing.fee.paymentDeadline);
+
+      const oldOverrideAmount = existing.overrideAmount != null ? Number(existing.overrideAmount) : null;
+      const originalAmount = oldOverrideAmount != null ? Number(oldOverrideAmount) : Number(existing.fee.amount);
+
+      const nonTerminal = await prisma.invoice.findMany({
+        where: {
+          studentId: existing.targetStudentId,
+          feeId: existing.feeId,
+          status: { in: ['UNPAID', 'PENDING', 'PARTIALLY_PAID'] as any },
+          createdAt: { gte: new Date(String(existing.assignedAt)) },
+        },
+        select: { id: true, amountDue: true, createdAt: true, status: true },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      });
+
+      if (nonTerminal.length > 0) {
+        let bestMatch: typeof nonTerminal[number] | null = null;
+        let bestDelta = Infinity;
+        for (const inv of nonTerminal) {
+          const delta = Math.abs(Number(inv.amountDue) - originalAmount);
+          if (delta < bestDelta) {
+            bestDelta = delta;
+            bestMatch = inv;
+          }
+        }
+        if (bestMatch && bestDelta < 0.01) {
+          const updateData: Prisma.InvoiceUpdateInput = {
+            amountDue: new Prisma.Decimal(String(targetAmount)),
+          };
+          if (targetDue !== undefined && targetDue !== null) {
+            updateData.dueDate = targetDue;
+          }
+          await prisma.invoice.update({
+            where: { id: bestMatch.id },
+            data: updateData,
+          });
+        }
+      }
+    }
+
     await writeAudit(req, { action: auditActions.feeAssignmentUpdated, entityType: 'FEE_ASSIGNMENT', entityId: id, oldValue: existing, newValue: updated });
     return updated;
   }
@@ -365,6 +443,21 @@ export class FeeAssignmentService {
   static async remove(id: number, req?: ReqLike) {
     const existing = await prisma.feeAssignment.findFirst({ where: { id }, include: { fee: true } });
     if (!existing) throw new AppError(i18n.errors.assignment.assignmentNotFound, 404);
+
+    if (existing.targetStudentId) {
+      const paidInvoices = await prisma.invoice.findMany({
+        where: {
+          studentId: existing.targetStudentId,
+          feeId: existing.feeId,
+          status: 'PAID',
+          createdAt: { gte: new Date(String(existing.assignedAt)) },
+        },
+        select: { id: true, invoiceNumber: true },
+      });
+      if (paidInvoices.length > 0) {
+        throw new AppError('Assignment has paid invoices and cannot be deleted.', 409);
+      }
+    }
 
     const txResult = await prisma.$transaction(async (tx) => {
       const hasPaidTx = await tx.transaction.findFirst({

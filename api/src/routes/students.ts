@@ -495,7 +495,7 @@ async function ensureInvoiceForFee(studentId: number, feeId: number, opts?: { id
     )) as unknown as Array<{ next_id: number }>;
     let nextId = Number(baseRow?.[0]?.next_id ?? 0);
     if (Number.isNaN(nextId) || nextId <= 0) nextId = 1;
-    const fiscalYear = fee.academicSession?.split('/')?.[0] ?? undefined;
+    const fiscalYear = fee.academicSession?.split('/')?.[0] ?? String(new Date().getFullYear());
     const invRef = generateInvoiceReference(nextId, fiscalYear);
     return tx.invoice.create({
       data: {
@@ -515,6 +515,161 @@ async function ensureInvoiceForFee(studentId: number, feeId: number, opts?: { id
   });
   return { invoiceId: created.id, invoiceNumber: created.invoiceNumber, created: true, fee };
 }
+
+async function ensureInvoiceForFeeAssignment(studentId: number, assignmentId: number, opts?: { idempotencyKey?: string }) {
+  const assignment = await prisma.feeAssignment.findUnique({
+    where: { id: assignmentId, targetStudentId: studentId },
+    include: {
+      fee: {
+        select: {
+          id: true, name: true, feeCode: true, academicSession: true, semester: true,
+          paymentDeadline: true, amount: true, currency: true,
+        },
+      },
+    },
+  });
+  if (!assignment) throw new AppError('Assignment not found', 404);
+
+  const fee = assignment.fee as any;
+  const targetAmount = (assignment.overrideAmount != null) ? Number(assignment.overrideAmount) : Number(fee.amount);
+  const targetDueDate = (assignment as any).overrideDeadline || fee.paymentDeadline;
+  const targetSession = (assignment as any).session || fee.academicSession || 'General';
+  const targetSemester = (assignment as any).semester ?? fee.semester ?? undefined;
+
+  if (opts?.idempotencyKey) {
+    const existingByKey = await prisma.invoice.findFirst({
+      where: {
+        idempotencyKey: opts.idempotencyKey,
+        studentId,
+        feeId: fee.id,
+      },
+      select: { id: true, invoiceNumber: true, amountDue: true, amountPaid: true, status: true },
+    });
+    if (existingByKey) {
+      const bal = Number(existingByKey.amountDue) - Number(existingByKey.amountPaid);
+      if (bal <= 0 && existingByKey.status === 'PAID') {
+        throw new AppError('This fee is already paid.', 409);
+      }
+      return {
+        invoiceId: existingByKey.id,
+        invoiceNumber: existingByKey.invoiceNumber,
+        created: false,
+        fee,
+      };
+    }
+  }
+
+  const candidates = await prisma.invoice.findMany({
+    where: {
+      studentId,
+      feeId: fee.id,
+      status: { in: ['UNPAID', 'PENDING', 'PARTIALLY_PAID'] as any },
+      createdAt: { gte: new Date(String(assignment.assignedAt)) },
+    },
+    select: { id: true, invoiceNumber: true, amountDue: true, amountPaid: true, status: true, createdAt: true },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+
+  const matched = candidates.filter((c: any) => {
+    const due = Number((c as any).amountDue ?? 0);
+    return Math.abs(due - targetAmount) < 0.01;
+  });
+
+  if (matched.length > 0) {
+    const reuse = matched[0];
+    const bal = Number(reuse.amountDue) - Number(reuse.amountPaid);
+    if (bal <= 0) throw new AppError('This fee is already paid.', 409);
+    return { invoiceId: reuse.id, invoiceNumber: reuse.invoiceNumber, created: false, fee };
+  }
+
+  const created = await prisma.$transaction(async (tx: any) => {
+    const baseRow = (await (tx as any).$queryRaw(
+      Prisma.sql`SELECT COALESCE(MAX(id),0)+1 AS next_id FROM invoices FOR UPDATE`,
+    )) as unknown as Array<{ next_id: number }>;
+    let nextId = Number(baseRow?.[0]?.next_id ?? 0);
+    if (Number.isNaN(nextId) || nextId <= 0) nextId = 1;
+    const fiscalYear = (fee.academicSession && fee.academicSession.split('/')?.[0])
+      ?? ((assignment as any).session && (assignment as any).session.split('/')?.[0])
+      ?? String(new Date().getFullYear());
+    const invRef = generateInvoiceReference(nextId, fiscalYear);
+    return tx.invoice.create({
+      data: {
+        invoiceNumber: invRef,
+        student: { connect: { id: studentId } },
+        fee: { connect: { id: fee.id } },
+        amountDue: new (Prisma as any).Decimal(String(targetAmount)),
+        amountPaid: new (Prisma as any).Decimal(0),
+        status: 'PENDING',
+        idempotencyKey: opts?.idempotencyKey ?? `DA-${assignmentId}-${Math.floor(Date.now()/60000)}`,
+        session: targetSession,
+        semester: targetSemester ?? undefined,
+        dueDate: targetDueDate ?? undefined,
+      },
+      select: { id: true, invoiceNumber: true },
+    });
+  });
+  return { invoiceId: created.id, invoiceNumber: created.invoiceNumber, created: true, fee };
+}
+
+const AssignmentIdParam = z.object({ assignmentId: z.coerce.number().int().positive() });
+
+router.post(
+  '/fee-assignments/:assignmentId/ensure-invoice',
+  protect,
+  restrictTo(Role.STUDENT),
+  validateParams(AssignmentIdParam),
+  catchAsync(async (req: any, res) => {
+    const idempotencyKey = (req.headers?.['idempotency-key'] as string) || req.body?.idempotencyKey;
+    const opts: any = idempotencyKey ? { idempotencyKey: String(idempotencyKey).slice(0, 128) } : undefined;
+    const result = await ensureInvoiceForFeeAssignment(Number(req.user?.id), Number(req.params.assignmentId), opts);
+    res.status(200).json({
+      status: 'success',
+      data: {
+        invoiceId: result.invoiceId,
+        invoiceNumber: result.invoiceNumber,
+        created: result.created,
+        fee: {
+          id: result.fee.id, feeCode: result.fee.feeCode, name: result.fee.name,
+          amount: Number(result.fee.amount),
+          currency: (result.fee as any).currency,
+          academicSession: result.fee.academicSession,
+          semester: result.fee.semester,
+        },
+      },
+    });
+  }),
+);
+
+const AssignmentInitiateValidator = [validateParams(AssignmentIdParam), validateBody(_FeeInitiateInnerSchema)];
+
+router.post(
+  '/fee-assignments/:assignmentId/pay',
+  protect,
+  restrictTo(Role.STUDENT),
+  ...AssignmentInitiateValidator,
+  catchAsync(async (req: any, res) => {
+    const studentId = Number(req.user?.id);
+    const assignmentId = Number(req.params.assignmentId);
+    const partialAmount = req.body?.partialAmount;
+    const idempotencyKey: string | undefined =
+      (req.headers?.['idempotency-key'] as string) ||
+      (typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : undefined);
+    const ensured = await ensureInvoiceForFeeAssignment(
+      studentId,
+      assignmentId,
+      idempotencyKey ? { idempotencyKey: String(idempotencyKey).slice(0, 128) } : undefined,
+    );
+    const initInput: any = { invoiceId: ensured.invoiceId };
+    if (partialAmount !== undefined && partialAmount !== null) {
+      initInput.partialAmount = partialAmount;
+    }
+    if (typeof req.body?.email === 'string' && req.body.email.trim()) initInput.email = req.body.email.trim();
+    if (idempotencyKey) initInput.idempotencyKey = String(idempotencyKey).slice(0, 128);
+    const result = await PaymentService.initiatePayment(studentId, initInput, req);
+    res.status(200).json({ status: 'success', data: { ...result, invoiceId: ensured.invoiceId } });
+  }),
+);
 
 router.post(
   '/fees/:feeId/ensure-invoice',
