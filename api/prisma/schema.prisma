@@ -379,6 +379,7 @@ model FeeAssignment {
   assignedById     Int
   assignedAt       DateTime             @default(now())
   isActive         Boolean              @default(true)
+  settledAt        DateTime?
 
   fee              Fee                  @relation(fields: [feeId], references: [id])
   assignedBy       User                 @relation("FeeAssignmentCreator", fields: [assignedById], references: [id])
