@@ -1,0 +1,1 @@
+-- Baseline: database created before Prisma Migrate was adopted.
