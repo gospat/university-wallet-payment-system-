@@ -55,8 +55,8 @@ export default function ReconciliationPage() {
     setErr(null);
     try {
       const [s, e] = await Promise.all([
-        api.get<SummaryT>("/bursary/reconciliation/summary").then((r) => r.data),
-        api.get<{ data: ExceptionRow[] }>("/bursary/reconciliation/exceptions?size=100").then((r) => r.data),
+        api.get<SummaryT>("/bursary/reconciliation/summary").then((r: { data: SummaryT }) => r.data),
+        api.get<{ data: ExceptionRow[] }>("/bursary/reconciliation/exceptions?size=100").then((r: { data: { data: ExceptionRow[] } }) => r.data),
       ]);
       setSummary(s);
       setExceptions(e.data ?? []);

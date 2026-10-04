@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -13,12 +13,8 @@ export default function RequireAuth({
 }: {
   children?: React.ReactNode;
 }) {
-  const { isAuthenticated, mustChangePassword, me } = useAuth();
+  const { isAuthenticated, mustChangePassword } = useAuth();
   const location = useLocation();
-
-  useEffect(() => {
-    // placeholder
-  }, []);
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location }} />;
