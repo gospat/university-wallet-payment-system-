@@ -349,16 +349,44 @@ export class AuthService {
     const identifier = identifierRaw.trim();
     const looksLikeEmail = /^\S+@\S+\.\S+$/.test(identifier);
 
-    // Find user by email if it looks like an email, then fallback to matric.
-    // Otherwise try matricNumber first, then email.
+    // Login identifier resolution — intentionally flexible on matric formats
+    // (supports any stored identifier, e.g. 2020/001, 2024/1000, 2024/PG/2000,
+    // 2024-HND-077, etc). We NEVER apply a regex filter or format transform here
+    // so that WHATEVER string was stored in `users.matricNumber` during user
+    // creation is what the database lookup uses.
+    //
+    // Email path: strict unique match on lowercased email (email is always
+    // stored lowercased).
+    // Matric path: same 3-variant case-insensitive lookup pattern used by
+    // StudentService.getByMatric(), so `2024/PG/2000` works whether the user
+    // types `2024/pg/2000`, `2024/Pg/2000`, or `2024/PG/2000` regardless of the
+    // underlying DB collation.
     let userWithPassword: any = null;
     if (looksLikeEmail) {
       userWithPassword =
         (await prisma.user.findUnique({ where: { email: identifier.toLowerCase() } })) ??
-        (await prisma.user.findFirst({ where: { matricNumber: identifier } }));
+        (await prisma.user.findFirst({
+          where: {
+            OR: [
+              { matricNumber: identifier },
+              { matricNumber: identifier.toLowerCase() },
+              { matricNumber: identifier.toUpperCase() },
+            ],
+          },
+          orderBy: { id: 'asc' },
+        }));
     } else {
       userWithPassword =
-        (await prisma.user.findFirst({ where: { matricNumber: identifier } })) ??
+        (await prisma.user.findFirst({
+          where: {
+            OR: [
+              { matricNumber: identifier },
+              { matricNumber: identifier.toLowerCase() },
+              { matricNumber: identifier.toUpperCase() },
+            ],
+          },
+          orderBy: { id: 'asc' },
+        })) ??
         (await prisma.user.findUnique({ where: { email: identifier.toLowerCase() } }));
     }
 

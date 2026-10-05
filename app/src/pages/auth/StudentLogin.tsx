@@ -76,13 +76,14 @@ const StudentLogin: React.FC = () => {
                   value={identifier}
                   onChange={(e) => setIdentifier(e.target.value)}
                   className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-                  placeholder="e.g. 2023/001  or  student@bellsuniversity.edu.ng"
+                  placeholder="e.g. 2023/001 · 2024/1000 · 2024/PG/2000  or  student@bellsuniversity.edu.ng"
                   autoComplete="username"
                   required
                 />
               </div>
               <p className="mt-2 text-xs text-gray-500">
-                Sign in with either your registered matric number (case-sensitive) or student email address.
+                Sign in with your registered matric number (case-insensitive, any format already
+                stored in the database — e.g. 2020/001, 2024/1000, 2024/PG/2000) or your student email address.
               </p>
             </div>
 
