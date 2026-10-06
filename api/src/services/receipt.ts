@@ -1,4 +1,6 @@
 import QRCode from 'qrcode';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import { AppError } from '../utils/AppError';
 import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding, BELLS_LOGO_DATA_URI } from '../utils/branding';
 import prisma from '../config/database';
@@ -29,6 +31,54 @@ let _puppeteerLoadFailed: Error | null = null;
 type _SandboxMode = 'strict' | 'fallback_nosandbox' | 'unknown';
 let _sandboxMode: _SandboxMode = 'unknown';
 let _sandboxWarned = false;
+let _headlessShellWarned = false;
+let _sandboxHomeRedirected = false;
+let _headlessShellCopyPath: string | null = null;
+
+function ensureSandboxHomeRedirected() {
+  if (_sandboxHomeRedirected) return;
+  try {
+    fs.mkdirSync('/tmp/uni-wallet-crashpad', { recursive: true });
+    const tmpHome = fs.mkdtempSync('/tmp/uni-wallet-home-') + '/home';
+    fs.mkdirSync(tmpHome + '/Library/Application Support/Google/Chrome for Testing/Crashpad/new', { recursive: true });
+    fs.mkdirSync(tmpHome + '/Library/Caches', { recursive: true });
+    fs.mkdirSync(tmpHome + '/.cache', { recursive: true });
+    process.env.HOME = tmpHome;
+    _sandboxHomeRedirected = true;
+  } catch (_) { /* ignore — proceed with original HOME */ }
+}
+
+function ensureChromeHeadlessShellCopied(): string | null {
+  if (_headlessShellCopyPath) return _headlessShellCopyPath;
+  const candidates: Array<string> = [
+    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-154.0.8037.57/chrome-headless-shell-mac-arm64',
+    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-146.0.7680.76/chrome-headless-shell-mac-arm64',
+    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-148.0.7778.97/chrome-headless-shell-mac-arm64',
+    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-131.0.6778.204/chrome-headless-shell-mac-arm64',
+  ];
+  for (const src of candidates) {
+    try {
+      const chsDir = fs.mkdtempSync('/tmp/uni-chs-');
+      const dst = chsDir + '/chrome-headless-shell';
+      fs.cpSync(src, dst, { recursive: true });
+      const bin = dst + '/chrome-headless-shell';
+      try { fs.chmodSync(bin, 0o755); } catch {}
+      const dylibs = fs.readdirSync(dst).filter(f => f.endsWith('.dylib'));
+      for (const d of dylibs) { try { fs.chmodSync(dst + '/' + d, 0o755); } catch {} }
+      try { fs.accessSync(bin, fs.constants.X_OK); } catch (e) {
+        try { fs.rmSync(chsDir, { recursive: true, force: true }); } catch {}
+        continue;
+      }
+      _headlessShellCopyPath = bin;
+      if (!_headlessShellWarned) {
+        _headlessShellWarned = true;
+        console.info(`[receipt.ts] Using chrome-headless-shell at ${bin} (one-time copy to /tmp avoids sandbox EACCES on ~/.cache + no embedded Crashpad).`);
+      }
+      return bin;
+    } catch (_) { /* try next candidate */ }
+  }
+  return null;
+}
 
 async function loadPuppeteer(): Promise<PuppeteerApi> {
   // Fast path: already resolved
@@ -40,9 +90,24 @@ async function loadPuppeteer(): Promise<PuppeteerApi> {
 
   _puppeteerPromise = (async (): Promise<PuppeteerApi> => {
     try {
-      const loadNative: (specifier: string) => Promise<any> =
-        new Function('spec', 'return import(spec)') as (s: string) => Promise<any>;
-      const ns: any = await loadNative('puppeteer');
+      let ns: any;
+      const cwd = process.cwd();
+      try {
+        const localRequire = createRequire(cwd + '/package.json');
+        const abs = localRequire.resolve('puppeteer');
+        if (!abs) {
+          throw new Error('createRequire.resolve returned empty for puppeteer');
+        }
+        ns = localRequire('puppeteer');
+      } catch (_cjsErr) {
+        try {
+          const localRequire = createRequire(cwd + '/src/services/receipt.ts');
+          const abs = localRequire.resolve('puppeteer');
+          ns = abs ? await import(`file://${abs}`) : await import('puppeteer');
+        } catch {
+          ns = await import('puppeteer');
+        }
+      }
       const resolved: PuppeteerApi =
         ns && ns.default && typeof ns.default.launch === 'function'
           ? ns.default
@@ -264,47 +329,112 @@ function _isAllowedImageUrl(url: string): boolean {
 }
 
 async function render(html: string) {
+  ensureSandboxHomeRedirected();
+  const headlessShellBin = ensureChromeHeadlessShellCopied();
   const puppeteer = await loadPuppeteer();
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+  const userDataDir = `/tmp/uni-wallet-pdf-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.mkdirSync('/tmp/uni-wallet-crashpad', { recursive: true });
+  const cleanupProfile = () => {
+    try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 3 }); } catch (_) { /* ignore */ }
+  };
+
   try {
-    const strictArgs = ['--disable-javascript'];
-    const fallbackArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-javascript'];
+    const defaultChromeFlags = [
+      '--disable-breakpad',
+      '--disable-crash-reporter',
+      '--crash-dumps-dir=/tmp/uni-wallet-crashpad',
+      '--disable-metrics',
+      '--disable-metrics-repo',
+      '--disable-sync',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-features=VizDisplayCompositor,Translate',
+      '--hide-scrollbars',
+      '--mute-audio',
+      '--allow-file-access-from-files',
+      '--disable-dev-shm-usage',
+      `--user-data-dir=${userDataDir}`,
+    ];
+    const fallbackArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      ...defaultChromeFlags,
+    ];
+
+    let baseOpts: any;
+    if (headlessShellBin) {
+      baseOpts = { headless: 'shell' as const, executablePath: headlessShellBin, ignoreHTTPSErrors: true, protocolTimeout: 60000 };
+    } else {
+      baseOpts = { headless: true, ignoreHTTPSErrors: true, protocolTimeout: 60000 };
+    }
 
     if (_sandboxMode === 'unknown' || _sandboxMode === 'strict') {
       try {
-        browser = await puppeteer.launch({
-          headless: true,
-          args: strictArgs,
-        });
+        browser = await puppeteer.launch({ ...baseOpts, args: fallbackArgs });
         if (_sandboxMode === 'unknown') _sandboxMode = 'strict';
       } catch (err: any) {
         const msg = err && typeof err.message === 'string' ? err.message : '';
-        if (_isSandboxRootError(msg)) {
+        if (_isSandboxRootError(msg) || msg.includes('EACCES') || msg.includes('sandbox')) {
           if (!_sandboxWarned) {
             _sandboxWarned = true;
             console.warn(
-              '[receipt.ts] WARN: Chromium sandbox launch failed (running as root?). ' +
+              '[receipt.ts] WARN: Chromium sandbox launch failed (running as root / sandbox exec EACCES?). ' +
                 'Falling back to --no-sandbox for this process lifetime. ' +
                 'For improved security run the server process as a non-root user in a sandboxed environment.',
             );
           }
           _sandboxMode = 'fallback_nosandbox';
-          browser = await puppeteer.launch({
-            headless: true,
-            args: fallbackArgs,
-          });
+          browser = await puppeteer.launch({ ...baseOpts, args: fallbackArgs });
         } else {
           throw err;
         }
       }
     } else {
-      browser = await puppeteer.launch({
-        headless: true,
-        args: fallbackArgs,
-      });
+      browser = await puppeteer.launch({ ...baseOpts, args: fallbackArgs });
     }
 
     const page = await browser.newPage();
+    // Force Puppeteer's FrameManager to walk any existing pages and wire
+    // their mainFrame targets.  Without this call the target set can race
+    // under Node loader (tsx) latency, producing "Requesting main frame
+    // too early!" from page.evaluate()/setContent() even with a long wait.
+    try { await browser.pages(); } catch (_) { /* ignore */ }
+
+    // Guarantee the page has a fully-attached main frame with a committed
+    // document before we call setContent().  Chromium CDP sometimes resolves
+    // `browser.newPage()` before FrameManager wires the mainFrame — most
+    // likely to happen under Node loaders (tsx, ESM wrappers) that add process
+    // startup latency.  A `page.evaluate()` probe only resolves once an
+    // ExecutionContext is registered, which requires a committed document,
+    // so poll it with generous backoff.
+    let frameReady = false;
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= 10 && !frameReady; attempt++) {
+      try {
+        await page.evaluate('1');
+        frameReady = true;
+      } catch (err) {
+        lastErr = err;
+        // "Requesting main frame too early!" — the frame is literally not
+        // wired yet inside the browser target.  Wait a bit longer.
+        await new Promise(r => setTimeout(r, 500 * attempt));
+      }
+    }
+    if (!frameReady) {
+      try {
+        await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 15000 });
+        frameReady = true;
+      } catch (_fallback) {
+        throw new AppError(
+          'Failed to initialise Puppeteer page (main frame not committed after 10 evaluate-probe + about:blank fallback). ' +
+            'Last error: ' + String((lastErr as any) && (lastErr as any).message || lastErr || 'unknown').slice(0, 240),
+          500,
+        );
+      }
+    }
+
     await page.setRequestInterception(true);
     page.on('request', (req: any) => {
       const rt: string = req.resourceType();
@@ -331,12 +461,14 @@ async function render(html: string) {
       format: 'A4',
       printBackground: true,
       preferCSSPageSize: true,
-      margin: { top: '16px', bottom: '16px', left: '16px', right: '16px' },
+      margin: { top: '10px', bottom: '10px', left: '10px', right: '10px' },
     });
     await browser.close();
+    cleanupProfile();
     return Buffer.from(pdfBuffer);
   } catch (error) {
     if (browser) await browser.close().catch(() => {});
+    cleanupProfile();
     if (error instanceof AppError) throw error;
     console.error('Receipt PDF Error:', error);
     throw new AppError('Failed to generate receipt PDF', 500);
@@ -374,50 +506,51 @@ export class ReceiptService {
 <meta charset="UTF-8">
 <style>
 @page { size: A4; margin: 0; }
-body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; color: #222; background: #fff; }
-.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; overflow: hidden; isolation: isolate; background: #fff; }
+body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 24px; color: #222; background: #fff; }
+.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 22px; position: relative; overflow: hidden; isolation: isolate; background: #fff; box-sizing: border-box; page-break-inside: avoid; }
 .page-content { position: relative; z-index: 2; }
 .watermark-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
-.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 220px 220px; background-repeat: repeat; opacity: 0.055; transform: rotate(-38deg); }
-.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 88px; color: rgba(10, 61, 145, 0.045); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
-.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 18px; margin-bottom: 24px; }
+.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 200px 200px; background-repeat: repeat; opacity: 0.05; transform: rotate(-38deg); }
+.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 76px; color: rgba(10, 61, 145, 0.04); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
+.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 10px; margin-bottom: 14px; page-break-inside: avoid; }
 .logo { text-align: left; }
-.logo h1 { margin: 0; color: #0a3d91; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
-.logo p { margin: 5px 0 0; font-size: 12px; color: #555; }
-.title h2 { margin: 0; font-size: 28px; color: #333; text-align: right; }
-.title p { margin: 5px 0 0; color: #777; font-size: 13px; text-align: right; }
-.info-section { display: flex; justify-content: space-between; background: #f6f8fc; padding: 18px; border-radius: 8px; margin-bottom: 22px; border: 1px solid #e6ecf6; }
-.info-group { margin-bottom: 8px; }
-.info-label { font-size: 11px; color: #777; text-transform: uppercase; font-weight: 700; }
-.info-value { font-size: 14px; color: #222; font-weight: 500; }
+.logo h1 { margin: 0; color: #0a3d91; font-size: 19px; text-transform: uppercase; letter-spacing: 1px; }
+.logo p { margin: 3px 0 0; font-size: 11px; color: #555; line-height: 1.4; }
+.title h2 { margin: 0; font-size: 24px; color: #333; text-align: right; }
+.title p { margin: 3px 0 0; color: #777; font-size: 12px; text-align: right; }
+.info-section { display: flex; justify-content: space-between; background: #f6f8fc; padding: 12px 14px; border-radius: 8px; margin-bottom: 14px; border: 1px solid #e6ecf6; page-break-inside: avoid; }
+.info-group { margin-bottom: 4px; }
+.info-label { font-size: 10px; color: #777; text-transform: uppercase; font-weight: 700; }
+.info-value { font-size: 13px; color: #222; font-weight: 500; }
 .balance-box { text-align: right; }
-.balance-label { font-size: 12px; color: #555; text-transform: uppercase; }
-.balance-value { font-size: 28px; font-weight: 700; color: #0a7a2f; margin: 0; }
-table { width: 100%; border-collapse: collapse; margin-bottom: 28px; font-size: 12px; }
-th { background-color: #eef3fb; color: #354259; font-weight: 700; text-align: left; padding: 10px 12px; text-transform: uppercase; border-bottom: 2px solid #dce3f1; }
-td { padding: 10px 12px; border-bottom: 1px solid #eef1f7; color: #334155; }
+.balance-label { font-size: 11px; color: #555; text-transform: uppercase; }
+.balance-value { font-size: 22px; font-weight: 700; color: #0a7a2f; margin: 0; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 14px; font-size: 11px; }
+th { background-color: #eef3fb; color: #354259; font-weight: 700; text-align: left; padding: 6px 8px; text-transform: uppercase; border-bottom: 2px solid #dce3f1; }
+td { padding: 5px 8px; border-bottom: 1px solid #eef1f7; color: #334155; }
 tr:nth-child(even) { background-color: #fafbfe; }
 .text-right { text-align: right; } .text-center { text-align: center; }
 .status-success { color: #0a7a2f; font-weight: 700; } .status-pending { color: #b37a00; font-weight: 700; } .status-failed { color: #b42318; font-weight: 700; }
 .type-deposit { color: #0a3d91; } .type-withdraw { color: #b42318; }
-.logo-wrap { display: flex; align-items: center; gap: 14px; }
+.logo-wrap { display: flex; align-items: center; gap: 10px; }
 .logo-img { display: inline-flex; align-items: center; justify-content: center; }
-.signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin: 36px 0 0; padding: 24px 0 0; }
+.signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 16px 0 0; padding: 12px 0 0; page-break-inside: avoid; }
 .signature-col { }
-.signature-line-img img { max-height: 72px; max-width: 240px; object-fit: contain; }
-.signature-line { border-bottom: 1px solid #334155; margin: 18px 0 6px; width: 80%; }
-.signature-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-.signature-meta-name { font-size: 14px; font-weight: 700; color: #222; }
+.signature-line-img img { max-height: 52px; max-width: 200px; object-fit: contain; }
+.signature-line { border-bottom: 1px solid #334155; margin: 10px 0 4px; width: 80%; }
+.signature-label { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.signature-meta-name { font-size: 12px; font-weight: 700; color: #222; }
 .signature-meta-name.placeholder { color: #666; font-weight: 500; font-style: italic; }
-.signature-meta-title { font-size: 12px; color: #555; margin-top: 4px; }
+.signature-meta-title { font-size: 11px; color: #555; margin-top: 2px; }
 .signature-meta-title.placeholder { font-style: italic; }
-.approved-box { border: 1px solid #334155; padding: 12px 14px; border-radius: 6px; }
-.approved-title { font-weight: 800; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #222; margin-bottom: 10px; text-align: center; }
-.approved-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 11px; color: #444; }
-.approved-row > span { flex: 0 0 140px; }
-.approved-line { flex: 1; border-bottom: 1px solid #999; height: 18px; }
-.approved-seal { height: 48px; border: 1px dashed #666; border-radius: 4px; }
-.footer { margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px; text-align: center; font-size: 10px; color: #888; }
+.approved-box { border: 1px solid #334155; padding: 8px 10px; border-radius: 6px; }
+.approved-title { font-weight: 800; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #222; margin-bottom: 6px; text-align: center; }
+.approved-row { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; font-size: 10px; color: #444; }
+.approved-row > span { flex: 0 0 120px; }
+.approved-line { flex: 1; border-bottom: 1px solid #999; height: 12px; }
+.approved-seal { height: 36px; border: 1px dashed #666; border-radius: 4px; }
+.footer { margin-top: 16px; border-top: 1px solid #eee; padding-top: 10px; text-align: center; font-size: 9.5px; color: #888; page-break-inside: avoid; }
+.footer p { margin: 2px 0; }
 ${chargeSourceCss()}
 </style>
 </head>
@@ -494,55 +627,56 @@ ${chargeSourceCss()}
 <meta charset="UTF-8">
 <style>
 @page { size: A4; margin: 0; }
-body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; color: #222; background: #fff; }
-.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; overflow: hidden; isolation: isolate; background: #fff; }
+body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 24px; color: #222; background: #fff; }
+.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 22px; position: relative; overflow: hidden; isolation: isolate; background: #fff; box-sizing: border-box; page-break-inside: avoid; }
 .page-content { position: relative; z-index: 2; }
 .watermark-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
-.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 220px 220px; background-repeat: repeat; opacity: 0.055; transform: rotate(-38deg); }
-.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 88px; color: rgba(10, 61, 145, 0.045); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
-.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 18px; margin-bottom: 28px; }
-.logo h1 { margin: 0; color: #0a3d91; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
-.logo p { margin: 5px 0 0; font-size: 12px; color: #555; }
-.title h2 { margin: 0; font-size: 30px; color: #222; text-align: right; }
-.title p { margin: 5px 0 0; color: #777; font-size: 13px; text-align: right; }
-.badge { position: absolute; top: 180px; right: 40px; padding: 10px 20px; font-weight: 800; font-size: 18px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; z-index: 3; }
+.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 200px 200px; background-repeat: repeat; opacity: 0.05; transform: rotate(-38deg); }
+.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 76px; color: rgba(10, 61, 145, 0.04); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
+.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 10px; margin-bottom: 16px; page-break-inside: avoid; }
+.logo h1 { margin: 0; color: #0a3d91; font-size: 19px; text-transform: uppercase; letter-spacing: 1px; }
+.logo p { margin: 3px 0 0; font-size: 11px; color: #555; line-height: 1.4; }
+.title h2 { margin: 0; font-size: 24px; color: #222; text-align: right; }
+.title p { margin: 3px 0 0; color: #777; font-size: 12px; text-align: right; }
+.badge { position: absolute; top: 130px; right: 28px; padding: 6px 14px; font-weight: 800; font-size: 14px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; z-index: 3; }
 .badge-paid { border: 2px solid #0a7a2f; color: #0a7a2f; }
 .badge-voided { border: 2px solid #b42318; color: #b42318; }
-.amount { background: #f6f8fc; padding: 24px; border-radius: 8px; text-align: center; margin: 18px 0 28px; border: 1px solid #e6ecf6; }
-.amount .label { font-size: 13px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-.amount .value { font-size: 44px; font-weight: 800; color: #0a3d91; margin: 0; }
-.amount .words { font-size: 12px; color: #666; font-style: italic; margin-top: 6px; }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-bottom: 30px; }
-.group { margin-bottom: 14px; }
-.label { font-size: 11px; color: #777; text-transform: uppercase; margin-bottom: 5px; font-weight: 700; letter-spacing: 0.4px; }
-.value { font-size: 15px; color: #222; font-weight: 500; border-bottom: 1px solid #eef1f7; padding-bottom: 4px; }
-.fee-breakdown { background: #fafbfe; border: 1px solid #eef1f7; border-radius: 8px; padding: 18px 22px; margin-bottom: 28px; }
-.fee-breakdown table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.fee-breakdown td { padding: 6px 0; border-bottom: none; }
+.amount { background: #f6f8fc; padding: 14px 18px; border-radius: 8px; text-align: center; margin: 12px 0 16px; border: 1px solid #e6ecf6; page-break-inside: avoid; }
+.amount .label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.amount .value { font-size: 34px; font-weight: 800; color: #0a3d91; margin: 0; }
+.amount .words { font-size: 11px; color: #666; font-style: italic; margin-top: 4px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 16px; page-break-inside: avoid; }
+.group { margin-bottom: 10px; }
+.label { font-size: 10px; color: #777; text-transform: uppercase; margin-bottom: 4px; font-weight: 700; letter-spacing: 0.4px; }
+.value { font-size: 13px; color: #222; font-weight: 500; border-bottom: 1px solid #eef1f7; padding-bottom: 3px; }
+.fee-breakdown { background: #fafbfe; border: 1px solid #eef1f7; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; page-break-inside: avoid; }
+.fee-breakdown table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.fee-breakdown td { padding: 4px 0; border-bottom: none; }
 .fee-breakdown td.right { text-align: right; font-weight: 600; }
-.fee-breakdown tr.total td { border-top: 2px solid #dce3f1; padding-top: 10px; font-weight: 700; color: #0a3d91; }
-.footer { margin-top: 40px; border-top: 1px solid #eee; padding-top: 18px; display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; }
-.footer .text { font-size: 10px; color: #888; line-height: 1.6; max-width: 65%; }
+.fee-breakdown tr.total td { border-top: 2px solid #dce3f1; padding-top: 6px; font-weight: 700; color: #0a3d91; }
+.footer { margin-top: 16px; border-top: 1px solid #eee; padding-top: 12px; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; page-break-inside: avoid; }
+.footer .text { font-size: 9px; color: #888; line-height: 1.5; max-width: 70%; }
+.footer .text p { margin: 2px 0; }
 .qr { text-align: center; }
-.qr img { width: 108px; height: 108px; border: 1px solid #eef1f7; border-radius: 6px; padding: 4px; background: #fff; }
-.qr .label { font-size: 10px; color: #666; margin-top: 6px; }
-.logo-wrap { display: flex; align-items: flex-start; gap: 14px; }
+.qr img { width: 84px; height: 84px; border: 1px solid #eef1f7; border-radius: 6px; padding: 3px; background: #fff; }
+.qr .label { font-size: 9px; color: #666; margin-top: 4px; }
+.logo-wrap { display: flex; align-items: flex-start; gap: 10px; }
 .logo-img { display: inline-flex; align-items: center; justify-content: center; }
-.signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; padding: 20px 0 0; }
+.signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 14px 0 0; page-break-inside: avoid; }
 .signature-col { }
-.signature-line-img img { max-height: 72px; max-width: 240px; object-fit: contain; }
-.signature-line { border-bottom: 1px solid #334155; margin: 18px 0 6px; width: 80%; }
-.signature-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-.signature-meta-name { font-size: 14px; font-weight: 700; color: #222; }
+.signature-line-img img { max-height: 52px; max-width: 200px; object-fit: contain; }
+.signature-line { border-bottom: 1px solid #334155; margin: 10px 0 4px; width: 80%; }
+.signature-label { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.signature-meta-name { font-size: 12px; font-weight: 700; color: #222; }
 .signature-meta-name.placeholder { color: #666; font-weight: 500; font-style: italic; }
-.signature-meta-title { font-size: 12px; color: #555; margin-top: 4px; }
+.signature-meta-title { font-size: 11px; color: #555; margin-top: 2px; }
 .signature-meta-title.placeholder { font-style: italic; }
-.approved-box { border: 1px solid #334155; padding: 12px 14px; border-radius: 6px; }
-.approved-title { font-weight: 800; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #222; margin-bottom: 10px; text-align: center; }
-.approved-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 11px; color: #444; }
-.approved-row > span { flex: 0 0 140px; }
-.approved-line { flex: 1; border-bottom: 1px solid #999; height: 18px; }
-.approved-seal { height: 48px; border: 1px dashed #666; border-radius: 4px; }
+.approved-box { border: 1px solid #334155; padding: 8px 10px; border-radius: 6px; }
+.approved-title { font-weight: 800; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #222; margin-bottom: 6px; text-align: center; }
+.approved-row { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; font-size: 10px; color: #444; }
+.approved-row > span { flex: 0 0 120px; }
+.approved-line { flex: 1; border-bottom: 1px solid #999; height: 12px; }
+.approved-seal { height: 36px; border: 1px dashed #666; border-radius: 4px; }
 ${chargeSourceCss()}
 </style>
 </head>
@@ -640,54 +774,55 @@ ${chargeSourceCss()}
 <meta charset="UTF-8">
 <style>
 @page { size: A4; margin: 0; }
-body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; color: #222; background: #fff; }
-.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 36px; position: relative; overflow: hidden; isolation: isolate; background: #fff; }
-.page-content { position: relative; z-index: 2; }
+body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #222; background: #fff; }
+.container { max-width: 800px; margin: 0 auto; border: 1px solid #e3e7ef; padding: 22px; position: relative; overflow: hidden; isolation: isolate; background: #fff; box-sizing: border-box; page-break-inside: avoid; }
+.page-content { position: relative; z-index: 2; page-break-inside: avoid; }
 .watermark-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
-.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 220px 220px; background-repeat: repeat; opacity: 0.055; transform: rotate(-38deg); }
-.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 88px; color: rgba(10, 61, 145, 0.045); white-space: nowrap; font-weight: 900; letter-spacing: 8px; }
-.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 18px; margin-bottom: 28px; }
-.logo h1 { margin: 0; color: #0a3d91; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
-.logo p { margin: 5px 0 0; font-size: 12px; color: #555; }
-.title h2 { margin: 0; font-size: 30px; color: #222; text-align: right; }
-.title p { margin: 5px 0 0; color: #777; font-size: 13px; text-align: right; }
-.badge { position: absolute; top: 180px; right: 40px; padding: 10px 20px; font-weight: 800; font-size: 18px; border-radius: 6px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 1px; z-index: 3; }
+.watermark-layer .wm-tile { position: absolute; inset: -20%; background-image: url(${BELLS_LOGO_DATA_URI}); background-size: 180px 180px; background-repeat: repeat; opacity: 0.05; transform: rotate(-38deg); }
+.watermark-layer .wm-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-38deg); font-size: 72px; color: rgba(10, 61, 145, 0.04); white-space: nowrap; font-weight: 900; letter-spacing: 6px; }
+.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0a3d91; padding-bottom: 12px; margin-bottom: 18px; page-break-inside: avoid; }
+.logo h1 { margin: 0; color: #0a3d91; font-size: 18px; text-transform: uppercase; letter-spacing: 0.8px; }
+.logo p { margin: 3px 0 0; font-size: 10.5px; color: #555; line-height: 1.35; }
+.title h2 { margin: 0; font-size: 24px; color: #222; text-align: right; }
+.title p { margin: 3px 0 0; color: #777; font-size: 11.5px; text-align: right; }
+.badge { position: absolute; top: 150px; right: 28px; padding: 6px 14px; font-weight: 800; font-size: 14px; border-radius: 5px; text-transform: uppercase; transform: rotate(-8deg); opacity: 0.95; letter-spacing: 0.8px; z-index: 3; }
 .badge-paid { border: 2px solid #0a7a2f; color: #0a7a2f; }
 .badge-voided { border: 2px solid #b42318; color: #b42318; }
-.amount { background: #f6f8fc; padding: 24px; border-radius: 8px; text-align: center; margin: 18px 0 28px; border: 1px solid #e6ecf6; }
-.amount .label { font-size: 13px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-.amount .value { font-size: 44px; font-weight: 800; color: #0a3d91; margin: 0; }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-bottom: 30px; }
-.group { margin-bottom: 14px; }
-.label { font-size: 11px; color: #777; text-transform: uppercase; margin-bottom: 5px; font-weight: 700; letter-spacing: 0.4px; }
-.value { font-size: 15px; color: #222; font-weight: 500; border-bottom: 1px solid #eef1f7; padding-bottom: 4px; }
-.fee-breakdown { background: #fafbfe; border: 1px solid #eef1f7; border-radius: 8px; padding: 18px 22px; margin-bottom: 28px; }
-.fee-breakdown table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.fee-breakdown td { padding: 6px 0; border-bottom: none; }
+.amount { background: #f6f8fc; padding: 14px 18px; border-radius: 6px; text-align: center; margin: 14px 0 18px; border: 1px solid #e6ecf6; page-break-inside: avoid; }
+.amount .label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; }
+.amount .value { font-size: 34px; font-weight: 800; color: #0a3d91; margin: 0; }
+.amount .words { font-size: 10.5px; color: #666; margin: 5px 0 0; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }
+.group { margin-bottom: 10px; page-break-inside: avoid; }
+.label { font-size: 10px; color: #777; text-transform: uppercase; margin-bottom: 3px; font-weight: 700; letter-spacing: 0.3px; }
+.value { font-size: 13px; color: #222; font-weight: 500; border-bottom: 1px solid #eef1f7; padding-bottom: 3px; }
+.fee-breakdown { background: #fafbfe; border: 1px solid #eef1f7; border-radius: 6px; padding: 12px 16px; margin-bottom: 18px; page-break-inside: avoid; }
+.fee-breakdown table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.fee-breakdown td { padding: 4px 0; border-bottom: none; }
 .fee-breakdown td.right { text-align: right; font-weight: 600; }
-.fee-breakdown tr.total td { border-top: 2px solid #dce3f1; padding-top: 10px; font-weight: 700; color: #0a3d91; }
-.footer { margin-top: 40px; border-top: 1px solid #eee; padding-top: 18px; display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; }
-.footer .text { font-size: 10px; color: #888; line-height: 1.6; max-width: 65%; }
+.fee-breakdown tr.total td { border-top: 2px solid #dce3f1; padding-top: 7px; font-weight: 700; color: #0a3d91; }
+.footer { margin-top: 18px; border-top: 1px solid #eee; padding-top: 14px; display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; page-break-inside: avoid; }
+.footer .text { font-size: 9.5px; color: #888; line-height: 1.5; max-width: 70%; }
 .qr { text-align: center; }
-.qr img { width: 108px; height: 108px; border: 1px solid #eef1f7; border-radius: 6px; padding: 4px; background: #fff; }
-.qr .label { font-size: 10px; color: #666; margin-top: 6px; }
-.logo-wrap { display: flex; align-items: flex-start; gap: 14px; }
+.qr img { width: 84px; height: 84px; border: 1px solid #eef1f7; border-radius: 5px; padding: 3px; background: #fff; }
+.qr .label { font-size: 9px; color: #666; margin-top: 5px; }
+.logo-wrap { display: flex; align-items: flex-start; gap: 12px; }
 .logo-img { display: inline-flex; align-items: center; justify-content: center; }
-.signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; padding: 20px 0 0; }
+.signature-block { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 14px 0 0; page-break-inside: avoid; }
 .signature-col { }
-.signature-line-img img { max-height: 72px; max-width: 240px; object-fit: contain; }
-.signature-line { border-bottom: 1px solid #334155; margin: 18px 0 6px; width: 80%; }
-.signature-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-.signature-meta-name { font-size: 14px; font-weight: 700; color: #222; }
+.signature-line-img img { max-height: 52px; max-width: 200px; object-fit: contain; }
+.signature-line { border-bottom: 1px solid #334155; margin: 14px 0 5px; width: 80%; }
+.signature-label { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+.signature-meta-name { font-size: 12px; font-weight: 700; color: #222; }
 .signature-meta-name.placeholder { color: #666; font-weight: 500; font-style: italic; }
-.signature-meta-title { font-size: 12px; color: #555; margin-top: 4px; }
+.signature-meta-title { font-size: 10.5px; color: #555; margin-top: 3px; }
 .signature-meta-title.placeholder { font-style: italic; }
-.approved-box { border: 1px solid #334155; padding: 12px 14px; border-radius: 6px; }
-.approved-title { font-weight: 800; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #222; margin-bottom: 10px; text-align: center; }
-.approved-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 11px; color: #444; }
-.approved-row > span { flex: 0 0 140px; }
-.approved-line { flex: 1; border-bottom: 1px solid #999; height: 18px; }
-.approved-seal { height: 48px; border: 1px dashed #666; border-radius: 4px; }
+.approved-box { border: 1px solid #334155; padding: 10px 12px; border-radius: 5px; }
+.approved-title { font-weight: 800; font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #222; margin-bottom: 8px; text-align: center; }
+.approved-row { display: flex; align-items: baseline; gap: 6px; margin-bottom: 6px; font-size: 10px; color: #444; }
+.approved-row > span { flex: 0 0 120px; }
+.approved-line { flex: 1; border-bottom: 1px solid #999; height: 16px; }
+.approved-seal { height: 36px; border: 1px dashed #666; border-radius: 3px; }
 ${chargeSourceCss()}
 </style>
 </head>
