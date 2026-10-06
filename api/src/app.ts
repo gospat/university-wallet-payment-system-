@@ -43,22 +43,18 @@ function buildRateLimitStore(prefix: string) {
   } catch {
     redis = null;
   }
-  // ioredis @types status union: "wait" | "reconnecting" | "connect" | "close" | "end".
-  // Runtime ALSO emits "ready" once connected & Redis handshake OK — so cast wide.
-  // We only enable RedisStore IF Redis is ALREADY READY at module load.
-  // Why such strict gate? Because rate-limit-redis' RedisStore runs defineCommand() at
-  // construction + loadIncrementScript() on first request — both bypass our sendCommand()
-  // wrapper and throw unhandled rejections if Redis is unreachable.
-  // Tradeoff: if Redis boots *after* this Node process (rare in production systemd; Redis target
-  // WantedBy=multi-user so it's first), we fall back to MemoryStore for the process lifetime.
-  // That's acceptable — rate-limiting still works, just not cluster-shared across PM2 workers.
   const st: string = (redis?.status as string) ?? '';
   const redisReadyNow = st === 'ready';
+  const limiterName = prefix.padEnd(20, ' ');
   if (!redisReadyNow) {
-    // rate-limit uses in-process MemoryStore automatically when store === undefined
-    console.warn(`[rate-limit] prefix=${prefix} Redis not ready (status="${st}") — using in-process MemoryStore for this process lifetime`);
+    console.warn(
+      `[rate-limit] limiter=${limiterName} store=MemoryStore — redis.status="${st}" at construction time. Counters are in-process only for this process lifetime (NOT shared across PM2 workers).`,
+    );
     return undefined;
   }
+  console.info(
+    `[rate-limit] limiter=${limiterName} store=RedisStore  — redis.status="ready" at construction time. Counters are cluster-shared across workers and survive hot reloads.`,
+  );
   return new RedisStore({
     prefix,
     sendCommand: async (...args: string[]) => {
@@ -66,14 +62,10 @@ function buildRateLimitStore(prefix: string) {
       try {
         return await (redis as any).call(...args);
       } catch (sendErr: any) {
-        // Fail-open: ignore transient Redis errors inside a single request counter update.
-        // The alternative — throwing here — crashes Express' response object and returns 500
-        // for EVERY endpoint (even /api/v1/health public probes) during Redis restarts.
-        // Counters will simply miss a single increment — acceptable security/availability tradeoff.
         if (!(globalThis as any).__rlWarnedOnce) {
           (globalThis as any).__rlWarnedOnce = true;
           console.warn(
-            `[rate-limit] Redis sendCommand failed for prefix=${prefix} (silently ignoring; counters will miss this increment). err=${String(sendErr?.message ?? sendErr)}`,
+            `[rate-limit] Redis sendCommand failed for limiter=${prefix} (silently ignoring this increment; transient). err=${String(sendErr?.message ?? sendErr)}`,
           );
         }
         return undefined as any;

@@ -2,12 +2,12 @@ import './config/loadEnv';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-import app from './app';
+import http from 'node:http';
 import { z } from 'zod';
 import { seedPermissions } from './services/permissionSeed';
 import { shutdownQueue } from './config/queue';
 import { shutdownEmailQueue } from './queues/emailQueue';
-import { shutdownProducerRedis } from './config/redis';
+import { connectRedis, shutdownProducerRedis } from './config/redis';
 import {
   runProductionGuardrails,
   printStartupGuardrailBanners,
@@ -148,9 +148,53 @@ envSchema.parse(process.env);
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3001;
 
-let httpServer: ReturnType<typeof app.listen> | null = null;
+let httpServer: http.Server | null = null;
 
 async function bootstrap() {
+  // ---------------------------------------------------------------------------
+  // Step 0: Establish the shared Redis connection BEFORE importing app.ts.
+  //
+  // Why this order matters:
+  //   api/src/app.ts constructs 8 express-rate-limit limiters at module-import
+  //   time. Each limiter calls buildRateLimitStore(prefix) which checks
+  //   getRedis().status === 'ready'. If we import app.ts before Redis has had
+  //   time to reach the ready state, ALL limiters permanently fall back to
+  //   in-process MemoryStore for the rest of the process lifetime — even if
+  //   Redis becomes healthy 100ms later.
+  //
+  // Bounded wait only (never infinite): connectRedis() uses the internal
+  // retryStrategy that aborts after 4 attempts. We also cap the whole
+  // pre-connect step with Promise.race so the server never hangs.
+  // ---------------------------------------------------------------------------
+  const REDIS_CONNECT_WAIT_MS = process.env.NODE_ENV === 'test' ? 50 : 4000;
+  try {
+    const waitTimeout = new Promise<null>((resolve) =>
+      setTimeout(() => resolve(null), REDIS_CONNECT_WAIT_MS),
+    );
+    const maybeRedis = await Promise.race([connectRedis(), waitTimeout]);
+    if (maybeRedis) {
+      const st: string = (maybeRedis as any).status ?? '';
+      if (st === 'ready') {
+        console.log(`[startup] Redis shared connection: ready (status="ready"). Rate-limit stores will use RedisStore.`);
+      } else {
+        console.warn(`[startup] Redis shared connection: not ready after ${REDIS_CONNECT_WAIT_MS}ms (status="${st}"). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`);
+      }
+    } else {
+      console.warn(`[startup] Redis shared connection: timed out after ${REDIS_CONNECT_WAIT_MS}ms. Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`);
+    }
+  } catch (redisErr: unknown) {
+    const msg = redisErr instanceof Error ? redisErr.message : String(redisErr);
+    console.warn(`[startup] Redis shared connection: connect() failed (${msg}). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 1: NOW dynamically import Express app — Redis pre-connect is done.
+  // All 8 buildRateLimitStore(prefix) calls inside app.ts evaluate AFTER
+  // we've attempted connection, so the ready-state check now has a chance
+  // to be true in healthy deployments.
+  // ---------------------------------------------------------------------------
+  const { default: app } = await import('./app');
+
   try {
     await seedPermissions();
     console.log('Permissions seed applied (idempotent)');
@@ -158,7 +202,8 @@ async function bootstrap() {
     console.warn('Permissions seed skipped:', err instanceof Error ? err.message : String(err));
   }
   scheduleTmpUploadPurge();
-  httpServer = app.listen(port, () => {
+  httpServer = http.createServer(app);
+  httpServer.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });
 }
