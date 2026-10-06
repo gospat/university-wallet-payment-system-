@@ -195,7 +195,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
 
   const displayBalance = fetchedInvoice?.balance ?? Number(amount ?? 0);
   const displayInvoiceNumber = fetchedInvoice?.invoiceNumber ?? String(invoiceId ?? '');
-  const effectiveGateway = fetchedInvoice?.gateway || gatewayLabel || 'Paystack';
+  const effectiveGateway = fetchedInvoice?.gateway || gatewayLabel || 'Payment Provider';
 
   if (!isOpen) return null;
 
@@ -344,7 +344,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
 
         <div className="sticky bottom-0 z-20 h-16 bg-gray-50 border-t px-5 flex items-center justify-between gap-4">
           <div className="text-[11px] sm:text-xs text-gray-500 leading-snug max-w-[65%]">
-            ALAT Pay / Paystack handles all card &amp; bank data — nothing passes through our servers (PCI-DSS safe)
+            ALATPay / Paystack handles all card &amp; bank data — nothing passes through our servers (PCI-DSS safe)
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <button

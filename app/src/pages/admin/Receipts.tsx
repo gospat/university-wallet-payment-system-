@@ -109,7 +109,7 @@ const GatewayPill: React.FC<{ gateway?: string | null }> = ({ gateway }) => {
   const cls = map[g] ?? 'bg-gray-100 text-gray-700 border-gray-200';
   return (
     <span className={`inline-flex items-center px-2 py-1 rounded-md text-xs font-medium border ${cls}`}>
-      {g === 'PAYSTACK' ? 'Paystack' : g === 'ALATPAY' ? 'ALAT Pay' : g}
+      {g === 'PAYSTACK' ? 'Paystack' : g === 'ALATPAY' ? 'ALATPay' : g}
     </span>
   );
 };
@@ -545,7 +545,7 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                             )}
                             {aRef && (
                               <div>
-                                <div className="text-[10px] uppercase tracking-wide text-purple-500 font-semibold">ALAT Pay</div>
+                                <div className="text-[10px] uppercase tracking-wide text-purple-500 font-semibold">ALATPay</div>
                                 <div className="font-mono text-xs text-gray-800 break-all max-w-[180px]" title={aRef}>{aRef}</div>
                               </div>
                             )}

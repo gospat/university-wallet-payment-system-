@@ -86,7 +86,7 @@ const PaymentConfigPage: React.FC = () => {
 
   const gateways: GatewayStatus[] = config?.supportedGateways ?? [
     { key: 'PAYSTACK', label: 'Paystack', status: selectedGateway === 'PAYSTACK' ? 'ACTIVE' : 'INACTIVE' },
-    { key: 'ALATPAY', label: 'ALAT Pay', status: selectedGateway === 'ALATPAY' ? 'ACTIVE' : 'INACTIVE' },
+    { key: 'ALATPAY', label: 'ALATPay', status: selectedGateway === 'ALATPAY' ? 'ACTIVE' : 'INACTIVE' },
   ];
 
   const fullName = `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim();

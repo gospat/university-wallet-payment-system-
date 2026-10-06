@@ -43,7 +43,7 @@ const GatewayPill: React.FC<{ gateway?: string | null }> = ({ gateway }) => {
   const cls = map[g] ?? 'bg-gray-100 text-gray-700 border-gray-200';
   return (
     <span className={`inline-flex items-center px-2 py-1 rounded-md text-xs font-medium border ${cls}`}>
-      {g === 'PAYSTACK' ? 'Paystack' : g === 'ALATPAY' ? 'ALAT Pay' : g}
+      {g === 'PAYSTACK' ? 'Paystack' : g === 'ALATPAY' ? 'ALATPay' : g}
     </span>
   );
 };
@@ -215,7 +215,7 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
             <Field label="Gateway">
               <select className={inputCls} value={query.gateway} onChange={(e) => setQuery({ ...query, gateway: e.target.value, page: '1' })}>
                 <option value="">All</option>
-                {GATEWAY_OPTIONS.map((s) => <option key={s} value={s}>{s === 'PAYSTACK' ? 'Paystack' : 'ALAT Pay'}</option>)}
+                {GATEWAY_OPTIONS.map((s) => <option key={s} value={s}>{s === 'PAYSTACK' ? 'Paystack' : 'ALATPay'}</option>)}
               </select>
             </Field>
             <Field label="Date From">

@@ -70,7 +70,7 @@ export interface IPaymentProvider {
 }
 
 export function gatewayLabel(gateway: PaymentGateway, channel?: string | null): string {
-  const brand = gateway === PaymentGateway.PAYSTACK ? 'Paystack' : 'ALAT Pay by WEMA';
+  const brand = gateway === PaymentGateway.PAYSTACK ? 'Paystack' : 'ALATPay';
   return channel ? `${brand} · ${String(channel)}` : brand;
 }
 

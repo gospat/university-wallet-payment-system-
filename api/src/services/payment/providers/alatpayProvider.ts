@@ -92,11 +92,13 @@ export class AlatpayProvider implements IPaymentProvider {
       body.channel = '*';
     }
     try {
+      const t0 = Date.now();
       const response = await axios.post(
         `${this.BASE_URL}/merchant-onboarding/api/v1/payment/initialize`,
         body,
         { headers: addAlatHeaders() },
       );
+      const elapsedMs = Date.now() - t0;
       const data = response?.data?.data ?? response?.data ?? {};
       // Order matters: ALATPAY returns BOTH paymentUrl (REAL checkout) and redirectUrl (our callback).
       // Real response structure (per real backend probe):
@@ -114,6 +116,20 @@ export class AlatpayProvider implements IPaymentProvider {
           data.orderId ||
           opts.reference) as string;
       const sessionId = (data.sessionId ?? data.paymentReference ?? null) as string | null;
+      console.info(
+        JSON.stringify({
+          provider: 'ALATPAY',
+          operation: 'initialize',
+          outcome: 'success',
+          httpStatus: typeof response?.status === 'number' ? response.status : null,
+          upstreamStatus: data?.Status ?? response?.data?.Status ?? null,
+          upstreamCode: data?.code ?? null,
+          sanitizedMessage: String(data?.Message ?? response?.data?.Message ?? 'ok').slice(0, 180),
+          internalReference: opts.reference,
+          wemaReference,
+          elapsedMs,
+        }),
+      );
       return {
         checkoutUrl,
         authorization_url: checkoutUrl,
@@ -127,6 +143,8 @@ export class AlatpayProvider implements IPaymentProvider {
     } catch (error: any) {
       const resp = error?.response;
       const respData = resp?.data;
+      const rawStatus = typeof resp?.status === 'number' ? resp.status : null;
+      const requestHadSecretHeader = true;
       let bodyText = '';
       try {
         if (typeof respData === 'string') bodyText = respData;
@@ -134,17 +152,43 @@ export class AlatpayProvider implements IPaymentProvider {
           bodyText =
             String(respData.message ?? respData.Message ?? respData.error ?? '') +
             ' ' +
-            JSON.stringify(respData).slice(0, 500);
+            JSON.stringify({
+              code: respData.code ?? respData.Code ?? null,
+              status: respData.status ?? respData.Status ?? null,
+            }).slice(0, 260);
       } catch (_) { /* noop */ }
       const axiosMsg = String(error?.message ?? '').trim();
-      const rawStatus = typeof resp?.status === 'number' ? resp.status : null;
-      const upstreamMessage = (bodyText || axiosMsg || 'Unknown error').trim();
-      const isSandboxLocked = /not available in the test environment/i.test(bodyText + ' ' + upstreamMessage);
+      const upstreamSanitizedCode =
+        (respData && typeof respData === 'object')
+          ? String(respData.code ?? respData.Code ?? respData.statusCode ?? respData.StatusCode ?? '').slice(0, 64)
+          : '';
+      const upstreamSanitizedMessage = (bodyText || axiosMsg || 'Unknown error').trim().slice(0, 220);
+      const isSandboxLocked = /not available in the test environment/i.test(bodyText + ' ' + upstreamSanitizedMessage);
       const ngrokHint =
         process.env.FRONTEND_BASE_URL?.includes('ngrok') || process.env.APP_BASE_URL?.includes('ngrok')
           ? ''
           : ' (run: ngrok http 3001, then set the ngrok HTTPS forwarding URL + /api/v1/webhooks/alatpay suffix)';
-      let msg = `ALAT Pay Initialization Error: ${upstreamMessage}`;
+
+      // SANITIZED SERVER-SIDE DIAGNOSTICS. NEVER include secret/auth headers or full sensitive body.
+      console.error(
+        JSON.stringify({
+          provider: 'ALATPAY',
+          operation: 'initialize',
+          outcome: 'failed',
+          httpStatus: rawStatus,
+          sanitizedCode: upstreamSanitizedCode || null,
+          sanitizedMessage: upstreamSanitizedMessage.slice(0, 200),
+          internalReference: opts.reference,
+          wemaReference,
+          baseUrl: this.BASE_URL,
+          requestHadSecretHeader,
+          isSandboxLocked: isSandboxLocked || false,
+          errorClass: error?.name ?? (error?.isAxiosError ? 'AxiosError' : 'Error'),
+          elapsedMs: typeof (error as any)?.$start === 'number' ? Date.now() - (error as any).$start : null,
+        }),
+      );
+
+      let msg = `ALAT Pay Initialization Error: ${upstreamSanitizedMessage}`;
       if (rawStatus === 403 || isSandboxLocked) {
         const liveBusinessId = getAlatpayBusinessId();
         msg +=

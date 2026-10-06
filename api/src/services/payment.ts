@@ -155,7 +155,15 @@ export class PaymentService {
     const breakdown = computePaymentBreakdown(payable);
     const expectedAmount = breakdown.totalAmount;
 
-    // 5. Create reference & pending Transaction
+    // 5. Resolve active gateway BEFORE creating the pending Transaction.
+    //    (CRITICAL AUDIT REQUIREMENT: the gateway must be written explicitly on the
+    //    initial row so failed provider initializations retain the CORRECT
+    //    persisted gateway (PaymentGateway default(PAYSTACK)-would never silently
+    //    inherit the provider ref fields.
+    const activeGateway = await getActiveGatewaySetting();
+    const provider = getPaymentProvider(activeGateway);
+
+    // 6. Create reference & pending Transaction — with gateway explicitly set.
     const paymentRef = generatePaymentReference();
     const txRow = await prisma.transaction.create({
       data: {
@@ -163,6 +171,7 @@ export class PaymentService {
         userId: studentId,
         invoiceId: inv.id,
         type: TransactionType.FEE_PAYMENT,
+        gateway: activeGateway,
         status: TransactionStatus.PENDING,
         expectedAmount: expectedAmount,
         amount: 0,
@@ -195,9 +204,7 @@ export class PaymentService {
     });
 
     try {
-      // 6. Determine active gateway (SystemSettings) and initialize through provider
-      const activeGateway = await getActiveGatewaySetting();
-      const provider = getPaymentProvider(activeGateway);
+      // 7. Initialize through the pre-resolved provider
       const callback = `${process.env.FRONTEND_BASE_URL ?? 'http://localhost:5174'}/student/payments/callback/${paymentRef}`;
 
       const init = await provider.initialize(customerEmail, breakdown.baseAmount, {
@@ -218,7 +225,9 @@ export class PaymentService {
         },
       });
 
-      // 7. Update Transaction row with gateway + provider ref + channel columns
+      // 8. Update Transaction row with provider ref + channel columns
+      //    (gateway was already written on initial create, so we update it here
+      //     too purely for idempotent defensive clarity — it would be the same value.)
       const gatewayRef = init.providerReference ?? paymentRef;
       const gatewayChannel = (init.channelsUsed?.[0] as any) ?? null;
       const gatewayData: Record<string, any> = {
@@ -300,6 +309,7 @@ export class PaymentService {
         await prisma.transaction.update({
           where: { id: txRow.id },
           data: {
+            gateway: activeGateway,
             status: TransactionStatus.FAILED,
             underpaidReason: rawErrMsg ? rawErrMsg.slice(0, 190) : null,
             description: rawErrMsg ? rawErrMsg.slice(0, 190) : null,
@@ -314,7 +324,7 @@ export class PaymentService {
           entityType: 'TRANSACTION',
           entityId: txRow.id,
           oldValue: { status: 'PENDING' },
-          newValue: { status: 'FAILED', error: rawErrMsg.slice(0, 500) },
+          newValue: { gateway: activeGateway, status: 'FAILED', error: rawErrMsg.slice(0, 500) },
         });
       } catch (auditErr) {
         console.warn('[initiatePayment:catch] audit write failed (ignored):', (auditErr as Error)?.message);

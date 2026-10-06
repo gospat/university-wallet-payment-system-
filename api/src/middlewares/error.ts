@@ -37,7 +37,8 @@ export const globalErrorHandler = (
       stack: err.stack,
     });
   } else {
-    // Production
+    // Production — NEVER expose stack, SQL, Prisma internals, env, secrets, paths
+    console.error('ERROR 💥', err);
     if (err.isOperational) {
       sendJson({
         status: err.status,
@@ -45,10 +46,25 @@ export const globalErrorHandler = (
         details: err.details,
       });
     } else {
-      console.error('ERROR 💥', err);
+      // Classify common server errors into safe user-facing messages.
+      // The actual detailed error has already been logged above (console.error).
+      let safeMessage = 'Something went very wrong!';
+      const code = err?.code;
+      const errName = String(err?.name ?? '').toLowerCase();
+      const errMsg = String(err?.message ?? '').toLowerCase();
+      if (code === 'P2002' || errName.includes('unique') || errMsg.includes('unique constraint')) {
+        safeMessage = 'Unable to complete your request. Please retry.';
+      } else if (code === 'P2025' || errMsg.includes('record to update was not found')) {
+        safeMessage = 'The requested record could not be found.';
+      } else if (code && typeof code === 'string' && code.startsWith('P20')) {
+        // All Prisma-known operational classes produce the same safe message.
+        safeMessage = 'Unable to complete your request. Please retry.';
+      } else if (err.isAxiosError || errName.includes('axios') || errMsg.includes('network')) {
+        safeMessage = 'Unable to reach the payment provider. Please retry in a moment.';
+      }
       sendJson({
         status: 'error',
-        message: 'Something went very wrong!',
+        message: safeMessage,
       });
     }
   }

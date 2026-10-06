@@ -94,7 +94,7 @@ export function getAlatpayBaseUrl(): string {
   const mode = process.env.ALATPAY_MODE === 'prod' ? 'prod' : 'sandbox';
   return mode === 'sandbox'
     ? 'https://apibox.alatpay.ng'
-    : 'https://apibox.alatpay.ng';
+    : 'https://alatpay.ng';
 }
 
 export function getAlatpayWebhookSecret(): string {

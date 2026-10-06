@@ -276,7 +276,7 @@ export const dashboard = {
       },
       approveTitle: 'Approve Refund',
       approveBody: (refundNumber: string, amount: string) =>
-        `Approve refund ${refundNumber} for ₦${amount}? This will immediately submit the refund to Paystack for processing.`,
+        `Approve refund ${refundNumber} for ₦${amount}? This will immediately submit the refund to the payment provider for processing.`,
       rejectTitle: 'Reject Refund',
       rejectLabel: 'Rejection Notes (required)',
       rejectPlaceholder:
@@ -284,7 +284,7 @@ export const dashboard = {
       confirmApprove: 'Approve Refund',
       confirmReject: 'Reject Refund',
       submitting: 'Processing…',
-      approveSuccess: (refundNumber: string) => `${refundNumber} approved and submitted to Paystack.`,
+      approveSuccess: (refundNumber: string) => `${refundNumber} approved and submitted to the payment provider.`,
       rejectSuccess: (refundNumber: string) => `${refundNumber} rejected successfully.`,
       approveFailed: 'Failed to approve refund',
       rejectFailed: 'Failed to reject refund',
@@ -323,7 +323,7 @@ export const dashboard = {
       requestButton: 'Request Refund',
       requestTitle: 'Request a Refund',
       requestDescription:
-        'Submit a refund against a successful payment. An Admin must approve before Paystack will process.',
+        'Submit a refund against a successful payment. An Admin must approve before the payment provider will process.',
       originalTransactionId: 'Original Transaction ID',
       originalTransactionIdPlaceholder: 'Enter the transaction ID (number)',
       amountLabel: 'Refund Amount (₦)',

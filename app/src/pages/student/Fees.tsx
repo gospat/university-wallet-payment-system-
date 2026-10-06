@@ -10,6 +10,7 @@ import {
   CalendarClock,
   DollarSign,
   Receipt as ReceiptIcon,
+  Loader2,
 } from 'lucide-react';
 import { i18n, statusLabels, semesterLabels } from '../../i18n/en';
 import PortalShell from '../../components/PortalShell';
@@ -148,7 +149,7 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
         : { fees: (data as any).rows ?? [], total: (data as any).total ?? 0, page: (data as any).page ?? 1, pageSize: (data as any).pageSize ?? 12 };
       setResp(normalised);
     } catch (e: any) {
-      setError(e?.message ?? 'Failed to load available payments');
+      setError('Unable to load the school fees catalogue. Please retry.');
     } finally {
       setLoading(false);
     }
@@ -256,10 +257,10 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
           </div>
         )}
 
-        {/* Error state */}
+        {/* Error state (assigned bills context) */}
         {!loading && error && (
           <div className="mx-6 my-6 rounded-xl border border-red-200 bg-red-50 text-red-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
-            <span>{error}</span>
+            <span>Unable to load your assigned bills. Please retry.</span>
             <button onClick={load} className="font-medium underline-offset-2 hover:underline whitespace-nowrap">Retry</button>
           </div>
         )}
@@ -513,7 +514,7 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
 
         {error && (
           <div className="mx-6 my-6 rounded-xl border border-red-200 bg-red-50 text-red-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
-            <span>{error}</span>
+            <span>Unable to load the school fees catalogue. Please retry.</span>
             <button onClick={load} className="font-medium underline-offset-2 hover:underline">Retry</button>
           </div>
         )}
@@ -952,6 +953,7 @@ const InvoiceDetailPage: React.FC = () => {
   const [checkoutModalAmount, setCheckoutModalAmount] = useState<number | undefined>(undefined);
   const [checkoutModalInvoiceId, setCheckoutModalInvoiceId] = useState<number | string | undefined>(undefined);
   const [checkoutModalGateway, setCheckoutModalGateway] = useState<string | undefined>(undefined);
+  const [paying, setPaying] = useState(false);
 
   const invoiceId = id ? Number(id) : null;
 
@@ -981,9 +983,10 @@ const InvoiceDetailPage: React.FC = () => {
   const transactions = data?.transactions ?? [];
 
   const proceedPayment = async () => {
-    if (!pay?.canPay) return;
+    if (!pay?.canPay || paying) return;
     const iid = invoice?.id ?? invoiceId;
     if (!iid) return;
+    setPaying(true);
     try {
       const init = await studentFeeApi.initiatePayment({
         invoiceId: iid,
@@ -1013,6 +1016,8 @@ const InvoiceDetailPage: React.FC = () => {
     } catch (e: any) {
       const m = e?.payload?.message || e?.message || 'Unable to initiate payment';
       setAlert({ isOpen: true, title: 'Payment error', message: typeof m === 'string' ? m : 'Unable to initiate payment', type: 'error' });
+    } finally {
+      setPaying(false);
     }
   };
 
@@ -1079,13 +1084,17 @@ const InvoiceDetailPage: React.FC = () => {
                 <div className="pt-3">
                   <button
                     type="button"
-                    disabled={!pay?.canPay}
+                    disabled={!pay?.canPay || paying}
                     onClick={proceedPayment}
-                    className={pay?.canPay
-                      ? 'w-full inline-flex items-center justify-center rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-3'
-                      : 'w-full inline-flex items-center justify-center rounded-md bg-gray-200 text-gray-500 text-sm font-semibold px-4 py-3 cursor-not-allowed'}
+                    className={`w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 ${
+                      !pay?.canPay || paying
+                        ? 'bg-blue-400 cursor-wait'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
                   >
-                    {pay?.canPay ? t.payButton : t.payDisabled}
+                    {paying
+                      ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Preparing secure checkout…</>)
+                      : (pay?.canPay ? t.payButton : t.payDisabled)}
                   </button>
                   {pay?.canPay && <p className="text-xs text-gray-500 mt-2 text-center">Amount to pay: <b>{formatNgn(pay.amountToPay)}</b></p>}
                 </div>
