@@ -157,34 +157,75 @@ async function bootstrap() {
   // Why this order matters:
   //   api/src/app.ts constructs 8 express-rate-limit limiters at module-import
   //   time. Each limiter calls buildRateLimitStore(prefix) which checks
-  //   getRedis().status === 'ready'. If we import app.ts before Redis has had
-  //   time to reach the ready state, ALL limiters permanently fall back to
-  //   in-process MemoryStore for the rest of the process lifetime — even if
-  //   Redis becomes healthy 100ms later.
+  //   getRedis().status === 'ready'. If we import app.ts before Redis
+  //   handshake completion, ALL limiters permanently fall back to MemoryStore for the
+  //   process lifetime — even if Redis becomes healthy 100ms later.
   //
-  // Bounded wait only (never infinite): connectRedis() uses the internal
-  // retryStrategy that aborts after 4 attempts. We also cap the whole
-  // pre-connect step with Promise.race so the server never hangs.
+  // connectRedis() from config/redis.ts now represents TRUE READINESS: it
+  // waits until the client emits "ready" (handshake + AUTH/SELECT finished) OR a
+  // terminal failure. It DOES NOT short-circuit on status="connecting".
+  //
+  // Bounded outer wait (NEVER infinite): we also race connectRedis() against
+  // an outer 4000ms (50ms test) wall-clock timer so a genuine Redis outage
+  // cannot indefinitely block the HTTP server from starting with MemoryStore.
   // ---------------------------------------------------------------------------
   const REDIS_CONNECT_WAIT_MS = process.env.NODE_ENV === 'test' ? 50 : 4000;
+  type ConnectResult =
+    | { kind: 'redis'; client: any; timedOut: false }
+    | { kind: 'timeout'; afterMs: number };
+
+  const waitForConnectTimeout = async (): Promise<ConnectResult> => {
+    try {
+      const client = await connectRedis(REDIS_CONNECT_WAIT_MS);
+      return { kind: 'redis', client, timedOut: false };
+    } catch {
+      return { kind: 'redis', client: null, timedOut: false };
+    }
+  };
+
+  let result: ConnectResult;
   try {
-    const waitTimeout = new Promise<null>((resolve) =>
-      setTimeout(() => resolve(null), REDIS_CONNECT_WAIT_MS),
+    const t0 = Date.now();
+    const waitTimeout = new Promise<ConnectResult>((resolve) =>
+      setTimeout(() => resolve({ kind: 'timeout', afterMs: REDIS_CONNECT_WAIT_MS }), REDIS_CONNECT_WAIT_MS),
     );
-    const maybeRedis = await Promise.race([connectRedis(), waitTimeout]);
-    if (maybeRedis) {
-      const st: string = (maybeRedis as any).status ?? '';
+    result = await Promise.race([waitForConnectTimeout(), waitTimeout]);
+    const elapsed = Date.now() - t0;
+
+    if (result.kind === 'redis' && result.client) {
+      const st: string = (result.client.status as string) ?? '';
       if (st === 'ready') {
-        console.log(`[startup] Redis shared connection: ready (status="ready"). Rate-limit stores will use RedisStore.`);
+        console.log(
+          `[startup] Redis shared connection: ready (status="ready", waited=${elapsed}ms). All 8 rate-limit stores will use RedisStore.`,
+        );
       } else {
-        console.warn(`[startup] Redis shared connection: not ready after ${REDIS_CONNECT_WAIT_MS}ms (status="${st}"). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`);
+        // connectRedis() settled but did NOT reach "ready" — ioredis stopped retrying or hit terminal failure. NOT an outer race timeout (elapsed < cap).
+        console.warn(
+          `[startup] Redis shared connection: NOT ready after connect() settled (status="${st}", waited=${elapsed}ms). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`,
+        );
       }
+    } else if (result.kind === 'redis') {
+      // connectRedis() threw (should not — it catches internally, but be defensive).
+      console.warn(
+        `[startup] Redis shared connection: connect attempt threw an unexpected exception after ${elapsed}ms. Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`,
+      );
+    } else if (result.kind === 'timeout') {
+      // The OUTER bounded wall-clock timeout really DID fire. Elapsed should be at or after the cap.
+      console.warn(
+        `[startup] Redis shared connection: timed out after ${elapsed}ms (bounded wall-clock cap ${REDIS_CONNECT_WAIT_MS}ms). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`,
+      );
     } else {
-      console.warn(`[startup] Redis shared connection: timed out after ${REDIS_CONNECT_WAIT_MS}ms. Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`);
+      console.warn(
+        `[startup] Redis shared connection: unexpected race had no outcome after ${elapsed}ms. Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`,
+      );
     }
   } catch (redisErr: unknown) {
+    // Top-level defensive (shouldn't happen — connectRedis() never rejects).
     const msg = redisErr instanceof Error ? redisErr.message : String(redisErr);
-    console.warn(`[startup] Redis shared connection: connect() failed (${msg}). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`);
+    console.warn(
+      `[startup] Redis shared connection: connect() failed (${msg}). Rate-limit stores will fall back to in-process MemoryStore for this process lifetime.`,
+    );
+    result = { kind: 'redis', client: null, timedOut: false };
   }
 
   // ---------------------------------------------------------------------------

@@ -113,12 +113,101 @@ export function getRedis(): Redis {
   return instance;
 }
 
-export function connectRedis(): Promise<Redis> {
+/**
+ * Waits until the ioredis singleton emits "ready" (real handshake completed +
+ * AUTH/SELECT finished) OR a terminal failure fires, whichever comes first.
+ *
+ * Connect-attempt lifecycle states we see on ioredis 5.x:
+ *   wait         → connect() not yet called; socket closed.
+ *   connecting   → TCP socket opened; Redis server handshake in progress.
+ *   reconnecting → previous attempt failed; retryStrategy has scheduled a retry.
+ *   ready        → Handshake OK; AUTH + SELECT db completed. Commands safe.
+ *   close / end  → terminal states; socket closed permanently or client ended.
+ *
+ * IMPORTANT: "connecting" ≠ "ready safe".
+ *   The previous buggy implementation short-circuited on status="connecting"
+ *   and returned Promise.resolve(client) IMMEDIATELY. That caused the caller
+ *   (server.ts bootstrap()) to think Redis pre-connect had completed, so
+ *   app.ts was dynamically imported ~500ms BEFORE ioredis actually emitted
+ *   "ready".  buildRateLimitStore() then saw status="connecting" and all 8
+ *   limiters permanently chose MemoryStore for the process lifetime — even
+ *   though Redis was healthy and finished handshaking 500ms later.
+ *
+ * This function now represents READINESS:
+ *   - status === "ready"     → resolve(client) instantly.
+ *   - status === "connecting" → do NOT call client.connect() again (would
+ *                               throw "Redis is already connecting"). Instead
+ *                               install ONE-SHOT event listeners for
+ *                               "ready"/"error"/"close"/"end". Clean up all
+ *                               competing listeners after the first event to
+ *                               avoid listener leaks across repeated calls.
+ *   - status === "wait"       → call client.connect() then wait for ready.
+ *   - status === "reconnecting" → wait on the same events (an internal retry
+ *                               is already in flight). Don't call connect().
+ *   - status === "close"/"end" → connect() fresh if possible, else fall back.
+ *
+ * Graceful degradation: this promise NEVER rejects. On terminal failure or
+ * per-call bounded timeout we still resolve(client) so the caller can degrade
+ * to MemoryStore (see server.ts bounded Promise.race for the outer cap).
+ *
+ * Caller (server.ts bootstrap) STILL wraps this with its own outer timeout so
+ * a genuine Redis outage cannot indefinitely block the HTTP server from
+ * starting.
+ */
+export function connectRedis(perCallTimeoutMs: number = 30_000): Promise<Redis> {
   const client = getRedis();
-  if ((client as any).status === 'ready' || (client as any).status === 'connecting') {
+  const statusNow: string = (client as any).status ?? '';
+
+  // Fast path: handshake already completed — return immediately.
+  if (statusNow === 'ready') {
     return Promise.resolve(client);
   }
-  return client.connect().then(() => client).catch(() => client);
+
+  // Slow path: wait for actual "ready" event.
+  return new Promise<Redis>((resolve) => {
+    const settle = () => resolve(client);
+    const safeOff = (evt: string, fn: (...args: any[]) => void) => {
+      try { (client as any).removeListener(evt, fn); } catch { /* ignore */ }
+    };
+
+    // Competing once() listeners — exactly one will fire; clean up the rest.
+    const onReady = () => { cleanupAll(); settle(); };
+    const onError = (_err: unknown) => { cleanupAll(); settle(); };
+    const onClose = () => { cleanupAll(); settle(); };
+    const onEnd = () => { cleanupAll(); settle(); };
+
+    const cleanupAll = () => {
+      safeOff('ready', onReady);
+      safeOff('error', onError);
+      safeOff('close', onClose);
+      safeOff('end', onEnd);
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+
+    // Per-call safety net: never hang longer than perCallTimeoutMs even if
+    // the ioredis retryStrategy keeps promising "next retry".
+    let timeoutId: NodeJS.Timeout | null = setTimeout(() => {
+      timeoutId = null;
+      cleanupAll();
+      settle();
+    }, perCallTimeoutMs);
+    if (timeoutId.unref) timeoutId.unref();
+
+    client.once('ready', onReady);
+    client.once('error', onError);
+    client.once('close', onClose);
+    client.once('end', onEnd);
+
+    // Trigger the connect only if ioredis isn't already trying to connect.
+    // Calling connect() while status==="connecting" throws synchronously.
+    if (statusNow === 'wait' || statusNow === 'close' || statusNow === 'end') {
+      try {
+        void client.connect().catch(() => { /* handled by event listeners */ });
+      } catch {
+        // Already connecting or permanently ended — settle via events.
+      }
+    }
+  });
 }
 
 /**
