@@ -289,6 +289,8 @@ model Transaction {
   @@index([userId, createdAt])
   @@index([status, createdAt])
   @@index([invoiceId])
+  @@index([alatpayOrderReference])
+  @@index([alatpayInitPaymentReference])
   @@map("transactions")
 }
 

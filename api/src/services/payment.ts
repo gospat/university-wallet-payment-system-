@@ -375,15 +375,27 @@ export class PaymentService {
         if (row.gateway !== PaymentGateway.ALATPAY) {
           return { notFound: true, diagnostic: `metadata tx #${numericTxId} gateway=${row.gateway} not ALATPAY` };
         }
-        const matchesAnyBreadcrumb =
-          (!!bellsRef && row.reference === bellsRef) ||
-          (!!orderRef && row.alatpayOrderReference === orderRef) ||
-          (!!initRef && row.alatpayInitPaymentReference === initRef) ||
-          (!!sessionId && row.alatpaySessionId === sessionId) ||
-          (!!finalTxId && row.alatpayFinalTransactionId === finalTxId) ||
-          (!bellsRef && !orderRef && !initRef && !sessionId && !finalTxId);
-        if (matchesAnyBreadcrumb) return { id: row.id, reference: row.reference, gateway: row.gateway };
-        return { notFound: true, diagnostic: `metadata tx #${numericTxId} does not match provided order/init/session/final breadcrumbs` };
+        const failures: string[] = [];
+        if (!!bellsRef && typeof bellsRef === 'string' && row.reference !== bellsRef) {
+          failures.push(`bells_reference webhook=${bellsRef} stored=${row.reference}`);
+        }
+        if (!!orderRef && typeof orderRef === 'string' && !!row.alatpayOrderReference && row.alatpayOrderReference !== orderRef) {
+          failures.push(`order_reference webhook=${orderRef} stored=${row.alatpayOrderReference}`);
+        }
+        if (!!initRef && typeof initRef === 'string' && !!row.alatpayInitPaymentReference && row.alatpayInitPaymentReference !== initRef) {
+          failures.push(`init_payment_reference webhook=${initRef} stored=${row.alatpayInitPaymentReference}`);
+        }
+        if (!!sessionId && typeof sessionId === 'string' && !!row.alatpaySessionId && row.alatpaySessionId !== sessionId) {
+          failures.push(`session_id webhook=${sessionId} stored=${row.alatpaySessionId}`);
+        }
+        if (!!finalTxId && typeof finalTxId === 'string' && !!row.alatpayFinalTransactionId && row.alatpayFinalTransactionId !== finalTxId) {
+          failures.push(`final_transaction_id webhook=${finalTxId} stored=${row.alatpayFinalTransactionId}`);
+        }
+        if (failures.length === 0) return { id: row.id, reference: row.reference, gateway: row.gateway };
+        return {
+          notFound: true,
+          diagnostic: `metadata tx #${numericTxId} contradictory breadcrumbs: ${failures.join(' | ')}`,
+        } as { notFound: true; diagnostic: string };
       }
     }
 

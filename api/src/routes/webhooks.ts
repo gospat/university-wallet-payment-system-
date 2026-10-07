@@ -571,10 +571,17 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
       : typeof (envelope as any)?.Value?.Data?.sessionId === 'string'
         ? (envelope as any).Value.Data.sessionId.trim()
         : null;
+  // Final authoritative ALATPAY transaction UUID for /transactions/{id} verify.
+  // STRICT: only UUID-v4 shaped values are accepted. WEMA order refs, payk...
+  // init/session refs, event identifiers, and short non-UUID strings are all
+  // explicitly rejected. The verify endpoint only accepts the UUID form we
+  // confirmed in production. Falls back only if explicitly UUID-shaped.
+  const customerTxIdUuid: string | null =
+    customerTxIdRaw && typeof customerTxIdRaw === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(customerTxIdRaw.trim())
+      ? customerTxIdRaw.trim()
+      : null;
   const finalTxId: string | null =
-    selectAlatpayFinalTxId(envelope, dataId ?? customerTxIdRaw ?? null) ||
-    dataId ||
-    (customerTxIdRaw && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(customerTxIdRaw) ? customerTxIdRaw : null);
+    selectAlatpayFinalTxId(envelope, customerTxIdUuid) ?? customerTxIdUuid;
 
   // 2. Parse Customer.Metadata safely (object or string JSON)
   const customerMeta: AlatpayCustomerMetadata | null = parseAlatpayCustomerMetadata(data.Customer?.Metadata ?? null);

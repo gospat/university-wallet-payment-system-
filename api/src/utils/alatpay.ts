@@ -260,6 +260,32 @@ export function parseAlatpayCustomerMetadata(raw: unknown): AlatpayCustomerMetad
   return hasAny ? out : null;
 }
 
+/**
+ * Select the authoritative ALATPAY final transaction UUID for server-to-server
+ * verification against /transactions/{id}.
+ *
+ * PRODUCTION REQUIREMENT (verified against the real live payment):
+ *   - Final transaction identifier is UUID v4 shaped (e.g.
+ *     b5a198af-6582-42ac-9fc5-bc593685c954).
+ *   - Value.Data.Id (when present and UUID-shaped) is the primary
+ *     authoritative identifier and is GUARANTEED to work with the verify
+ *     endpoint.
+ *   - Customer.TransactionId ONLY if it is UUID shaped; otherwise ignore.
+ *   - Order references (WEMA-PAY-... / WEMA-...) and init/session refs
+ *     (payk..., short tokens) MUST NEVER be sent to
+ *     /transactions/{id}. Calling /transactions/{WEMA-order-ref} or
+ *     /transactions/{payk-init-ref} fails in production.
+ *
+ * We ONLY accept candidates that match UUID v4 regex. Anything non-UUID is
+ * deliberately rejected (returns null). Caller MUST then fail closed
+ * (not process money, leave for reconciliation).
+ */
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isAlatpayUuid(s: any): boolean {
+  return typeof s === 'string' && UUID_V4_RE.test(s.trim());
+}
+
 export function selectAlatpayFinalTxId(
   payload: any,
   fallback?: string | null,
@@ -268,23 +294,23 @@ export function selectAlatpayFinalTxId(
     const candidates: Array<string | null | undefined> = [];
     candidates.push(payload?.Value?.Data?.Id);
     candidates.push(payload?.Value?.Data?.id);
-    candidates.push(payload?.Value?.Data?.transactionId);
-    candidates.push(payload?.Value?.Data?.TransactionId);
     candidates.push(payload?.Id);
     candidates.push(payload?.id);
+    candidates.push(payload?.Value?.Data?.transactionId);
+    candidates.push(payload?.Value?.Data?.TransactionId);
     candidates.push(payload?.transactionId);
+    candidates.push(payload?.TransactionId);
     if (payload?.Customer?.TransactionId && typeof payload.Customer.TransactionId === 'string') {
-      const s = payload.Customer.TransactionId;
-      const UUIDish = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s);
-      if (UUIDish) candidates.push(s);
+      candidates.push(payload.Customer.TransactionId);
     }
     for (const c of candidates) {
-      if (typeof c === 'string' && c.trim()) return c.trim();
+      if (isAlatpayUuid(c)) return (c as string).trim().toLowerCase();
     }
-    if (typeof fallback === 'string' && fallback.trim()) return fallback.trim();
+    if (isAlatpayUuid(fallback)) return (fallback as string).trim().toLowerCase();
     return null;
   } catch {
-    return typeof fallback === 'string' && fallback.trim() ? fallback.trim() : null;
+    if (isAlatpayUuid(fallback)) return (fallback as string).trim().toLowerCase();
+    return null;
   }
 }
 

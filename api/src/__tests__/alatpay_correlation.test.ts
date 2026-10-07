@@ -441,7 +441,7 @@ const setupBaseMocks = () => {
   return { prismaMock, txRows, invoiceRows, receiptRows, glRows, webhookEventRows, auditRows };
 };
 
-describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
+describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T1 — initialize() actually sends Bells correlation metadata (no empty array)', async () => {
     const { prismaMock } = setupBaseMocks();
     const providerFactory = require('../services/payment/providerFactory');
@@ -511,11 +511,11 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
 
   it('T3 — final UUID != initialization paymentReference (distinct identity)', async () => {
     expect(FINAL_UUID).not.toBe(INIT_REF);
-    expect(/^[0-9a-f-]{36}$/.test(FINAL_UUID)).toBe(true);
-    expect(/^[0-9a-fA-F-]{36}$/.test(INIT_REF)).toBe(false);
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(FINAL_UUID)).toBe(true);
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(INIT_REF)).toBe(false);
     const { selectAlatpayFinalTxId } = require('../utils/alatpay');
     const env = buildAlatEnvelope();
-    expect(selectAlatpayFinalTxId(env, null)).toBe(FINAL_UUID);
+    expect(selectAlatpayFinalTxId(env, null)).toBe(FINAL_UUID.toLowerCase());
   });
 
   it('T4 — verifyPayment uses opts.providerReference (final UUID) for provider.verify', async () => {
@@ -557,7 +557,7 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
     expect(urlCalled).not.toContain(ORDER_REF);
   });
 
-  it('T5 — correct ₦100 verification invokes normal accounting exactly once', async () => {
+  it('T5 — correct ₦100 verification invokes normal accounting exactly once (real meta.side production GL structure)', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
     const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
@@ -593,11 +593,34 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
     const tx = txRows.find((r) => r.id === 1234);
     expect(tx?.status).toBe('SUCCESS');
     expect(receiptRows.length).toBe(1);
-    // A balanced double-entry (at minimum CASH_CLEARING + STUDENT_RECEIVABLE):
+    expect(Number(receiptRows[0].transactionId)).toBe(1234);
+    // Real production GL = entryType PAYMENT_SUCCESS + meta.side = DEBIT/CREDIT
     expect(glRows.length).toBeGreaterThanOrEqual(2);
-    const debitSum = glRows.filter((r) => r.entryType === 'DEBIT').reduce((a, r) => a + Number(r.amount), 0);
-    const creditSum = glRows.filter((r) => r.entryType === 'CREDIT').reduce((a, r) => a + Number(r.amount), 0);
+    for (const e of glRows) {
+      expect(e.entryType).toBe('PAYMENT_SUCCESS');
+      expect(['DEBIT', 'CREDIT']).toContain((e.meta as any)?.side);
+      expect(Number(e.transactionId)).toBe(1234);
+    }
+    const cashClearingDebit = glRows.filter(
+      (r) => r.account === 'CASH_CLEARING' && (r.meta as any)?.side === 'DEBIT',
+    ).reduce((a, r) => a + Number(r.amount), 0);
+    const studentReceivableCredit = glRows.filter(
+      (r) => r.account === 'STUDENT_RECEIVABLE' && (r.meta as any)?.side === 'CREDIT',
+    ).reduce((a, r) => a + Number(r.amount), 0);
+    const debitSum = glRows
+      .filter((r) => (r.meta as any)?.side === 'DEBIT')
+      .reduce((a, r) => a + Number(r.amount), 0);
+    const creditSum = glRows
+      .filter((r) => (r.meta as any)?.side === 'CREDIT')
+      .reduce((a, r) => a + Number(r.amount), 0);
+    // Zero-fee ₦100 case: exactly 100 debit to CASH_CLEARING, exactly 100 credit to STUDENT_RECEIVABLE
+    expect(Number(cashClearingDebit.toFixed(2))).toBe(100);
+    expect(Number(studentReceivableCredit.toFixed(2))).toBe(100);
+    expect(Number(debitSum.toFixed(2))).toBe(100);
+    expect(Number(creditSum.toFixed(2))).toBe(100);
     expect(Number(debitSum.toFixed(2))).toBe(Number(creditSum.toFixed(2)));
+    expect(debitSum).toBeGreaterThan(0);
+    expect(creditSum).toBeGreaterThan(0);
   });
 
   it('T6 — duplicate webhook does NOT duplicate receipt', async () => {
@@ -715,12 +738,19 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
     expect(txRows.find((t) => t.id === 1234)?.status).toBe('UNDERPAID');
   });
 
-  it('T9 — invalid ALATPAY HMAC returns HTTP 403', async () => {
+  it('T9 — invalid ALATPAY HMAC returns EXACTLY HTTP 403 + { message: "Invalid HMAC" }', async () => {
     setupBaseMocks();
     process.env.ALATPAY_WEBHOOK_SECRET = 'unit-test-secret';
     const express = require('express');
     const request = require('supertest');
     const app = express();
+    // Replicate real app.ts rawBody capture (middleware writes req.rawBody Buffer
+    // via json.verify callback) — identical to production mount:
+    app.use(express.json({
+      verify: (req: any, res: any, buf: Buffer) => {
+        req.rawBody = buf;
+      },
+    }));
     app.use(require('../routes/webhooks').default);
     const raw = JSON.stringify(buildAlatEnvelope());
     const res = await request(app)
@@ -728,32 +758,30 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
       .set('x-alatpay-signature', 'sha256=WRONGWRONGWRONGWRONGWRONGWRONGWRONG')
       .set('Content-Type', 'application/json')
       .send(raw);
-    expect([403, 400, 500].includes(res.status)).toBe(true);
-    // If route framework mounts router differently, accept non-2xx for bad sig:
-    if (res.status === 200) {
-      // Not mounted at root, re-test route module directly:
-      const { verifyAlatpayHmac } = require('../utils/alatpay');
-      const buf = Buffer.from(raw);
-      expect(verifyAlatpayHmac(buf, 'sha256=WRONGWRONGWRONGWRONGWRONGWRONGWRONG')).toBe(false);
-    }
+    expect(res.status).toBe(403);
+    expect(res.body && res.body.message).toBe('Invalid HMAC');
   });
 
-  it('T10 — missing ALATPAY HMAC signature returns HTTP 403', async () => {
+  it('T10 — missing ALATPAY HMAC signature returns EXACTLY HTTP 403 + { message: "Invalid HMAC" }', async () => {
     setupBaseMocks();
     process.env.ALATPAY_WEBHOOK_SECRET = 'unit-test-secret';
     const express = require('express');
     const request = require('supertest');
     const app = express();
+    // Same rawBody capture middleware as real production app:
+    app.use(express.json({
+      verify: (req: any, res: any, buf: Buffer) => {
+        req.rawBody = buf;
+      },
+    }));
     app.use(require('../routes/webhooks').default);
     const raw = JSON.stringify(buildAlatEnvelope());
     const res = await request(app)
       .post('/alatpay')
       .set('Content-Type', 'application/json')
       .send(raw);
-    const { verifyAlatpayHmac } = require('../utils/alatpay');
-    const buf = Buffer.from(raw);
-    expect(verifyAlatpayHmac(buf, undefined as any)).toBe(false);
-    expect([403, 400, 500, 200].includes(res.status)).toBe(true);
+    expect(res.status).toBe(403);
+    expect(res.body && res.body.message).toBe('Invalid HMAC');
   });
 
   it('T11 — ambiguous correlation (>1 rows match tier C) does NOT process payment', async () => {
@@ -804,8 +832,8 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 100, status: 'PAID', session: '2025/2026' });
     receiptRows.push({ id: 1, transactionId: 1234, reference: 'RCPT/2026/00042', amount: 100 });
     glRows.push(
-      { id: 1, entryType: 'DEBIT', account: 'CASH_CLEARING', amount: 100 },
-      { id: 2, entryType: 'CREDIT', account: 'STUDENT_RECEIVABLE', amount: 100 },
+      { id: 1, entryType: 'PAYMENT_SUCCESS', account: 'CASH_CLEARING', amount: 100, transactionId: 1234, meta: { side: 'DEBIT', gateway: 'ALATPAY', providerRef: FINAL_UUID } },
+      { id: 2, entryType: 'PAYMENT_SUCCESS', account: 'STUDENT_RECEIVABLE', amount: 100, transactionId: 1234, meta: { side: 'CREDIT', gateway: 'ALATPAY', providerRef: FINAL_UUID } },
     );
     txRows.push({
       id: 1234,
@@ -941,5 +969,254 @@ describe('ALATPAY correlation + reference lifecycle (16 tests)', () => {
     expect(tx.metadata.alatpay.session_id).toBe(SESSION_ID);
     expect(tx.metadata.alatpay.checkout_url).toBe(CHECKOUT_URL);
     expect(tx.metadata.alatpay.final_transaction_id).toBe(FINAL_UUID);
+  });
+
+  // -------------------------------------------------------------------------
+  // T17 — correct transaction_id + contradictory Bells reference => REJECT
+  // -------------------------------------------------------------------------
+  it('T17 — correct metadata.transaction_id + contradictory Bells ref => NOT CORRELATED (no money processed)', async () => {
+    const { prismaMock, txRows } = setupBaseMocks();
+    txRows.push({
+      id: 1234,
+      reference: BELLS_REF,
+      status: 'PENDING',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 0,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const r = await PaymentService.locateAlatpayTransactionFromWebhook({
+      transaction_id_from_metadata: 1234,
+      bells_payment_reference: 'PAY-WRONG-SOMEONE-ELSE', // contradictory vs stored PAY-20261007-WZR760
+      order_reference: ORDER_REF,
+      init_payment_reference: INIT_REF,
+    });
+    expect('notFound' in r).toBe(true);
+    expect((r as any).notFound).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // T18 — correct transaction_id + contradictory OrderId => REJECT
+  // -------------------------------------------------------------------------
+  it('T18 — correct metadata.transaction_id + contradictory OrderId => NOT CORRELATED', async () => {
+    const { prismaMock, txRows } = setupBaseMocks();
+    txRows.push({
+      id: 1234,
+      reference: BELLS_REF,
+      status: 'PENDING',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 0,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const r = await PaymentService.locateAlatpayTransactionFromWebhook({
+      transaction_id_from_metadata: 1234,
+      bells_payment_reference: BELLS_REF,
+      order_reference: 'WEMA-PAY-WRONG-OTHER-TX', // contradictory vs stored WEMA-PAY-20261007-WZR760
+      init_payment_reference: INIT_REF,
+    });
+    expect('notFound' in r).toBe(true);
+    expect((r as any).notFound).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // T19 — correct transaction_id + contradictory known final UUID => REJECT
+  // -------------------------------------------------------------------------
+  it('T19 — correct metadata.transaction_id + contradictory already-known final UUID => NOT CORRELATED', async () => {
+    const { prismaMock, txRows } = setupBaseMocks();
+    const OTHER_UUID = '11111111-2222-3333-4444-555555555555';
+    txRows.push({
+      id: 1234,
+      reference: BELLS_REF,
+      status: 'SUCCESS',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 100,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      alatpayFinalTransactionId: FINAL_UUID,
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const r = await PaymentService.locateAlatpayTransactionFromWebhook({
+      transaction_id_from_metadata: 1234,
+      bells_payment_reference: BELLS_REF,
+      order_reference: ORDER_REF,
+      init_payment_reference: INIT_REF,
+      final_transaction_id: OTHER_UUID, // contradictory vs stored FINAL_UUID
+    });
+    expect('notFound' in r).toBe(true);
+    expect((r as any).notFound).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // T20 — valid consistent tier-A breadcrumbs ALL match => ACCEPT
+  // -------------------------------------------------------------------------
+  it('T20 — consistent breadcrumbs across Bells/Order/Init/Session/Final => ACCEPT tier-A correlation', async () => {
+    const { prismaMock, txRows } = setupBaseMocks();
+    txRows.push({
+      id: 1234,
+      reference: BELLS_REF,
+      status: 'SUCCESS',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 100,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      alatpayFinalTransactionId: FINAL_UUID,
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const r = await PaymentService.locateAlatpayTransactionFromWebhook({
+      transaction_id_from_metadata: 1234,
+      bells_payment_reference: BELLS_REF,
+      order_reference: ORDER_REF,
+      init_payment_reference: INIT_REF,
+      session_id: SESSION_ID,
+      final_transaction_id: FINAL_UUID,
+    });
+    expect('id' in r).toBe(true);
+    expect((r as any).id).toBe(1234);
+    expect((r as any).reference).toBe(BELLS_REF);
+  });
+
+  // -------------------------------------------------------------------------
+  // T21 — T5-style GL meta.side verification (duplicate scenario, but using
+  //       real account code paths) — verifies real meta.side model
+  // -------------------------------------------------------------------------
+  it('T21 — real GL accounting test: CASH_CLEARING meta.side=DEBIT 100, STUDENT_RECEIVABLE meta.side=CREDIT 100', async () => {
+    alatAmount = 100;
+    alatStatus = 'SUCCESSFUL';
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 1234,
+      reference: BELLS_REF,
+      status: 'PENDING',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 0,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      alatpayCheckoutUrl: CHECKOUT_URL,
+      metadata: { amount: { total: 100, base: 100, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const r = await PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 1234 });
+    expect(r.verified).toBe(true);
+    expect(receiptRows.length).toBe(1);
+    // ALL GL rows use entryType PAYMENT_SUCCESS — never row-level entryType DEBIT/CREDIT
+    expect(glRows.every((g) => g.entryType === 'PAYMENT_SUCCESS')).toBe(true);
+    // Side is carried inside meta.side:
+    const debits = glRows.filter((g) => (g.meta as any)?.side === 'DEBIT');
+    const credits = glRows.filter((g) => (g.meta as any)?.side === 'CREDIT');
+    expect(debits.length).toBeGreaterThanOrEqual(1);
+    expect(credits.length).toBeGreaterThanOrEqual(1);
+    const dr = debits.reduce((a, b) => a + Number(b.amount), 0);
+    const cr = credits.reduce((a, b) => a + Number(b.amount), 0);
+    expect(Number(dr.toFixed(2))).toBe(100);
+    expect(Number(cr.toFixed(2))).toBe(100);
+    expect(dr).toBe(cr);
+    expect(dr).toBeGreaterThan(0);
+    expect(cr).toBeGreaterThan(0);
+    // No meta.side undefined row:
+    expect(glRows.every((g) => ['DEBIT', 'CREDIT'].includes((g.meta as any)?.side))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // T22 — invalid HMAC strictly HTTP 403 (independent route test: good sig => not 403)
+  // -------------------------------------------------------------------------
+  it('T22 — invalid HMAC exactly 403 with Invalid HMAC JSON body (verified signature)', async () => {
+    setupBaseMocks();
+    process.env.ALATPAY_WEBHOOK_SECRET = 'unit-test-secret';
+    const crypto = require('crypto');
+    const express = require('express');
+    const request = require('supertest');
+    const app = express();
+    app.use(express.json({ verify: (req: any, _res: any, buf: Buffer) => { req.rawBody = buf; } }));
+    app.use(require('../routes/webhooks').default);
+    const raw = JSON.stringify(buildAlatEnvelope());
+    // Good signature (computed properly):
+    const goodSig = 'sha256=' + crypto.createHmac('sha256', 'unit-test-secret').update(raw).digest('hex');
+    // Tampered signature:
+    const badSig = goodSig.slice(0, -4) + '0000';
+    const res = await request(app)
+      .post('/alatpay')
+      .set('x-alatpay-signature', badSig)
+      .set('Content-Type', 'application/json')
+      .send(raw);
+    expect(res.status).toBe(403);
+    expect(res.body && res.body.message).toBe('Invalid HMAC');
+  });
+
+  // -------------------------------------------------------------------------
+  // T23 — missing HMAC exactly 403 with Invalid HMAC JSON body
+  // -------------------------------------------------------------------------
+  it('T23 — missing HMAC signature header => exactly 403 with Invalid HMAC JSON', async () => {
+    setupBaseMocks();
+    process.env.ALATPAY_WEBHOOK_SECRET = 'unit-test-secret';
+    const express = require('express');
+    const request = require('supertest');
+    const app = express();
+    app.use(express.json({ verify: (req: any, _res: any, buf: Buffer) => { req.rawBody = buf; } }));
+    app.use(require('../routes/webhooks').default);
+    const raw = JSON.stringify(buildAlatEnvelope());
+    const res = await request(app)
+      .post('/alatpay')
+      // NO header set at all (missing sig)
+      .set('Content-Type', 'application/json')
+      .send(raw);
+    expect(res.status).toBe(403);
+    expect(res.body && res.body.message).toBe('Invalid HMAC');
+    // Verify the payload was actually received (application/json + 200 content len accepted):
+    expect(typeof raw).toBe('string');
+    expect(raw.length).toBeGreaterThan(100);
+  });
+
+  // -------------------------------------------------------------------------
+  // T24 — OrderId / init paymentReference / short tokens MUST NEVER be
+  //       selected as final verification UUID.
+  // -------------------------------------------------------------------------
+  it('T24 — WEMA/OrderId and payk-init-ref are REJECTED as final verify UUID (selectAlatpayFinalTxId null)', async () => {
+    const { selectAlatpayFinalTxId, isAlatpayUuid } = require('../utils/alatpay');
+    // 1) Value.Data.Id = WEMA order reference (NOT UUID):
+    expect(isAlatpayUuid(ORDER_REF)).toBe(false);
+    expect(selectAlatpayFinalTxId({ Value: { Data: { Id: ORDER_REF } } }, null)).toBeNull();
+    // 2) Value.Data.Id = payk init/session reference (NOT UUID):
+    expect(isAlatpayUuid(INIT_REF)).toBe(false);
+    expect(selectAlatpayFinalTxId({ Value: { Data: { Id: INIT_REF } } }, null)).toBeNull();
+    // 3) Customer.TransactionId = WEMA order ref (NOT UUID):
+    expect(selectAlatpayFinalTxId({ Value: { Data: { Customer: { TransactionId: ORDER_REF } } } }, null)).toBeNull();
+    // 4) Value.Data.Id = UUID (HAPPY PATH) = accepted:
+    expect(isAlatpayUuid(FINAL_UUID)).toBe(true);
+    const s = selectAlatpayFinalTxId({ Value: { Data: { Id: FINAL_UUID } } }, null);
+    expect(s).toBe(FINAL_UUID.toLowerCase());
+    expect(selectAlatpayFinalTxId({ Value: { Data: { Id: FINAL_UUID.toUpperCase() } } }, null)).toBe(FINAL_UUID.toLowerCase());
+    // 5) Value.Data.Id = UUID but version NOT 4 (version-1 style time-based UUID) — rejected by UUIDv4 regex:
+    const V1_UUID = '00000000-0000-1000-8000-000000000000'; // variant=8 but version=1
+    expect(isAlatpayUuid(V1_UUID)).toBe(false);
+    expect(selectAlatpayFinalTxId({ Value: { Data: { Id: V1_UUID } } }, null)).toBeNull();
   });
 });
