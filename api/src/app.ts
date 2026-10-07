@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import rateLimit, { MemoryStore } from 'express-rate-limit';
+import rateLimit from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { getRedis } from './config/redis';
 import { globalErrorHandler } from './middlewares/error';
@@ -24,7 +24,6 @@ import client from 'prom-client';
 import { getQueueHealth } from './config/queue';
 import { publicVerifyReceipt } from './controllers/receipt';
 import { buildBranding, brandingEnvOnly } from './utils/branding';
-import { normalizeLuaArrayResult } from './utils/rateLimitRedis';
 
 const app = express();
 
@@ -35,132 +34,34 @@ const trustProxyHops = parseInt(process.env.TRUST_PROXY_HOPS ?? '1', 10);
 app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 1 ? trustProxyHops : 1);
 
 // 2.1 Rate Limit Redis-backed shared store (cluster-safe, survives PM2 reloads & restarts)
-//    Falls back to the default in-memory MemoryStore only if Redis is temporarily unavailable.
-//    Fail-open design: if Redis flakes mid-request, we MUST NOT crash the whole request pipeline.
+//    Falls back to the default in-memory MemoryStore only if Redis is temporarily unavailable
+//    at construction. During operation the store's own retry path is honoured: Redis
+//    transport errors propagate (NOSCRIPT lets rate-limit-redis reload the Lua script and
+//    retry EVAL). If retries are exhausted, passOnStoreError:true (below) lets the request
+//    through to its handler instead of returning HTTP 500.
 //
-// rate-limit-redis@4.3.1 expects `sendCommand(...command)` to return:
-//   * for ["SCRIPT", "LOAD", scriptSrc]          -> SHA1 string  (40 chars, hex)
-//   * for ["EVALSHA", sha, "1", key, ...args]    -> two-element array [totalHits, timeToExpireMs]
-//   * for ["EVAL",    src, "1", key, ...args]    -> two-element array [totalHits, timeToExpireMs]
-//   * for ["DECR", key], ["DEL", key]            -> ignored by library (void)
+// Production diagnostics have confirmed the basic RedisStore integration works as-is:
+//   * ioredis.call(EVAL...)   -> returns [1, 60000] (exact Lua array shape)
+//   * ioredis.call(SCRIPT LOAD) -> returns valid 40-hex SHA string
+//   * EVALSHA increment / get() -> return valid arrays
+//   * Eight concurrent RedisStore instances (one per limiter) all share correctly.
 //
-// ioredis `.call(...command)` returns Promise<unknown>.
-//   * Lua `return { number, number }` becomes a JS array in ioredis 5.x on RESP3 but
-//     elements may be strings/buffers depending on RESP mode & Redis server version.
-//     We coerce the two-element result into [int, int] explicitly before returning it.
-//   * If ioredis throws (network blip, connection reset), we cannot return an
-//     invalid/undefined value because rate-limit-redis/lib will throw
-//     `TypeError: Expected result to be array of values` from parseScriptResponse and
-//     turn an otherwise legitimate request (e.g. a payment webhook) into HTTP 500.
-//     Strategy: wrap the RedisStore so increment/get/decrement/resetKey that fail fall back to
-//     a companion in-process MemoryStore for this request. This keeps counters
-//     "best effort shared" when Redis is healthy, degrades to in-process when Redis is
-//     transiently down, and NEVER crashes the rate-limit middleware.
-
-/**
- * Wrap a RedisStore with a per-request fallback MemoryStore.
- *
- * rate-limit-redis store methods may throw if the Redis transport
- * errors / returns unexpected shapes. A throw here propagates through
- * express-rate-limit straight into the global error handler as HTTP 500.
- *
- * We catch those throws and forward the operation to a small in-process
- * MemoryStore (per limiter instance). Behavior:
- *   Redis healthy   -> distributed shared counters.
- *   Redis transient -> per-process counters (no shared, but request
- *                      still reaches the route; rate-limits "best effort").
- *   NEVER throws -> never 500.
- */
-function wrapStoreResilient(redisStore: InstanceType<typeof RedisStore>, prefix: string, defaultWindowMs: number) {
-  const inMem = new MemoryStore();
-  // MemoryStore is lazy-initiated. express-rate-limit will call init(options)
-  // with the configured windowMs on middleware setup. We mirror windowMs here.
-  let mirrorWindowMs = defaultWindowMs;
-  const forward = (fn: string, key: string, onMem: () => any, onRedis: () => any) => {
-    try {
-      const promiseOrResult = onRedis();
-      if (promiseOrResult && typeof (promiseOrResult as any).then === 'function') {
-        return (promiseOrResult as Promise<any>).catch((err: unknown) => {
-          if (!(globalThis as any).__rlStoreWrapWarnedOnce) {
-            (globalThis as any).__rlStoreWrapWarnedOnce = true;
-            console.warn(
-              `[rate-limit] RedisStore.${fn} failed for limiter=${prefix}; degrading to in-process MemoryStore for this call. err=${String(
-                (err as Error)?.message ?? err,
-              )}`,
-            );
-          }
-          return onMem();
-        });
-      }
-      return promiseOrResult;
-    } catch (err) {
-      if (!(globalThis as any).__rlStoreWrapWarnedOnce) {
-        (globalThis as any).__rlStoreWrapWarnedOnce = true;
-        console.warn(
-          `[rate-limit] RedisStore.${fn} sync-failed for limiter=${prefix}; degrading to MemoryStore. err=${String(
-            (err as Error)?.message ?? err,
-          )}`,
-        );
-      }
-      return onMem();
-    }
-  };
-  return {
-    init(options: any) {
-      mirrorWindowMs = Number(options?.windowMs) || defaultWindowMs;
-      try { (redisStore as any).init?.(options); } catch { /* ignore */ }
-      try { (inMem as any).init?.(options); } catch { /* ignore */ }
-    },
-    increment(key: string) {
-      return forward(
-        'increment',
-        key,
-        () => (inMem as any).increment(key),
-        () => (redisStore as any).increment(key),
-      );
-    },
-    decrement(key: string) {
-      return forward(
-        'decrement',
-        key,
-        () => { try { (inMem as any).decrement?.(key); } catch { /* noop */ } return undefined; },
-        () => (redisStore as any).decrement(key),
-      );
-    },
-    resetKey(key: string) {
-      return forward(
-        'resetKey',
-        key,
-        () => { try { (inMem as any).resetKey?.(key); } catch { /* noop */ } return undefined; },
-        () => (redisStore as any).resetKey(key),
-      );
-    },
-    get(key: string) {
-      return forward(
-        'get',
-        key,
-        () => (inMem as any).get(key),
-        () => (redisStore as any).get(key),
-      );
-    },
-    shutdown() {
-      try { (inMem as any).shutdown?.(); } catch { /* ignore */ }
-      try { (redisStore as any).shutdown?.(); } catch { /* ignore */ }
-    },
-  };
-}
+// Therefore we return the transport result directly. The ONLY historical defect was
+// `catch { return undefined as any; }`: undefined went into parseScriptResponse(undefined)
+// and threw `TypeError: Expected result to be array of values` on every request.
+// We must NOT swallow Redis errors inside sendCommand; they must propagate so NOSCRIPT
+// triggers the library's EVAL fallback and final failures fall into passOnStoreError.
 
 /**
  * Build a rate-limit store (for a specific prefix).
- * - If Redis is healthy at construction -> RedisStore + resilient wrapper
- *   (degrades to in-memory on transport errors, never throws into middleware).
- * - If Redis is NOT ready -> undefined; callers fall back to default in-memory MemoryStore.
+ * - If Redis status==="ready" at construction -> RedisStore (shared, cluster-safe).
+ * - If Redis is NOT ready -> undefined; express-rate-limit defaults to native
+ *   in-memory MemoryStore (per process only, best effort).
  *
- * Contract with rate-limit-redis@4.3.1 is honoured EXACTLY:
- *   - SCRIPT LOAD returns string (SHA1).
- *   - EVALSHA/EVAL returns two-element number-array, never Buffer, never undefined.
+ * Startup readiness (c6d547e) preserved: RedisStore only created when redis.status is
+ * genuinely 'ready', not merely 'connecting' / 'wait'.
  */
-function buildRateLimitStore(prefix: string, defaultWindowMs = 60_000) {
+export function buildRateLimitStore(prefix: string, _defaultWindowMs = 60_000) {
   let redis: ReturnType<typeof getRedis> | null = null;
   try {
     redis = getRedis() || null;
@@ -180,40 +81,12 @@ function buildRateLimitStore(prefix: string, defaultWindowMs = 60_000) {
     `[rate-limit] limiter=${limiterName} store=RedisStore  — redis.status="ready" at construction time. Counters are cluster-shared across workers and survive hot reloads.`,
   );
   const r = redis as any;
-  const redisStore = new RedisStore({
+  return new RedisStore({
     prefix,
-    sendCommand: async (...command: string[]) => {
-      if (!r) {
-        // Should not happen (redisReadyNow), but defensive: return compliant sentinel.
-        if (command[0]?.toUpperCase() === 'SCRIPT') return '0'.repeat(40);
-        return [1, defaultWindowMs];
-      }
-      const cmd0 = command[0]?.toUpperCase() ?? '';
-      try {
-        // ioredis .call("SCRIPT", "LOAD", src) returns SHA1 as a string directly.
-        // ioredis .call("EVALSHA", sha, "1", key, a, b) returns the Lua array as-is.
-        const raw = await r.call(...command);
-        if (cmd0 === 'SCRIPT') {
-          // Expect SHA1 string, 40 lowercase hex chars. Accept only strings.
-          if (typeof raw === 'string' && /^[0-9a-f]{40}$/i.test(raw)) return raw;
-          if (typeof raw === 'string') return raw;
-          if (Buffer.isBuffer(raw)) return raw.toString('utf8');
-          // SCRIPT LOAD broken transport? throw -> handled by wrapper.
-          throw new TypeError(`SCRIPT LOAD returned non-string reply: ${typeof raw}`);
-        }
-        if (cmd0 === 'EVALSHA' || cmd0 === 'EVAL') {
-          // Always normalize to [number, number] tuple.
-          return normalizeLuaArrayResult(raw, defaultWindowMs);
-        }
-        // DECR / DEL: library ignores the return value.
-        return raw;
-      } catch (callErr: any) {
-        // Re-throw so the resilient wrapper can route this increment/get into MemoryStore.
-        throw callErr;
-      }
+    sendCommand: async (...args: string[]) => {
+      return await r.call(...args);
     },
   });
-  return wrapStoreResilient(redisStore, prefix, defaultWindowMs);
 }
 
 // Force HTTPS redirect (skip in dev/test; allow /health endpoints over HTTP for k8s probes)
@@ -311,76 +184,83 @@ app.use(
 // Redis-backed store: shared across PM2 cluster workers, survives reloads/restarts so
 // credential-stuffing attackers can't bypass by targeting a different worker or waiting
 // for a hot-code reload. Each limit has its own Redis key prefix so counters stay independent.
-const generalLimiter = rateLimit({
+export const generalLimiter = rateLimit({
   store: buildRateLimitStore('rl:general:'),
   max: 200,
   windowMs: 15 * 60 * 1000,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 // Auth: login/signup/forgot-password endpoints — strictest setting to stop credential stuffing.
 // 12 attempts/15 mins/IP = ~48/hour = 1152/day. Combined with per-user 5-attempts lockout → safe.
-const authLimiter = rateLimit({
+export const authLimiter = rateLimit({
   store: buildRateLimitStore('rl:auth:'),
   max: 12,
   windowMs: 15 * 60 * 1000,
   message: 'Too many auth attempts, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 // Password change / reset: short window strict limit to stop forced rotations.
-const authChangePwLimiter = rateLimit({
+export const authChangePwLimiter = rateLimit({
   store: buildRateLimitStore('rl:auth-chpw:'),
   max: 5,
   windowMs: 60 * 60 * 1000,
   message: 'Too many password change attempts, please try again in an hour.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 // Payment initiation / verification: per-IP 15/15 mins = 1/min avg (blocks carder enumeration).
-const paymentLimiter = rateLimit({
+export const paymentLimiter = rateLimit({
   store: buildRateLimitStore('rl:payment:'),
   max: 15,
   windowMs: 15 * 60 * 1000,
   message: 'Too many payment requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 // Admin mutations (POST/PATCH/DELETE) and bulk uploads.
-const adminMutationLimiter = rateLimit({
+export const adminMutationLimiter = rateLimit({
   store: buildRateLimitStore('rl:admin-mut:'),
   max: 80,
   windowMs: 15 * 60 * 1000,
   message: 'Too many admin mutation requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 // Webhooks: providers may call frequently, keep generous.
-const webhookLimiter = rateLimit({
+export const webhookLimiter = rateLimit({
   store: buildRateLimitStore('rl:webhook:'),
   max: 200,
   windowMs: 60 * 1000,
   message: 'Too many webhook requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 // Public receipt verify: anonymous 60/min/IP. Strict enough to stop enumeration scans,
 // permissive enough for genuine students verifying many receipts. Applies to both public
 // /api/v1/public/verify-receipt route and authenticated admin/bursary verify endpoints.
-const publicReceiptLimiter = rateLimit({
+export const publicReceiptLimiter = rateLimit({
   store: buildRateLimitStore('rl:pub-rcpt:'),
   max: 60,
   windowMs: 60 * 1000,
   message: 'Too many receipt verification requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 
 app.use('/api/v1', generalLimiter);
@@ -400,13 +280,14 @@ app.use(/^\/api\/v1\/(admin|academic|fees)\/.*\/?bulk-(upload|import)$/i, adminM
 
 // Report exports: heavy CPU + memory (PDF rendering via Puppeteer, XLSX streaming).
 // Tighter per-user window to stop abuse — still permissive enough for bursary workloads.
-const reportsExportLimiter = rateLimit({
+export const reportsExportLimiter = rateLimit({
   store: buildRateLimitStore('rl:reports-export:'),
   max: 40,
   windowMs: 10 * 60 * 1000, // 40 exports / 10 min / IP
   message: 'Too many report export requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  passOnStoreError: true,
 });
 app.use(/^\/api\/v1\/reports\/.*\/?(export|download)$/i, reportsExportLimiter);
 
