@@ -43,6 +43,9 @@ const PaymentConfirmation: React.FC = () => {
   const [checkoutModalAmount, setCheckoutModalAmount] = useState<number | undefined>(undefined);
   const [checkoutModalInvoiceId, setCheckoutModalInvoiceId] = useState<number | string | undefined>(undefined);
   const [checkoutModalGateway, setCheckoutModalGateway] = useState<string | undefined>(undefined);
+  const [checkoutMode, setCheckoutMode] = useState<'hosted_url_iframe' | 'alatpay_native_modal_v1' | undefined>(undefined);
+  const [alatpayNativeModal, setAlatpayNativeModal] = useState<any>(null);
+  const [alatpayRefs, setAlatpayRefs] = useState<any>(null);
   const load = useCallback(async () => {
     if (!invoiceId) {
       setError('Missing invoice id');
@@ -103,6 +106,9 @@ const PaymentConfirmation: React.FC = () => {
     if (!payload || proceeding) return;
     setProceeding(true);
     setMsg(null);
+    setCheckoutMode(undefined);
+    setAlatpayNativeModal(null);
+    setAlatpayRefs(null);
     try {
       const idempotencyKey = `INVCONF-${payload.invoiceId || invoiceId || 'X'}-${Date.now()}`;
       const init = await studentFeeApi.initiatePayment({
@@ -113,9 +119,28 @@ const PaymentConfirmation: React.FC = () => {
       const initData = (init as any)?.data ?? init;
       const gl = initData?.gateway_label ?? initData?.gatewayLabel ?? undefined;
       if (gl) setGatewayLabel(gl);
+      const checkoutPopupMode: 'hosted_url_iframe' | 'alatpay_native_modal_v1' | undefined = initData?.checkout_popup_mode === 'alatpay_native_modal_v1'
+        ? 'alatpay_native_modal_v1'
+        : undefined;
+      const alatpayCheckout = initData?.alatpay_public_checkout ?? null;
+      const alatpayRef = initData?.alatpay_refs ?? null;
       const url = (init as any)?.authorization_url || (init as any)?.data?.authorization_url || '';
       const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
+      if (checkoutPopupMode === 'alatpay_native_modal_v1' && alatpayCheckout) {
+        setCheckoutMode('alatpay_native_modal_v1');
+        setAlatpayNativeModal(alatpayCheckout);
+        setAlatpayRefs(alatpayRef ?? null);
+        setCheckoutModalUrl('');
+        setCheckoutModalRef(ref || undefined);
+        setCheckoutModalAmount(Number(payload.serverComputedAmount ?? payload.outstanding ?? 0));
+        setCheckoutModalInvoiceId(payload.invoiceId ?? invoiceId);
+        setCheckoutModalGateway(gl);
+        setCheckoutModalOpen(true);
+        setProceeding(false);
+        return;
+      }
       if (typeof url === 'string' && url.startsWith('http')) {
+        setCheckoutMode('hosted_url_iframe');
         setCheckoutModalUrl(url);
         setCheckoutModalRef(ref || undefined);
         setCheckoutModalAmount(Number(payload.serverComputedAmount ?? payload.outstanding ?? 0));
@@ -272,6 +297,9 @@ const PaymentConfirmation: React.FC = () => {
         invoiceId={checkoutModalInvoiceId}
         amount={checkoutModalAmount}
         reference={checkoutModalRef}
+        checkoutMode={checkoutMode}
+        alatpayNativeModal={alatpayNativeModal}
+        alatpayRefs={alatpayRefs}
         onSuccessNavigate={() => {
           const ref = checkoutModalRef;
           if (ref) {

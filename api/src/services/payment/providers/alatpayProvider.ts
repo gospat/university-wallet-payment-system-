@@ -14,7 +14,14 @@ import {
   isAlatpayPassChargeEnabled,
   getDefaultEmailDomain,
   serializeAlatpayCustomerMetadata,
+  fetchAlatpayBusinessForPlugin,
+  buildSanitizedAlatpayPublicCheckout,
+  AlatpayPopupUnavailableError,
 } from '../../../utils/alatpay';
+
+function isAlatpayPopupModeEnabled(): boolean {
+  return process.env.ALATPAY_USE_POPUP_CHECKOUT === 'true';
+}
 
 function money(n: number | string | null | undefined): number {
   return Number(Number(n ?? 0).toFixed(2));
@@ -142,7 +149,7 @@ export class AlatpayProvider implements IPaymentProvider {
           elapsedMs,
         }),
       );
-      return {
+      const resultBase: InitializeResult = {
         checkoutUrl,
         authorization_url: checkoutUrl,
         access_code: sessionId,
@@ -154,6 +161,39 @@ export class AlatpayProvider implements IPaymentProvider {
         channelsUsed: opts.channels ?? null,
         raw: response?.data ?? data,
       };
+      if (isAlatpayPopupModeEnabled()) {
+        try {
+          const apiKey = getActiveAlatpaySecretKey();
+          const resolvedBusiness = await fetchAlatpayBusinessForPlugin(
+            businessId,
+            apiKey,
+            breakdown.totalAmount,
+            'NGN',
+            false,
+          );
+          const sanitizedPublic = buildSanitizedAlatpayPublicCheckout(resolvedBusiness, {
+            bellsRef: opts.reference,
+            orderRef: orderId,
+            initRef: (data.paymentReference ?? providerRef) as string,
+            businessId,
+            amountNgn: breakdown.totalAmount,
+            currency: 'NGN',
+            email: body.email as string | undefined,
+            firstName: opts.firstName,
+            lastName: opts.lastName,
+            phone: opts.phone,
+          });
+          resultBase.alatpayPublicCheckout = sanitizedPublic;
+        } catch (err) {
+          if (err instanceof AlatpayPopupUnavailableError) throw err;
+          const msg = String((err as Error)?.message ?? '').slice(0, 160) || 'Unknown error';
+          throw new AlatpayPopupUnavailableError(
+            'ALATPay native modal could not complete backend preparation. Please retry shortly or use Paystack.',
+            { cause: msg },
+          );
+        }
+      }
+      return resultBase;
     } catch (error: any) {
       const resp = error?.response;
       const respData = resp?.data;

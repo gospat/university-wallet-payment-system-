@@ -207,6 +207,34 @@ PAYSTACK_WEBHOOK_SECRET=<copy from Paystack Webhook Dashboard Settings panel>
 ALATPAY_MODE=prod
 ALATPAY_SECRET_KEY=...
 ALATPAY_WEBHOOK_SECRET=...
+#
+# =================================[ IMPORTANT ]================================
+# ALATPAY_USE_POPUP_CHECKOUT: (optional — DEFAULT false when unset → legacy
+#   Payment Link "paylink.alatpay.ng" hosted-checkout path, same as today.)
+#
+# SET TO true TO ENABLE THE NEW ALATPAY NATIVE CHECKOUT MODAL (browser popup
+# using WEMA/ALATPay's official JS SDK integration). WHEN true:
+#   - NO fallback to paylink.alatpay.ng Payment Link; any upstream failure
+#     returns HTTP 502 ALATPAY_POPUP_UNAVAILABLE (no authorization_url in the
+#     response) — student must retry or switch to Paystack.
+#   - The browser-side sanitized 4-field business object (id, businessId, name,
+#     logoUrl only) is sent in initiatePayment response.
+#   - Backend performs recursive credential-leak scanning on the upstream
+#     business-for-plugin response and ABORTS if any secret-looking key/value
+#     is detected (safe-by-default).
+#
+# PRODUCTION RUNTIME: This flag lives in systemd EnvironmentFile (NOT pm2):
+#   /etc/systemd/system/bells-payment-api.service.d/*.conf  (e.g. env.conf)
+# After editing:
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart bells-payment-api
+#
+# To ROLLBACK to legacy ALATPay Payment Link after a failed native-modal trial:
+#   set ALATPAY_USE_POPUP_CHECKOUT=false (or simply delete the line)
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart bells-payment-api
+# =============================================================================
+# ALATPAY_USE_POPUP_CHECKOUT=false
 
 # Resend
 RESEND_API_KEY=re_xxx
@@ -322,6 +350,87 @@ For OFF-SITE backup (fire, theft, ransomware): nightly rclone → Bells Google W
 
 ---
 
+## PHASE 9.5 — ALATPAY NATIVE CHECKOUT (SEPARATE DEPLOYMENT PHASE)
+
+> ⚠️ **NOT PART OF STANDARD DEPLOY. DO NOT EXECUTE UNLESS EXPLICITLY AUTHORIZED.
+>   Phase 2 code commits **only shipped code + tests**. The `ALATPAY_USE_POPUP_CHECKOUT env flag
+>   defaults to **false** (unset) → legacy ALATPay Payment Link hosted-unchanged behaviour).
+>   Nothing changes unless you EXPLICITLY enable this section during a FUTURE separate deployment phase with a separate authorization.
+
+### §A — Prerequisites (check BEFORE toggling the flag
+
+- [ ] BOTH frontend + backend deployed in Git at commit  at baseline or later
+- [ ] Verify `api/.env` or systemd EnvironmentFile: `ALATPAY_USE_POPUP_CHECKOUT=false (or simply absent
+- [ ] Nginx (see §B below updated and applied, tested.
+- [ ] Backend startup log line `[startup] ALATPAY_USE_POPUP_CHECKOUT: DISABLED`
+- [ ] Backend Prisma migration 0004 deployed (alatpay_reference lifecycle columns exist):
+```bash
+cd /var/www/bells-payment/api
+npx prisma migrate status
+```
+→ should report 0 pending.
+
+### §B — Nginx CSP augmentation (REQUIRED BEFORE activating ALATPAY_USE_POPUP_CHECKOUT=true)
+
+The Express backend (src/app.ts) emits Helmet Content-Security-Policy headers with
+the origins listed below. However, the frontend Nginx (payment.bellsuniversity.edu.ng) also sets an **NGINX adds a CSP header at Nginx CSP header at line that currently does NOT include these origins. If you toggle the backend flag **first without updating
+the frontend Nginx CSP header, the browser will BLOCK the ALATPay SDK load and
+return a graceful error UI.
+
+AUTHORIZATION CHECKLIST BEFORE NGINX APPLY:
+```
+# payment.bellsuniversity.edu.ng.conf line 52 (Content-Security-Policy header):
+# Add to script-src:    https://web.alatpay.ng https://alatpay-client.azurewebsites.net
+# Add to frame-src:     https://web.alatpay.ng https://alatpay-client.azurewebsites.net
+# Add to child-src:    https://web.alatpay.ng https://alatpay-client.azurewebsites.net
+# Add to connect-src: https://alatpay.azure-api.net
+```
+After editing:
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### §C — Enable (authorize) ALATPAY_USE_POPUP_CHECKOUT in production (systemd env, NOT pm2)
+
+Production bells-payment-api runs under systemd. NOT pm2 (pm2 ecosystem.config.js describes an alternate deployment mode, not used in production).
+
+Find the systemd EnvironmentFile (commonly one of these paths — verify with `sudo systemctl cat bells-payment-api | grep -i environment):
+  • `/etc/systemd/system/bells-payment-api.service.d/env.conf`
+  • `/etc/systemd/system/bells-payment-api.service`
+
+Add (or edit) an Environment= line:
+```ini
+Environment="ALATPAY_USE_POPUP_CHECKOUT=true"
+```
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart bells-payment-api
+sudo systemctl status bells-payment-api --no-pager
+sudo journalctl -u bells-payment-api -n 50 --no-pager
+```
+Verify startup log line:
+  `[startup] ALATPAY_USE_POPUP_CHECKOUT: ENABLED`
+and do a ₦100 test payment (with real student → verify: browser opens ALATPay native modal (SDK loaded, paylink fallback suppressed payment settled, receipt generated, GL dr/cr pair).
+
+### §D — Rollback (if problems)
+
+ROLLBACK IS FAST — simple:
+```bash
+# 1) Disable the flag (or delete the Environment= line):
+#    → set ALATPAY_USE_POPUP_CHECKOUT=false  ← legacy Payment Link returns
+sudo nano /etc/systemd/system/bells-payment-api.service.d/env.conf   # edit env conf
+sudo systemctl daemon-reload
+sudo systemctl restart bells-payment-api
+# 2) Optional: revert nginx CSP to baseline (not strictly required; harmless to leave for when but best-practice keep a for a future attempt or keep).
+```
+After restart → backend startup log should show `[startup] ALATPAY_USE_POPUP_CHECKOUT: DISABLED`; initiatePayment response authorization_url returns to legacy paylink.alatpay.ng Payment Link.
+
+Note: The pm2 ecosystem.config.js documents an alternate deployment mode; do not modify or introduce it for production. Existing pm2 log/monitor commands in Day-2 Operations below remain valid if pm2 used in environments.
+
+---
+
 ## PHASE 10 — Day-2 Operations Runbook (keep at hand)
 
 | Task | Command |
@@ -338,6 +447,7 @@ For OFF-SITE backup (fire, theft, ransomware): nightly rclone → Bells Google W
 | Certbot dry-run | `sudo certbot renew --dry-run` |
 | Security updates | `sudo apt update && sudo unattended-upgrade --dry-run -d` |
 | Monthly backup restore test (NDPR audit!) | Restore last .sql.gz → new test DB; run `npx prisma validate` against restored DB schema |
+| Toggle ALATPAY native popup (systemd env) | Edit systemd Environment= flag → sudo systemctl daemon-reload → sudo systemctl restart bells-payment-api |
 
 ---
 

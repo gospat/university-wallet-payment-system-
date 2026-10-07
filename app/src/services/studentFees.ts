@@ -206,6 +206,56 @@ export type EnsureInvoiceForAssignmentResponse = {
   created: boolean;
 };
 
+export type AlatpayPublicBusiness = {
+  readonly id: string;
+  readonly businessId: string;
+  readonly name: string;
+  readonly logoUrl: string;
+};
+
+export type AlatpayPublicCheckoutMetadata = {
+  readonly bells_payment_reference: string;
+  readonly order_reference: string;
+  readonly init_payment_reference: string;
+};
+
+export type AlatpayPublicCheckoutFallback = {
+  readonly enableRedirect: false;
+  readonly enablePopup: true;
+  readonly handshakeTimeoutMs: number;
+};
+
+export type AlatpayPublicCheckout = {
+  readonly business: AlatpayPublicBusiness;
+  readonly amount: number;
+  readonly currency: 'NGN';
+  readonly autoCloseModal: boolean;
+  readonly email?: string;
+  readonly firstName?: string;
+  readonly lastName?: string;
+  readonly metadata: AlatpayPublicCheckoutMetadata;
+  readonly fallback: AlatpayPublicCheckoutFallback;
+};
+
+export type AlatpayRefs = {
+  readonly order_reference: string;
+  readonly init_payment_reference: string;
+};
+
+export type InitiatePaymentResponse = {
+  reference?: string;
+  authorization_url?: string;
+  checkoutUrl?: string;
+  access_code?: string;
+  providerReference?: string;
+  gateway_label?: string;
+  gatewayLabel?: string;
+  checkout_popup_mode?: 'hosted_url_iframe' | 'alatpay_native_modal_v1';
+  alatpay_public_checkout?: AlatpayPublicCheckout;
+  alatpay_refs?: AlatpayRefs;
+  [k: string]: any;
+};
+
 export const studentFeeApi = {
   schedule(): Promise<FeeScheduleResponse> {
     return api.get('/students/fees/schedule').then((r) => unwrap(r));

@@ -30,7 +30,7 @@ import { dispatchEmail } from '../queues/emailQueue';
 import { AdminNotificationService } from './adminNotification';
 import { SystemSettingsService } from './systemSettings';
 import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerFactory';
-import { gatewayLabel, VerifyPaymentOptions } from './payment/types';
+import { gatewayLabel, VerifyPaymentOptions, PaymentBreakdown, AlatpayPublicCheckout } from './payment/types';
 import { parseAlatpayCustomerMetadata } from '../utils/alatpay';
 
 type ReqLike = any;
@@ -303,7 +303,19 @@ export class PaymentService {
         details: { studentId, invoiceNumber: inv.invoiceNumber },
       });
 
-      return {
+      const base: {
+        authorization_url: string | null;
+        checkout_url: string | null;
+        access_code: string | null;
+        payment_reference: string;
+        expected_amount: number;
+        fee_breakdown: PaymentBreakdown;
+        gateway: PaymentGateway;
+        gateway_label: string;
+        checkout_popup_mode?: 'alatpay_native_modal_v1';
+        alatpay_public_checkout?: any;
+        alatpay_refs?: any;
+      } = {
         authorization_url: init?.checkoutUrl ?? init?.authorization_url ?? null,
         checkout_url: init?.checkoutUrl ?? init?.authorization_url ?? null,
         access_code: init?.access_code ?? init?.sessionId ?? null,
@@ -313,6 +325,22 @@ export class PaymentService {
         gateway: activeGateway,
         gateway_label: gatewayLabel(activeGateway, gatewayChannel),
       };
+      if (
+        activeGateway === PaymentGateway.ALATPAY &&
+        init &&
+        typeof init === 'object' &&
+        (init as any).alatpayPublicCheckout &&
+        process.env.ALATPAY_USE_POPUP_CHECKOUT === 'true'
+      ) {
+        const alatpayPublicCheckout = (init as any).alatpayPublicCheckout;
+        base.checkout_popup_mode = 'alatpay_native_modal_v1';
+        base.alatpay_public_checkout = alatpayPublicCheckout;
+        base.alatpay_refs = {
+          order_reference: (init as any).orderReference ?? null,
+          init_payment_reference: (init as any).initPaymentReference ?? null,
+        };
+      }
+      return base;
     } catch (err) {
       const rawErrMsg = (err as Error)?.message ?? '';
       try {

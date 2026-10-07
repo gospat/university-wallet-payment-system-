@@ -101,19 +101,40 @@ app.use((req, res, next) => {
 });
 
 // 1. Security Headers (strict production-grade)
+const alatpayPopupSdkOrigins = [
+  'https://web.alatpay.ng',
+  'https://alatpay-client.azurewebsites.net',
+];
+const alatpayPopupMerchantOrigin = 'https://alatpay.azure-api.net';
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: true,
     directives: {
       'default-src': ["'self'"],
-      'script-src': ["'self'"],
+      'script-src': ["'self'", ...alatpayPopupSdkOrigins],
       'style-src': ["'self'", "'unsafe-inline'"],
       'img-src': ["'self'", 'data:', 'https:'],
       'font-src': ["'self'", 'data:'],
       'frame-ancestors': ["'self'"],
-      'frame-src': ["'self'", 'https://*.paystack.co', 'https://*.paystack.com', 'https://*.wemabank.com', 'https://*.alat.ng', 'https://*.alathaba.ng'],
-      'child-src': ["'self'", 'https://*.paystack.co', 'https://*.paystack.com', 'https://*.wemabank.com', 'https://*.alat.ng', 'https://*.alathaba.ng'],
-      'connect-src': ["'self'", 'https:'],
+      'frame-src': [
+        "'self'",
+        'https://*.paystack.co',
+        'https://*.paystack.com',
+        'https://*.wemabank.com',
+        'https://*.alat.ng',
+        'https://*.alathaba.ng',
+        ...alatpayPopupSdkOrigins,
+      ],
+      'child-src': [
+        "'self'",
+        'https://*.paystack.co',
+        'https://*.paystack.com',
+        'https://*.wemabank.com',
+        'https://*.alat.ng',
+        'https://*.alathaba.ng',
+        ...alatpayPopupSdkOrigins,
+      ],
+      'connect-src': ["'self'", ...alatpayPopupSdkOrigins, alatpayPopupMerchantOrigin, 'https:'],
       'object-src': ["'none'"],
       'base-uri': ["'self'"],
       'form-action': ["'self'"],

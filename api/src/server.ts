@@ -244,6 +244,10 @@ async function bootstrap() {
   }
   scheduleTmpUploadPurge();
   httpServer = http.createServer(app);
+  const alatpayNativeModalMode = process.env.ALATPAY_USE_POPUP_CHECKOUT === 'true';
+  console.log(
+    `[startup] ALATPAY_USE_POPUP_CHECKOUT = ${alatpayNativeModalMode ? 'ENABLED (official ALATPay native modal/popup JS integration; payment-link fallback disabled when mode is active)' : 'DISABLED (legacy hosted Payment-Link mode for ALATPay)'}`,
+  );
   httpServer.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });

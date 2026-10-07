@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, ShieldCheck, X, CheckCircle2, AlertTriangle, ExternalLink } from 'lucide-react';
-import { studentFeeApi, type InvoiceDetailResponse } from '../services/studentFees';
+import { studentFeeApi, type AlatpayPublicCheckout, type AlatpayRefs, type InvoiceDetailResponse } from '../services/studentFees';
+import { launchAlatpayNativeModal } from '../utils/alatpayCheckout';
 
 const formatNgn = (n: number | string | null | undefined): string => {
   const v = Number(n ?? 0);
@@ -11,6 +12,8 @@ const formatNgn = (n: number | string | null | undefined): string => {
   }).format(v);
 };
 
+export type HostedCheckoutMode = 'hosted_url_iframe' | 'alatpay_native_modal_v1';
+
 export interface HostedCheckoutModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -20,9 +23,12 @@ export interface HostedCheckoutModalProps {
   amount?: number | string;
   reference?: string;
   onSuccessNavigate?: () => void;
+  checkoutMode?: HostedCheckoutMode;
+  alatpayNativeModal?: AlatpayPublicCheckout | null;
+  alatpayRefs?: AlatpayRefs | null;
 }
 
-type BodyMode = 'loading' | 'iframe' | 'closed';
+type BodyMode = 'loading' | 'iframe' | 'alatpay_native' | 'reported_verifying' | 'closed';
 
 type FetchedInvoiceState = {
   invoiceNumber: string | null;
@@ -43,6 +49,9 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
   amount,
   reference,
   onSuccessNavigate,
+  checkoutMode,
+  alatpayNativeModal,
+  alatpayRefs,
 }) => {
   const [mode, setMode] = useState<BodyMode>('loading');
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -50,9 +59,11 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
   const [polling, setPolling] = useState(false);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [fetchedInvoice, setFetchedInvoice] = useState<FetchedInvoiceState>(null);
+  const [alatpayNativeError, setAlatpayNativeError] = useState<{ code?: string; message: string } | null>(null);
   const pollIntervalRef = useRef<number | null>(null);
   const popupRef = useRef<Window | null>(null);
   const settledRef = useRef(false);
+  const launchedAlatpayRef = useRef(false);
 
   const clearPolling = useCallback(() => {
     if (pollIntervalRef.current !== null) {
@@ -119,18 +130,60 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     }
   }, [invoiceId]);
 
+  const runVerifyPaymentOnce = useCallback(async () => {
+    if (!reference || settledRef.current) return;
+    try {
+      const r = await studentFeeApi.verifyPayment(reference);
+      const rData = (r as any)?.data ?? r;
+      const verified = Boolean(rData?.verified ?? (rData as any)?.status === 'success');
+      if (verified) {
+        handleSuccess();
+      } else {
+        await runPoll();
+      }
+    } catch {
+      await runPoll();
+    }
+  }, [reference, runPoll, handleSuccess]);
+
   const forcePollOnce = useCallback(async () => {
     setPolling(true);
     try {
-      await runPoll();
+      if (checkoutMode === 'alatpay_native_modal_v1' && reference) {
+        await runVerifyPaymentOnce();
+      } else {
+        await runPoll();
+      }
     } finally {
       window.setTimeout(() => setPolling(false), 500);
     }
-  }, [runPoll]);
+  }, [checkoutMode, reference, runPoll, runVerifyPaymentOnce]);
 
   const markLoaded = useCallback(() => {
-    setMode('iframe');
-  }, []);
+    if (checkoutMode === 'alatpay_native_modal_v1') {
+      setMode('alatpay_native');
+    } else {
+      setMode('iframe');
+    }
+  }, [checkoutMode]);
+
+  const onReportTransaction = useCallback(() => {
+    if (settledRef.current) return;
+    setMode('reported_verifying');
+    setStatusType('info');
+    setStatusMessage('Payment reported. Verifying with our server…');
+    runVerifyPaymentOnce();
+    if (invoiceId && pollIntervalRef.current === null) {
+      pollIntervalRef.current = window.setInterval(() => {
+        runPoll();
+      }, 3000);
+    }
+    window.setTimeout(() => {
+      if (!settledRef.current) {
+        runVerifyPaymentOnce();
+      }
+    }, 3000);
+  }, [invoiceId, runPoll, runVerifyPaymentOnce]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -141,6 +194,8 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
       }
       popupRef.current = null;
       setFetchedInvoice(null);
+      setAlatpayNativeError(null);
+      launchedAlatpayRef.current = false;
       return;
     }
     setMode('loading');
@@ -148,10 +203,14 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     setShowCancelConfirm(false);
     settledRef.current = false;
     setFetchedInvoice(null);
+    setAlatpayNativeError(null);
+    launchedAlatpayRef.current = false;
 
     fetchInvoiceDetail();
 
-    if (typeof checkoutUrl === 'string' && checkoutUrl.startsWith('http')) {
+    const useAlatpayNative = checkoutMode === 'alatpay_native_modal_v1' && !!alatpayNativeModal;
+
+    if (!useAlatpayNative && typeof checkoutUrl === 'string' && checkoutUrl.startsWith('http')) {
       try {
         popupRef.current = window.open(
           checkoutUrl,
@@ -172,10 +231,28 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
       }, 3000);
     }
 
+    if (useAlatpayNative && alatpayNativeModal && !launchedAlatpayRef.current) {
+      launchedAlatpayRef.current = true;
+      launchAlatpayNativeModal(alatpayNativeModal, {
+        onReportTransaction: () => {
+          onReportTransaction();
+        },
+        onError: (err) => {
+          setAlatpayNativeError(err);
+          setMode('closed');
+          setStatusType('error');
+          setStatusMessage(err?.message || 'ALATPay native checkout unavailable. Please retry or try another provider.');
+        },
+        onClosed: () => {
+          if (settledRef.current) return;
+        },
+      }).catch(() => {});
+    }
+
     return () => {
       clearPolling();
     };
-  }, [isOpen, checkoutUrl, invoiceId, clearPolling, runPoll, markLoaded, fetchInvoiceDetail]);
+  }, [isOpen, checkoutUrl, invoiceId, checkoutMode, alatpayNativeModal, alatpayRefs, clearPolling, runPoll, markLoaded, fetchInvoiceDetail, onReportTransaction]);
 
   const handleCancelClick = () => {
     setShowCancelConfirm(true);
@@ -282,6 +359,88 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
             </div>
           )}
 
+          {(mode === 'alatpay_native' || mode === 'reported_verifying') && (
+            <div className="min-h-96 flex flex-col items-center justify-center px-6 py-16 text-center gap-5" style={{ minHeight: '55vh' }}>
+              <div className="mx-auto h-14 w-14 rounded-full flex items-center justify-center">
+                {mode === 'reported_verifying' ? (
+                  <div className="h-14 w-14 rounded-full bg-indigo-100 flex items-center justify-center">
+                    <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+                  </div>
+                ) : (
+                  <div className="h-14 w-14 rounded-full bg-emerald-100 flex items-center justify-center">
+                    <ShieldCheck className="h-8 w-8 text-emerald-600" />
+                  </div>
+                )}
+              </div>
+              <div className="max-w-md space-y-3 w-full">
+                <h3 className="text-lg font-bold text-gray-900">
+                  {mode === 'reported_verifying'
+                    ? 'Verifying payment with our server…'
+                    : 'ALATPay Native Checkout'}
+                </h3>
+                <p className="text-sm text-gray-600 leading-relaxed">
+                  {mode === 'reported_verifying'
+                    ? 'Your payment attempt has been reported. We are verifying with ALATPay — do not refresh.'
+                    : 'The native ALATPay checkout modal should be open in front of you. If you do not see it, click below or allow popups for this site.'}
+                </p>
+                {alatpayNativeError && (
+                  <div className="text-left text-xs bg-red-50 border border-red-200 text-red-800 rounded-lg p-3 space-y-1">
+                    <div className="font-semibold text-red-700">Checkout unavailable ({alatpayNativeError.code || 'ERROR'})</div>
+                    <div>{alatpayNativeError.message}</div>
+                  </div>
+                )}
+                {displayBalance > 0 && (
+                  <div className="inline-flex items-center px-4 py-1.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 text-base font-bold tabular-nums">
+                    {formatNgn(displayBalance)}
+                  </div>
+                )}
+                {displayInvoiceNumber && displayInvoiceNumber !== '' && displayInvoiceNumber !== 'undefined' && (
+                  <div className="text-xs text-gray-500 font-mono">
+                    Invoice #{displayInvoiceNumber}
+                  </div>
+                )}
+                {alatpayRefs?.order_reference && (
+                  <div className="text-xs text-gray-500 font-mono">
+                    Order ref: {alatpayRefs.order_reference}
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={forcePollOnce}
+                  disabled={polling}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60"
+                >
+                  {polling ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                  Verify status
+                </button>
+                {mode === 'alatpay_native' && !alatpayNativeError && alatpayNativeModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      launchedAlatpayRef.current = false;
+                      launchAlatpayNativeModal(alatpayNativeModal, {
+                        onReportTransaction: () => onReportTransaction(),
+                        onError: (err) => {
+                          setAlatpayNativeError(err);
+                          setMode('closed');
+                          setStatusType('error');
+                          setStatusMessage(err?.message || 'ALATPay native checkout unavailable. Please retry or try another provider.');
+                        },
+                      }).catch(() => {});
+                      launchedAlatpayRef.current = true;
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold border border-gray-200 bg-white hover:bg-gray-50 text-gray-800"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    Reopen checkout modal
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {mode === 'closed' && (
             <div className="min-h-96 flex items-center justify-center px-6 py-16">
               <div className="max-w-md w-full bg-white border border-gray-100 rounded-2xl p-8 text-center shadow-sm">
@@ -317,7 +476,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
                     {polling ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                     Verify status
                   </button>
-                  {typeof checkoutUrl === 'string' && checkoutUrl.startsWith('http') && (
+                  {checkoutMode !== 'alatpay_native_modal_v1' && typeof checkoutUrl === 'string' && checkoutUrl.startsWith('http') && (
                     <button
                       type="button"
                       onClick={() => {

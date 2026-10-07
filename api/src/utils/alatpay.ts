@@ -321,3 +321,240 @@ export function normalizeAlatStatus(status?: string | null): 'pending' | 'succes
   if (s === 'failed' || s === 'declined' || s === 'rejected' || s === 'cancelled' || s === 'canceled' || s === 'expired') return 'failed';
   return 'pending';
 }
+
+export class AlatpayPopupUnavailableError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super(message, 502, details);
+    this.name = 'AlatpayPopupUnavailableError';
+    Object.setPrototypeOf(this, AlatpayPopupUnavailableError.prototype);
+  }
+}
+
+const ALATPAY_DENY_KEY_REGEX =
+  /(^|[_\s\-.])(api[_-]?key|apikey|secret|secret[_-]?key|secretkey|token|password|passwd|private[_-]?key|subscription[_-]?key|ocp[-_]apim[-_]subscription[-_]key|authorization|auth|bearer|credential|credentials?|signing[_-]?key|webhook[_-]?secret|client[_-]?secret|callback[_-]?url|callbackurl|redirect[_-]?url|redirecturl|success[_-]?url|successurl|cancel[_-]?url|cancelurl|webhook[_-]?url|webhookurl|return[_-]?url|returnurl)$/i;
+
+const ALATPAY_DENY_VALUE_PREFIXES = [/^(bearer|basic)\s+/i, /^sk[_-]/i];
+const ALATPAY_DENY_VALUE_STARTS_WITH = ['Ocp-Apim'];
+
+function denyKeyMatch(key: string): boolean {
+  if (!key) return false;
+  return ALATPAY_DENY_KEY_REGEX.test(String(key));
+}
+
+function denyValueMatch(value: unknown): boolean {
+  if (typeof value !== 'string' || !value) return false;
+  for (const re of ALATPAY_DENY_VALUE_PREFIXES) if (re.test(value)) return true;
+  for (const prefix of ALATPAY_DENY_VALUE_STARTS_WITH) if (value.startsWith(prefix)) return true;
+  return false;
+}
+
+function scanRecursivelyForDeniedFields(node: unknown, trail: string[] = []): string | null {
+  if (node === null || node === undefined) return null;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      const hit = scanRecursivelyForDeniedFields(node[i], [...trail, `[${i}]`]);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof node === 'object') {
+    for (const rawKey of Object.keys(node as Record<string, unknown>)) {
+      if (denyKeyMatch(rawKey)) return `key=${rawKey} at ${[...trail, rawKey].join('.')}`;
+      const hit = scanRecursivelyForDeniedFields((node as Record<string, unknown>)[rawKey], [...trail, rawKey]);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (denyValueMatch(node)) return `value at ${trail.join('.') || '<root>'} matches credential pattern`;
+  return null;
+}
+
+export async function fetchAlatpayBusinessForPlugin(
+  businessId: string,
+  apiKey: string,
+  amountNgn: number,
+  currency = 'NGN',
+  passCharge = false,
+): Promise<unknown> {
+  if (!businessId || !String(businessId).trim()) {
+    throw new AlatpayPopupUnavailableError('ALATPay business identifier missing for native modal mode.');
+  }
+  if (!apiKey || !String(apiKey).trim()) {
+    throw new AlatpayPopupUnavailableError('ALATPay merchant API key missing for native modal mode.');
+  }
+  const base = getAlatpayBaseUrl();
+  const amountFinite = Number.isFinite(amountNgn) && amountNgn > 0 ? Number(amountNgn) : 0;
+  const params = new URLSearchParams({
+    'subscription-key': String(apiKey).trim(),
+    amount: String(amountFinite),
+    currency: currency && String(currency).trim() ? String(currency).trim() : 'NGN',
+  });
+  if (typeof passCharge === 'boolean') params.set('PassCharge', String(passCharge));
+  const url = `${base}/merchant-onboarding/api/v1/merchants/business-for-plugin/${encodeURIComponent(
+    String(businessId).trim(),
+  )}?${params.toString()}`;
+  try {
+    const axios = await import('axios');
+    const response = await axios.default.get(url, {
+      headers: {
+        Accept: 'application/json',
+        'Ocp-Apim-Subscription-Key': String(apiKey).trim(),
+      },
+      timeout: 7500,
+      responseType: 'json',
+    });
+    const payload = response?.data ?? null;
+    const scan = scanRecursivelyForDeniedFields(payload);
+    if (scan) {
+      throw new AlatpayPopupUnavailableError(
+        'ALATPay business-for-plugin response contained credential-like fields. Popup checkout mode aborted for safety. Contact ALATPay/WEMA merchant support and request a sanitized business-for-plugin schema, or disable ALATPAY_USE_POPUP_CHECKOUT to use legacy payment-link path.',
+        { detected: scan },
+      );
+    }
+    return payload;
+  } catch (error) {
+    if (error instanceof AlatpayPopupUnavailableError) throw error;
+    const axiosMsg = String((error as any)?.message ?? '').trim().slice(0, 180);
+    throw new AlatpayPopupUnavailableError(
+      'ALATPay native modal could not resolve merchant configuration. Please retry shortly or use Paystack.',
+      { upstream: axiosMsg },
+    );
+  }
+}
+
+export type AlatpayPublicBusiness = {
+  id: string;
+  businessId: string;
+  name: string;
+  logoUrl: string | null;
+};
+
+export type AlatpayPublicCheckoutMetadata = {
+  bells_payment_reference: string;
+  order_reference: string;
+  init_payment_reference: string;
+};
+
+export type AlatpayPublicCheckout = {
+  amount: number;
+  currency: 'NGN';
+  businessId: string;
+  business: AlatpayPublicBusiness;
+  autoCloseModal: true;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  metadata: AlatpayPublicCheckoutMetadata;
+  fallback: {
+    enableRedirect: false;
+    enablePopup: true;
+    handshakeTimeoutMs: 4500;
+  };
+};
+
+export function buildSanitizedAlatpayPublicCheckout(
+  rawBusinessResponse: unknown,
+  ctx: {
+    bellsRef: string;
+    orderRef: string;
+    initRef: string;
+    businessId: string;
+    amountNgn: number;
+    currency?: 'NGN';
+    email?: string;
+    firstName?: string;
+    lastName?: string;
+    phone?: string;
+  },
+): AlatpayPublicCheckout {
+  if (!ctx || typeof ctx !== 'object') {
+    throw new AlatpayPopupUnavailableError('ALATPay native modal context missing.');
+  }
+  const preScan = scanRecursivelyForDeniedFields(rawBusinessResponse);
+  if (preScan) {
+    throw new AlatpayPopupUnavailableError(
+      'ALATPay business-for-plugin response contained credential-like fields before sanitization. Popup checkout mode aborted for safety.',
+      { detected: preScan },
+    );
+  }
+  const body =
+    rawBusinessResponse !== null && rawBusinessResponse !== undefined && typeof rawBusinessResponse === 'object'
+      ? (rawBusinessResponse as Record<string, unknown>)
+      : null;
+  const data =
+    body && body.data !== null && body.data !== undefined && typeof body.data === 'object'
+      ? (body.data as Record<string, unknown>)
+      : body;
+  const pick = <T>(obj: Record<string, unknown> | null, key: string, fallback: T | null = null): unknown => {
+    if (!obj) return fallback;
+    const v = obj[key] ?? obj[key.toLowerCase()] ?? obj[key.toUpperCase()] ?? fallback;
+    return v;
+  };
+  const asString = (v: unknown): string | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    return null;
+  };
+  const id = asString(pick(data ?? ({} as Record<string, unknown>), 'id'));
+  const busId = asString(pick(data ?? ({} as Record<string, unknown>), 'businessId')) ?? String(ctx.businessId ?? '').trim();
+  const name = asString(pick(data ?? ({} as Record<string, unknown>), 'name')) ?? asString(pick(data ?? ({} as Record<string, unknown>), 'businessName'));
+  const logoRaw =
+    asString(pick(data ?? ({} as Record<string, unknown>), 'logoUrl')) ??
+    asString(pick(data ?? ({} as Record<string, unknown>), 'logo_url')) ??
+    asString(pick(data ?? ({} as Record<string, unknown>), 'logo'));
+  const logoUrl =
+    logoRaw && (logoRaw.startsWith('http://') || logoRaw.startsWith('https://') || logoRaw.startsWith('data:'))
+      ? logoRaw
+      : null;
+  if (!id || !busId || !name) {
+    throw new AlatpayPopupUnavailableError(
+      'ALATPay native modal received an incomplete merchant identity response. Expected business identifier, display name, and logo URL fields. Contact ALATPay/WEMA merchant support or disable ALATPAY_USE_POPUP_CHECKOUT to use legacy payment-link mode.',
+      { missing: [id ? null : 'business.data.id', busId ? null : 'business.data.businessId', name ? null : 'business.data.name'].filter(Boolean) },
+    );
+  }
+  const amountNgnClean = Number.isFinite(ctx.amountNgn) && ctx.amountNgn > 0 ? Number(ctx.amountNgn) : NaN;
+  if (!Number.isFinite(amountNgnClean)) {
+    throw new AlatpayPopupUnavailableError('ALATPay native modal received invalid amount.');
+  }
+  const bellsRef = ctx.bellsRef && String(ctx.bellsRef).trim() ? String(ctx.bellsRef).trim() : null;
+  const orderRef = ctx.orderRef && String(ctx.orderRef).trim() ? String(ctx.orderRef).trim() : null;
+  const initRef = ctx.initRef && String(ctx.initRef).trim() ? String(ctx.initRef).trim() : null;
+  if (!bellsRef || !orderRef || !initRef) {
+    throw new AlatpayPopupUnavailableError('ALATPay native modal correlation references incomplete.');
+  }
+  const emailClean =
+    ctx.email && String(ctx.email).trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(ctx.email).trim())
+      ? String(ctx.email).trim()
+      : `${bellsRef}@${getDefaultEmailDomain()}`;
+  const safe: AlatpayPublicCheckout = {
+    amount: amountNgnClean,
+    currency: 'NGN',
+    businessId: busId,
+    business: { id, businessId: busId, name, logoUrl },
+    autoCloseModal: true,
+    email: emailClean,
+    firstName: ctx.firstName && String(ctx.firstName).trim() ? String(ctx.firstName).trim() : undefined,
+    lastName: ctx.lastName && String(ctx.lastName).trim() ? String(ctx.lastName).trim() : undefined,
+    phone: ctx.phone && String(ctx.phone).trim() ? String(ctx.phone).trim() : undefined,
+    metadata: {
+      bells_payment_reference: bellsRef,
+      order_reference: orderRef,
+      init_payment_reference: initRef,
+    },
+    fallback: {
+      enableRedirect: false,
+      enablePopup: true,
+      handshakeTimeoutMs: 4500,
+    },
+  };
+  const postScan = scanRecursivelyForDeniedFields(safe);
+  if (postScan) {
+    throw new AlatpayPopupUnavailableError(
+      'ALATPay native modal sanitized checkout contained credential-like fields after sanitization. Aborted.',
+      { detected: postScan },
+    );
+  }
+  return safe;
+}

@@ -1,6 +1,37 @@
 import { Decimal } from '@prisma/client/runtime/library';
 import { TransactionStatus, PaymentGateway } from '@prisma/client';
 
+export type AlatpayPublicBusiness = {
+  id: string;
+  businessId: string;
+  name: string;
+  logoUrl: string | null;
+};
+
+export type AlatpayPublicCheckoutMetadata = {
+  bells_payment_reference: string;
+  order_reference: string;
+  init_payment_reference: string;
+};
+
+export type AlatpayPublicCheckout = {
+  amount: number;
+  currency: 'NGN';
+  businessId: string;
+  business: AlatpayPublicBusiness;
+  autoCloseModal: true;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  metadata: AlatpayPublicCheckoutMetadata;
+  fallback: {
+    enableRedirect: false;
+    enablePopup: true;
+    handshakeTimeoutMs: 4500;
+  };
+};
+
 export type PaymentBreakdown = {
   baseAmount: number;
   serviceCharge: number;
@@ -32,6 +63,7 @@ export type InitializeResult = {
   initPaymentReference?: string | null;
   feeBreakdown: PaymentBreakdown;
   channelsUsed?: string[] | null;
+  alatpayPublicCheckout?: AlatpayPublicCheckout;
   raw: any;
 };
 

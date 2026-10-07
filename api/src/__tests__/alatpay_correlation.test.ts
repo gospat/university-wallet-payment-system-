@@ -30,10 +30,35 @@ let paystackSuccess = true;
 let axiosGetCalls: any[][] = [];
 let axiosPostCalls: any[][] = [];
 
+let alatpayBusinessForPluginMock: (() => any) | null = null;
+let alatpayBusinessForPluginFails: boolean = false;
+
 jest.mock('axios', () => {
   const orig: any = jest.requireActual('axios');
   const mockedGet = jest.fn(async (url: string): Promise<any> => {
     axiosGetCalls.push([url]);
+    if (/business-for-plugin/.test(url)) {
+      if (alatpayBusinessForPluginFails) {
+        const err = new Error('upstream business-for-plugin mocked fail');
+        (err as any).response = { status: 500, data: { code: 'UPSTREAM_FAIL' } };
+        throw err;
+      }
+      const custom = alatpayBusinessForPluginMock ? alatpayBusinessForPluginMock() : null;
+      const fallback = {
+        status: 200,
+        data: {
+          status: true,
+          data: {
+            id: 'BUS-123456',
+            businessId: 'BUS-BELLS-001',
+            name: 'Bells University of Technology',
+            logoUrl: 'https://payment.bellsuniversity.edu.ng/branding/logo.png',
+          },
+          message: 'OK',
+        },
+      };
+      return custom ?? fallback;
+    }
     if (/paystack/.test(url)) {
       return {
         status: 200,
@@ -112,6 +137,8 @@ beforeEach(() => {
   paystackSuccess = true;
   axiosGetCalls = [];
   axiosPostCalls = [];
+  alatpayBusinessForPluginMock = null;
+  alatpayBusinessForPluginFails = false;
 });
 afterAll(() => {
   jest.unmock('axios');
@@ -476,6 +503,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   });
 
   it('T2 — webhook metadata.transaction_id finds the correct Bells transaction via Tier A', async () => {
+    try {
     const { prismaMock, txRows } = setupBaseMocks();
     txRows.push({
       id: 1234,
@@ -507,6 +535,10 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect('id' in locate).toBe(true);
     expect((locate as any).id).toBe(1234);
     expect((locate as any).reference).toBe(BELLS_REF);
+    } catch (e: any) {
+      console.error('T2 ERROR:', e && e.message, '\n', e && e.stack);
+      throw e;
+    }
   });
 
   it('T3 — final UUID != initialization paymentReference (distinct identity)', async () => {
@@ -1218,5 +1250,331 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     const V1_UUID = '00000000-0000-1000-8000-000000000000'; // variant=8 but version=1
     expect(isAlatpayUuid(V1_UUID)).toBe(false);
     expect(selectAlatpayFinalTxId({ Value: { Data: { Id: V1_UUID } } }, null)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // T25 — alatpayPublicCheckout: minimal proven schema only.
+  //       The sanitized browser payload MUST contain ONLY the 4-field
+  //       AlatpayPublicBusiness (exact Object.keys count = 4) and the
+  //       explicitly typed top-level fields. No unknowns, no spread, no
+  //       passthrough of undocumented provider response.
+  // -------------------------------------------------------------------------
+  it('T25 — alatpayPublicCheckout minimal schema: business Object.keys = exactly 4, no extra fields', async () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    setupBaseMocks();
+    const alatpayUtils = require('../utils/alatpay');
+    // Helper directly (unit-level):
+    const sanitized = alatpayUtils.buildSanitizedAlatpayPublicCheckout(
+      {
+        status: true,
+        data: {
+          id: 'BUS-123456',
+          businessId: 'BUS-BELLS-001',
+          name: 'Bells University of Technology',
+          logoUrl: 'https://payment.bellsuniversity.edu.ng/branding/logo.png',
+          // Extra fields that the builder MUST drop (not throw):
+          extraFieldA: 'must-be-dropped',
+          nestedIgnored: { hello: 'world' },
+        },
+      },
+      {
+        bellsRef: BELLS_REF,
+        orderRef: ORDER_REF,
+        initRef: INIT_REF,
+        businessId: 'BUS-BELLS-001',
+        amountNgn: 100,
+        currency: 'NGN',
+        email: 'student@example.com',
+        firstName: 'Ade',
+        lastName: 'Bola',
+      },
+    );
+    // 4-field strictness on business object:
+    expect(Object.keys(sanitized.business).sort()).toEqual(['businessId', 'id', 'logoUrl', 'name'].sort());
+    expect(Object.keys(sanitized.business).length).toBe(4);
+    expect(sanitized.business.id).toBe('BUS-123456');
+    expect(sanitized.business.businessId).toBe('BUS-BELLS-001');
+    expect(sanitized.business.name).toBe('Bells University of Technology');
+    expect(sanitized.business.logoUrl).toBe('https://payment.bellsuniversity.edu.ng/branding/logo.png');
+    // Extra fields not copied:
+    expect((sanitized.business as any).extraFieldA).toBeUndefined();
+    expect((sanitized.business as any).nestedIgnored).toBeUndefined();
+    // Top-level type shape:
+    expect(sanitized.amount).toBe(100);
+    expect(sanitized.currency).toBe('NGN');
+    expect(sanitized.autoCloseModal).toBe(true);
+    expect(sanitized.email).toBe('student@example.com');
+    expect(sanitized.firstName).toBe('Ade');
+    expect(sanitized.lastName).toBe('Bola');
+    expect(sanitized.metadata.bells_payment_reference).toBe(BELLS_REF);
+    expect(sanitized.metadata.order_reference).toBe(ORDER_REF);
+    expect(sanitized.metadata.init_payment_reference).toBe(INIT_REF);
+    expect(sanitized.fallback.enableRedirect).toBe(false);
+    expect(sanitized.fallback.enablePopup).toBe(true);
+    expect(sanitized.fallback.handshakeTimeoutMs).toBe(4500);
+    // NO credential fields anywhere in sanitized (top-level):
+    const jsonFlat = JSON.stringify(sanitized);
+    expect(jsonFlat).not.toMatch(/api[_-]?key/i);
+    expect(jsonFlat).not.toMatch(/subscription[_-]?key/i);
+    expect(jsonFlat).not.toMatch(/secret/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // T26 (a..f) — Recursive credential-leak guard suite.
+  //   a) apiKey top-level                       => ABORT 502 no checkoutUrl
+  //   b) data.settings.subscriptionKey 2-deep   => ABORT
+  //   c) data.configs[0].webhookSecret (array)  => ABORT
+  //   d) string value "Bearer abc" anywhere     => ABORT
+  //   e) key == "Ocp-Apim-Subscription-Key"     => ABORT
+  //   f) Paystack initiateResponse = byte identical (no env bleed to other gateway)
+  // -------------------------------------------------------------------------
+  it('T26a — deny: apiKey at provider top-level => AlatpayPopupUnavailableError thrown', () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const { buildSanitizedAlatpayPublicCheckout, AlatpayPopupUnavailableError } = require('../utils/alatpay');
+    const raw = { status: true, data: { id: 'a', businessId: 'b', name: 'c', logoUrl: 'https://x/y.png' }, apiKey: 'sk-leaked-xyz' };
+    expect(() =>
+      buildSanitizedAlatpayPublicCheckout(raw, {
+        bellsRef: BELLS_REF,
+        orderRef: ORDER_REF,
+        initRef: INIT_REF,
+        businessId: 'BUS-BELLS-001',
+        amountNgn: 100,
+      }),
+    ).toThrow(AlatpayPopupUnavailableError);
+  });
+
+  it('T26b — deny: nested data.settings.subscriptionKey 2 levels => Abort', () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const { buildSanitizedAlatpayPublicCheckout, AlatpayPopupUnavailableError } = require('../utils/alatpay');
+    const raw = {
+      status: true,
+      data: {
+        id: 'a',
+        businessId: 'b',
+        name: 'c',
+        logoUrl: 'https://x/y.png',
+        settings: {
+          subscriptionKey: 'SECRET-LEAKED-VALUE',
+        },
+      },
+    };
+    expect(() =>
+      buildSanitizedAlatpayPublicCheckout(raw, {
+        bellsRef: BELLS_REF,
+        orderRef: ORDER_REF,
+        initRef: INIT_REF,
+        businessId: 'BUS-BELLS-001',
+        amountNgn: 100,
+      }),
+    ).toThrow(AlatpayPopupUnavailableError);
+  });
+
+  it('T26c — deny: array-of-objects webhookSecret nested => Abort', () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const { buildSanitizedAlatpayPublicCheckout, AlatpayPopupUnavailableError } = require('../utils/alatpay');
+    const raw = {
+      status: true,
+      data: {
+        id: 'a',
+        businessId: 'b',
+        name: 'c',
+        logoUrl: 'https://x/y.png',
+        configs: [
+          { id: 1 },
+          { webhookSecret: 'SENSITIVE-VALUE-LEAKED', name: 'x' },
+        ],
+      },
+    };
+    expect(() =>
+      buildSanitizedAlatpayPublicCheckout(raw, {
+        bellsRef: BELLS_REF,
+        orderRef: ORDER_REF,
+        initRef: INIT_REF,
+        businessId: 'BUS-BELLS-001',
+        amountNgn: 100,
+      }),
+    ).toThrow(AlatpayPopupUnavailableError);
+  });
+
+  it('T26d — deny: string value "Bearer abc" anywhere (value sniff) => Abort', () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const { buildSanitizedAlatpayPublicCheckout, AlatpayPopupUnavailableError } = require('../utils/alatpay');
+    const raw = {
+      status: true,
+      data: {
+        id: 'a',
+        businessId: 'b',
+        name: 'c',
+        logoUrl: 'https://x/y.png',
+        meta: {
+          token: 'Bearer abc123xyz',
+        },
+      },
+    };
+    expect(() =>
+      buildSanitizedAlatpayPublicCheckout(raw, {
+        bellsRef: BELLS_REF,
+        orderRef: ORDER_REF,
+        initRef: INIT_REF,
+        businessId: 'BUS-BELLS-001',
+        amountNgn: 100,
+      }),
+    ).toThrow(AlatpayPopupUnavailableError);
+  });
+
+  it('T26e — deny: key == Ocp-Apim-Subscription-Key => Abort', () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const { buildSanitizedAlatpayPublicCheckout, AlatpayPopupUnavailableError } = require('../utils/alatpay');
+    const raw = {
+      status: true,
+      data: {
+        id: 'a',
+        businessId: 'b',
+        name: 'c',
+        logoUrl: 'https://x/y.png',
+      },
+    };
+    (raw as any)['Ocp-Apim-Subscription-Key'] = 'very-secret';
+    expect(() =>
+      buildSanitizedAlatpayPublicCheckout(raw, {
+        bellsRef: BELLS_REF,
+        orderRef: ORDER_REF,
+        initRef: INIT_REF,
+        businessId: 'BUS-BELLS-001',
+        amountNgn: 100,
+      }),
+    ).toThrow(AlatpayPopupUnavailableError);
+  });
+
+  it('T26f — Paystack byte-equivalent: env flag on ALATPAY does NOT alter Paystack initiate shape', async () => {
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    setupBaseMocks();
+    process.env.ALATPAY_BUSINESS_ID = undefined as any;
+    const prisma = require('@prisma/client');
+    prisma.Prisma = { ...(prisma.Prisma ?? {}), Decimal: class D { constructor(n: any) { (this as any).n = n; } toNumber() { return Number((this as any).n); } toString() { return String((this as any).n); } } };
+    // Compare:
+    const cases = [
+      async (ALATPAY_FLAG: string | undefined) => {
+        process.env.ALATPAY_USE_POPUP_CHECKOUT = ALATPAY_FLAG;
+        const PaystackProvider = require('../services/payment/providers/paystackProvider').PaystackProvider;
+        const provider = new PaystackProvider();
+        const init = await provider.initialize(
+          'student@example.com',
+          100,
+          { reference: 'PAY-STACK-COMPARE-001', callbackUrl: 'https://example.com/cb' },
+        );
+        return JSON.stringify({
+          checkoutUrl: init.checkoutUrl,
+          authorization_url: init.authorization_url,
+          access_code: init.access_code,
+          providerReference: init.providerReference,
+          orderReference: init.orderReference ?? null,
+          initPaymentReference: init.initPaymentReference ?? null,
+          alatpayPublicCheckout: (init as any).alatpayPublicCheckout ?? null,
+        });
+      },
+    ];
+    const payFlagFalse = await cases[0](undefined);
+    const payFlagTrue = await cases[0]('true');
+    expect(payFlagTrue).toBe(payFlagFalse);
+  });
+
+  // -------------------------------------------------------------------------
+  // T27 — Idempotency (sequential): verifyPayment x2 + webhook-style call
+  //       → single receipt + one GL dr/cr pair.
+  // -------------------------------------------------------------------------
+  it('T27 — verify x2 + webhook sequentially => NO duplicate receipt/GL (idempotent)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 1234,
+      reference: BELLS_REF,
+      status: 'PENDING',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 0,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      alatpayCheckoutUrl: CHECKOUT_URL,
+      metadata: { amount: { total: 100, base: 100, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const v1 = await PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 1234 });
+    const v2 = await PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 1234 });
+    const v3 = await PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 1234 });
+    expect(v1.verified).toBe(true);
+    expect(v2.verified).toBe(true);
+    expect(v3.verified).toBe(true);
+    expect(receiptRows.length).toBe(1);
+    expect(glRows.filter((g) => g.entryType === 'PAYMENT_SUCCESS').length).toBe(2);
+    const dr = glRows
+      .filter((g) => (g.meta as any)?.side === 'DEBIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    const cr = glRows
+      .filter((g) => (g.meta as any)?.side === 'CREDIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    expect(Number(dr.toFixed(2))).toBe(100);
+    expect(Number(cr.toFixed(2))).toBe(100);
+    const inv = invoiceRows.find((i) => i.id === 55)!;
+    expect(Number(inv.amountPaid)).toBe(100);
+  });
+
+  // -------------------------------------------------------------------------
+  // T28 — Historical row immutability: verifyPayment on a SUCCESS row
+  //       matching PAY-20261007-WZR760 shape => 0 mutations / no new receipt.
+  // -------------------------------------------------------------------------
+  it('T28 — historical SUCCESS tx (PAY-20261007-WZR760 shape) unchanged by verify (idempotent 0 update)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    invoiceRows.push({ id: 77, invoiceNumber: 'INV-HIST-77', studentId: 88, amountDue: 50000, amountPaid: 50000, status: 'PAID', session: '2025/2026' });
+    txRows.push({
+      id: 777,
+      reference: BELLS_REF,
+      status: 'SUCCESS',
+      userId: 88,
+      invoiceId: 77,
+      expectedAmount: 50000,
+      amount: 50000,
+      gateway: 'ALATPAY',
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpaySessionId: SESSION_ID,
+      alatpayFinalTransactionId: FINAL_UUID,
+      alatpayCheckoutUrl: CHECKOUT_URL,
+      createdAt: new Date('2026-10-07T10:00:00Z'),
+      updatedAt: new Date('2026-10-07T10:10:00Z'),
+      metadata: { amount: { total: 50000, base: 50000, serviceCharge: 0, gatewayFee: 0 } },
+    });
+    alatAmount = 50000;
+    const snapshotBefore = JSON.stringify({
+      txAmount: txRows[0].amount,
+      txStatus: txRows[0].status,
+      txUpdatedAt: txRows[0].updatedAt.getTime(),
+      invPaid: invoiceRows[0].amountPaid,
+      invStatus: invoiceRows[0].status,
+      receipts: receiptRows.length,
+      glCount: glRows.length,
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const r = await PaymentService.verifyPayment(BELLS_REF, {
+      providerReference: FINAL_UUID,
+      expectedTransactionId: 777,
+    } as any);
+    const snapshotAfter = JSON.stringify({
+      txAmount: txRows[0].amount,
+      txStatus: txRows[0].status,
+      txUpdatedAt: txRows[0].updatedAt.getTime(),
+      invPaid: invoiceRows[0].amountPaid,
+      invStatus: invoiceRows[0].status,
+      receipts: receiptRows.length,
+      glCount: glRows.length,
+    });
+    expect(r.verified).toBe(true);
+    expect(snapshotAfter).toBe(snapshotBefore);
+    expect(receiptRows.length).toBe(0);
+    expect(glRows.length).toBe(0);
   });
 });

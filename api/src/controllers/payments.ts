@@ -10,13 +10,26 @@ import { catchAsync } from '../utils/catchAsync';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { ConfirmPayloadService, InitiatePaymentSchema, PaymentService } from '../services/payment';
 import { z } from 'zod';
+import { AlatpayPopupUnavailableError } from '../utils/alatpay';
 
 export const initiatePaymentValidator = validateBody(InitiatePaymentSchema);
 
 export const initiatePayment = catchAsync(async (req: Request, res: Response) => {
   const studentId = Number((req as any).user?.id);
-  const result = await PaymentService.initiatePayment(studentId, req.body as any, req);
-  res.status(200).json({ status: 'success', data: result });
+  try {
+    const result = await PaymentService.initiatePayment(studentId, req.body as any, req);
+    res.status(200).json({ status: 'success', data: result });
+  } catch (err) {
+    if (err instanceof AlatpayPopupUnavailableError) {
+      res.status(502).json({
+        status: 'error',
+        code: 'ALATPAY_POPUP_UNAVAILABLE',
+        message: 'ALATPay checkout is temporarily unavailable. Please retry shortly or use Paystack.',
+      });
+      return;
+    }
+    throw err;
+  }
 });
 
 const VerifyParamSchema = z.object({ ref: z.string().min(1).max(255).trim() });
