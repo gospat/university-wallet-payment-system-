@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { MemoryStore } from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { getRedis } from './config/redis';
 import { globalErrorHandler } from './middlewares/error';
@@ -24,6 +24,7 @@ import client from 'prom-client';
 import { getQueueHealth } from './config/queue';
 import { publicVerifyReceipt } from './controllers/receipt';
 import { buildBranding, brandingEnvOnly } from './utils/branding';
+import { normalizeLuaArrayResult } from './utils/rateLimitRedis';
 
 const app = express();
 
@@ -36,7 +37,130 @@ app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 1 ? 
 // 2.1 Rate Limit Redis-backed shared store (cluster-safe, survives PM2 reloads & restarts)
 //    Falls back to the default in-memory MemoryStore only if Redis is temporarily unavailable.
 //    Fail-open design: if Redis flakes mid-request, we MUST NOT crash the whole request pipeline.
-function buildRateLimitStore(prefix: string) {
+//
+// rate-limit-redis@4.3.1 expects `sendCommand(...command)` to return:
+//   * for ["SCRIPT", "LOAD", scriptSrc]          -> SHA1 string  (40 chars, hex)
+//   * for ["EVALSHA", sha, "1", key, ...args]    -> two-element array [totalHits, timeToExpireMs]
+//   * for ["EVAL",    src, "1", key, ...args]    -> two-element array [totalHits, timeToExpireMs]
+//   * for ["DECR", key], ["DEL", key]            -> ignored by library (void)
+//
+// ioredis `.call(...command)` returns Promise<unknown>.
+//   * Lua `return { number, number }` becomes a JS array in ioredis 5.x on RESP3 but
+//     elements may be strings/buffers depending on RESP mode & Redis server version.
+//     We coerce the two-element result into [int, int] explicitly before returning it.
+//   * If ioredis throws (network blip, connection reset), we cannot return an
+//     invalid/undefined value because rate-limit-redis/lib will throw
+//     `TypeError: Expected result to be array of values` from parseScriptResponse and
+//     turn an otherwise legitimate request (e.g. a payment webhook) into HTTP 500.
+//     Strategy: wrap the RedisStore so increment/get/decrement/resetKey that fail fall back to
+//     a companion in-process MemoryStore for this request. This keeps counters
+//     "best effort shared" when Redis is healthy, degrades to in-process when Redis is
+//     transiently down, and NEVER crashes the rate-limit middleware.
+
+/**
+ * Wrap a RedisStore with a per-request fallback MemoryStore.
+ *
+ * rate-limit-redis store methods may throw if the Redis transport
+ * errors / returns unexpected shapes. A throw here propagates through
+ * express-rate-limit straight into the global error handler as HTTP 500.
+ *
+ * We catch those throws and forward the operation to a small in-process
+ * MemoryStore (per limiter instance). Behavior:
+ *   Redis healthy   -> distributed shared counters.
+ *   Redis transient -> per-process counters (no shared, but request
+ *                      still reaches the route; rate-limits "best effort").
+ *   NEVER throws -> never 500.
+ */
+function wrapStoreResilient(redisStore: InstanceType<typeof RedisStore>, prefix: string, defaultWindowMs: number) {
+  const inMem = new MemoryStore();
+  // MemoryStore is lazy-initiated. express-rate-limit will call init(options)
+  // with the configured windowMs on middleware setup. We mirror windowMs here.
+  let mirrorWindowMs = defaultWindowMs;
+  const forward = (fn: string, key: string, onMem: () => any, onRedis: () => any) => {
+    try {
+      const promiseOrResult = onRedis();
+      if (promiseOrResult && typeof (promiseOrResult as any).then === 'function') {
+        return (promiseOrResult as Promise<any>).catch((err: unknown) => {
+          if (!(globalThis as any).__rlStoreWrapWarnedOnce) {
+            (globalThis as any).__rlStoreWrapWarnedOnce = true;
+            console.warn(
+              `[rate-limit] RedisStore.${fn} failed for limiter=${prefix}; degrading to in-process MemoryStore for this call. err=${String(
+                (err as Error)?.message ?? err,
+              )}`,
+            );
+          }
+          return onMem();
+        });
+      }
+      return promiseOrResult;
+    } catch (err) {
+      if (!(globalThis as any).__rlStoreWrapWarnedOnce) {
+        (globalThis as any).__rlStoreWrapWarnedOnce = true;
+        console.warn(
+          `[rate-limit] RedisStore.${fn} sync-failed for limiter=${prefix}; degrading to MemoryStore. err=${String(
+            (err as Error)?.message ?? err,
+          )}`,
+        );
+      }
+      return onMem();
+    }
+  };
+  return {
+    init(options: any) {
+      mirrorWindowMs = Number(options?.windowMs) || defaultWindowMs;
+      try { (redisStore as any).init?.(options); } catch { /* ignore */ }
+      try { (inMem as any).init?.(options); } catch { /* ignore */ }
+    },
+    increment(key: string) {
+      return forward(
+        'increment',
+        key,
+        () => (inMem as any).increment(key),
+        () => (redisStore as any).increment(key),
+      );
+    },
+    decrement(key: string) {
+      return forward(
+        'decrement',
+        key,
+        () => { try { (inMem as any).decrement?.(key); } catch { /* noop */ } return undefined; },
+        () => (redisStore as any).decrement(key),
+      );
+    },
+    resetKey(key: string) {
+      return forward(
+        'resetKey',
+        key,
+        () => { try { (inMem as any).resetKey?.(key); } catch { /* noop */ } return undefined; },
+        () => (redisStore as any).resetKey(key),
+      );
+    },
+    get(key: string) {
+      return forward(
+        'get',
+        key,
+        () => (inMem as any).get(key),
+        () => (redisStore as any).get(key),
+      );
+    },
+    shutdown() {
+      try { (inMem as any).shutdown?.(); } catch { /* ignore */ }
+      try { (redisStore as any).shutdown?.(); } catch { /* ignore */ }
+    },
+  };
+}
+
+/**
+ * Build a rate-limit store (for a specific prefix).
+ * - If Redis is healthy at construction -> RedisStore + resilient wrapper
+ *   (degrades to in-memory on transport errors, never throws into middleware).
+ * - If Redis is NOT ready -> undefined; callers fall back to default in-memory MemoryStore.
+ *
+ * Contract with rate-limit-redis@4.3.1 is honoured EXACTLY:
+ *   - SCRIPT LOAD returns string (SHA1).
+ *   - EVALSHA/EVAL returns two-element number-array, never Buffer, never undefined.
+ */
+function buildRateLimitStore(prefix: string, defaultWindowMs = 60_000) {
   let redis: ReturnType<typeof getRedis> | null = null;
   try {
     redis = getRedis() || null;
@@ -55,23 +179,41 @@ function buildRateLimitStore(prefix: string) {
   console.info(
     `[rate-limit] limiter=${limiterName} store=RedisStore  — redis.status="ready" at construction time. Counters are cluster-shared across workers and survive hot reloads.`,
   );
-  return new RedisStore({
+  const r = redis as any;
+  const redisStore = new RedisStore({
     prefix,
-    sendCommand: async (...args: string[]) => {
-      if (!redis) return undefined as any;
+    sendCommand: async (...command: string[]) => {
+      if (!r) {
+        // Should not happen (redisReadyNow), but defensive: return compliant sentinel.
+        if (command[0]?.toUpperCase() === 'SCRIPT') return '0'.repeat(40);
+        return [1, defaultWindowMs];
+      }
+      const cmd0 = command[0]?.toUpperCase() ?? '';
       try {
-        return await (redis as any).call(...args);
-      } catch (sendErr: any) {
-        if (!(globalThis as any).__rlWarnedOnce) {
-          (globalThis as any).__rlWarnedOnce = true;
-          console.warn(
-            `[rate-limit] Redis sendCommand failed for limiter=${prefix} (silently ignoring this increment; transient). err=${String(sendErr?.message ?? sendErr)}`,
-          );
+        // ioredis .call("SCRIPT", "LOAD", src) returns SHA1 as a string directly.
+        // ioredis .call("EVALSHA", sha, "1", key, a, b) returns the Lua array as-is.
+        const raw = await r.call(...command);
+        if (cmd0 === 'SCRIPT') {
+          // Expect SHA1 string, 40 lowercase hex chars. Accept only strings.
+          if (typeof raw === 'string' && /^[0-9a-f]{40}$/i.test(raw)) return raw;
+          if (typeof raw === 'string') return raw;
+          if (Buffer.isBuffer(raw)) return raw.toString('utf8');
+          // SCRIPT LOAD broken transport? throw -> handled by wrapper.
+          throw new TypeError(`SCRIPT LOAD returned non-string reply: ${typeof raw}`);
         }
-        return undefined as any;
+        if (cmd0 === 'EVALSHA' || cmd0 === 'EVAL') {
+          // Always normalize to [number, number] tuple.
+          return normalizeLuaArrayResult(raw, defaultWindowMs);
+        }
+        // DECR / DEL: library ignores the return value.
+        return raw;
+      } catch (callErr: any) {
+        // Re-throw so the resilient wrapper can route this increment/get into MemoryStore.
+        throw callErr;
       }
     },
   });
+  return wrapStoreResilient(redisStore, prefix, defaultWindowMs);
 }
 
 // Force HTTPS redirect (skip in dev/test; allow /health endpoints over HTTP for k8s probes)
