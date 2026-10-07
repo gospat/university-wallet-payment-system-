@@ -91,10 +91,7 @@ export function getAlatpayBaseUrl(): string {
   if (override && String(override).trim().startsWith('http')) {
     return String(override).trim().replace(/\/$/, '');
   }
-  const mode = process.env.ALATPAY_MODE === 'prod' ? 'prod' : 'sandbox';
-  return mode === 'sandbox'
-    ? 'https://apibox.alatpay.ng'
-    : 'https://alatpay.ng';
+  return 'https://apibox.alatpay.ng';
 }
 
 export function getAlatpayWebhookSecret(): string {

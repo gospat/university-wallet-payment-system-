@@ -250,26 +250,37 @@ test('I. frontend label neutral fallback + pay button disabled-flight guard (cov
   expect(neutralFallback.toLowerCase()).not.toContain('alatpay');
 });
 
-// J. ALATPAY diagnostics: sanitized output includes NO secrets; getAlatpayBaseUrl mode split is correct
-test('J. sanitized ALATPAY tooling: getAlatpayBaseUrl splits sandbox/prod, never exposes key via URL', () => {
-  // Override env temporarily
-  const saved = process.env.ALATPAY_MODE;
+// J. ALATPAY diagnostics: sanitized output includes NO secrets;
+//    getAlatpayBaseUrl returns the single officially-documented host
+//    `https://apibox.alatpay.ng` for both supported integration modes.
+//    Override via ALATPAY_BASE_URL is still honored if set.
+test('J. sanitized ALATPAY tooling: getAlatpayBaseUrl returns documented host apibox.alatpay.ng, never exposes keys', () => {
+  // Override env temporarily — remove base URL overrides so we test the documented default.
   const savedOverride = process.env.ALATPAY_BASE_URL;
   const savedWemaOverride = process.env.WEMA_ALATPAY_BASE_URL;
   delete process.env.ALATPAY_BASE_URL;
   delete process.env.WEMA_ALATPAY_BASE_URL;
-
-  process.env.ALATPAY_MODE = 'sandbox';
-  expect(getAlatpayBaseUrl()).toBe('https://apibox.alatpay.ng');
-  process.env.ALATPAY_MODE = 'prod';
-  expect(getAlatpayBaseUrl()).toBe('https://alatpay.ng');
-  // No secret / key embedded in URL (URLs should be base host only)
-  const u = getAlatpayBaseUrl();
-  expect(u).not.toMatch(/key|secret|auth|password/i);
-  // Restore
-  process.env.ALATPAY_MODE = saved ?? '';
-  if (savedOverride) process.env.ALATPAY_BASE_URL = savedOverride;
-  if (savedWemaOverride) process.env.WEMA_ALATPAY_BASE_URL = savedWemaOverride;
+  const savedMode = process.env.ALATPAY_MODE;
+  try {
+    // Documented default: same host regardless of mode flag when no override present.
+    process.env.ALATPAY_MODE = 'sandbox';
+    expect(getAlatpayBaseUrl()).toBe('https://apibox.alatpay.ng');
+    process.env.ALATPAY_MODE = 'prod';
+    expect(getAlatpayBaseUrl()).toBe('https://apibox.alatpay.ng');
+    // No secret / key embedded in URL (URLs should be base host only).
+    const u = getAlatpayBaseUrl();
+    expect(u).not.toMatch(/key|secret|auth|password/i);
+    // Override escape hatch still takes precedence over documented default.
+    process.env.ALATPAY_BASE_URL = '  https://override.example.com/  ';
+    expect(getAlatpayBaseUrl()).toBe('https://override.example.com');
+  } finally {
+    // Restore
+    process.env.ALATPAY_MODE = savedMode ?? '';
+    if (savedOverride) process.env.ALATPAY_BASE_URL = savedOverride;
+    else delete process.env.ALATPAY_BASE_URL;
+    if (savedWemaOverride) process.env.WEMA_ALATPAY_BASE_URL = savedWemaOverride;
+    else delete process.env.WEMA_ALATPAY_BASE_URL;
+  }
 });
 
 // K. Extra: globalErrorHandler production → no stack trace / SQL exposure
