@@ -64,6 +64,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
   const popupRef = useRef<Window | null>(null);
   const settledRef = useRef(false);
   const launchedAlatpayRef = useRef(false);
+  const lastProviderFinalTxIdRef = useRef<string | null>(null);
 
   const clearPolling = useCallback(() => {
     if (pollIntervalRef.current !== null) {
@@ -133,7 +134,9 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
   const runVerifyPaymentOnce = useCallback(async () => {
     if (!reference || settledRef.current) return;
     try {
-      const r = await studentFeeApi.verifyPayment(reference);
+      const r = await studentFeeApi.verifyPayment(reference, {
+        providerReference: lastProviderFinalTxIdRef.current,
+      });
       const rData = (r as any)?.data ?? r;
       const verified = Boolean(rData?.verified ?? (rData as any)?.status === 'success');
       if (verified) {
@@ -167,8 +170,17 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     }
   }, [checkoutMode]);
 
-  const onReportTransaction = useCallback(() => {
+  const onReportTransaction = useCallback((ctx: {
+    bellsReference: string;
+    orderReference: string;
+    initPaymentReference: string;
+    providerTx: unknown;
+    extractedFinalTxId: string | null;
+  }) => {
     if (settledRef.current) return;
+    if (ctx?.extractedFinalTxId && typeof ctx.extractedFinalTxId === 'string') {
+      lastProviderFinalTxIdRef.current = ctx.extractedFinalTxId.trim();
+    }
     setMode('reported_verifying');
     setStatusType('info');
     setStatusMessage('Payment reported. Verifying with our server…');
@@ -196,6 +208,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
       setFetchedInvoice(null);
       setAlatpayNativeError(null);
       launchedAlatpayRef.current = false;
+      lastProviderFinalTxIdRef.current = null;
       return;
     }
     setMode('loading');
@@ -205,6 +218,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     setFetchedInvoice(null);
     setAlatpayNativeError(null);
     launchedAlatpayRef.current = false;
+    lastProviderFinalTxIdRef.current = null;
 
     fetchInvoiceDetail();
 
@@ -234,8 +248,8 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
     if (useAlatpayNative && alatpayNativeModal && !launchedAlatpayRef.current) {
       launchedAlatpayRef.current = true;
       launchAlatpayNativeModal(alatpayNativeModal, {
-        onReportTransaction: () => {
-          onReportTransaction();
+        onReportTransaction: (ctx) => {
+          onReportTransaction(ctx);
         },
         onError: (err) => {
           setAlatpayNativeError(err);
@@ -421,7 +435,7 @@ const HostedCheckoutModal: React.FC<HostedCheckoutModalProps> = ({
                     onClick={() => {
                       launchedAlatpayRef.current = false;
                       launchAlatpayNativeModal(alatpayNativeModal, {
-                        onReportTransaction: () => onReportTransaction(),
+                        onReportTransaction: (ctx) => onReportTransaction(ctx),
                         onError: (err) => {
                           setAlatpayNativeError(err);
                           setMode('closed');

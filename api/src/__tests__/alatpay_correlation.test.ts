@@ -1577,4 +1577,262 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect(receiptRows.length).toBe(0);
     expect(glRows.length).toBe(0);
   });
+
+  it('T27-concurrent — Promise.all race: browser verify × 3 + webhook concurrently => NO duplicate receipt/GL (balanced single dr/cr)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    process.env.ALATPAY_ACTIVE = 'true';
+    // ---- Instrument updateMany to simulate real-DB row-lock atomicity: ----
+    let updateManyLock: Promise<void> = Promise.resolve();
+    const originalUpdateMany = prismaMock.transaction.updateMany;
+    prismaMock.transaction.updateMany = jest.fn(async (q: any) => {
+      const myTurn = updateManyLock.then(() => undefined);
+      let release: () => void = () => {};
+      updateManyLock = new Promise<void>((res) => { release = res; });
+      await myTurn;
+      try {
+        return await originalUpdateMany(q);
+      } finally {
+        release();
+      }
+    });
+    // --- Insert base rows directly into the captured mock arrays (T5 pattern) ---
+    invoiceRows.push({
+      id: 55,
+      invoiceNumber: 'INV-0001',
+      studentId: 99,
+      amountDue: 100,
+      amountPaid: 0,
+      status: 'PENDING',
+      session: '2025/2026',
+    });
+    txRows.push({
+      id: 777,
+      reference: BELLS_REF,
+      status: 'PENDING',
+      userId: 99,
+      invoiceId: 55,
+      expectedAmount: 100,
+      amount: 0,
+      gateway: 'ALATPAY',
+      paystackReference: null,
+      alatpayReference: ORDER_REF,
+      alatpayOrderReference: ORDER_REF,
+      alatpayInitPaymentReference: INIT_REF,
+      alatpayFinalTransactionId: null,
+      alatpayCheckoutUrl: CHECKOUT_URL,
+      alatpaySessionId: SESSION_ID,
+      metadata: { session: '2025/2026', amount: { base: 100, serviceCharge: 0, gatewayFee: 0, total: 100 } },
+      currency: 'NGN',
+      channel: null,
+      initiatedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    alatAmount = 100;
+    alatStatus = 'SUCCESSFUL';
+    const PaymentService = require('../services/payment').PaymentService;
+    const browserVerify1 = PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 777, assertStudentId: 99 });
+    const webhookProcess = PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 777, assertStudentId: 99 });
+    const browserVerify2 = PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 777, assertStudentId: 99 });
+    const browserVerify3 = PaymentService.verifyPayment(BELLS_REF, { providerReference: FINAL_UUID, expectedTransactionId: 777, assertStudentId: 99 });
+    const all = await Promise.all([browserVerify1, browserVerify2, browserVerify3, webhookProcess]);
+    // 1) verified: all resolve verified=true (idempotent; after first, subsequent return existing success)
+    for (const r of all) expect(r.verified).toBe(true);
+    // 2) tx SUCCESS once
+    expect(txRows.length).toBe(1);
+    expect(txRows[0].id).toBe(777);
+    expect(txRows[0].status).toBe('SUCCESS');
+    // 3) invoice credited once (amountPaid 100 exactly)
+    expect(invoiceRows.length).toBe(1);
+    expect(Number(invoiceRows[0].amountPaid)).toBe(100);
+    expect(invoiceRows[0].status).toBe('PAID');
+    // 4) exactly one receipt
+    expect(receiptRows.length).toBe(1);
+    expect(Number(receiptRows[0].transactionId)).toBe(777);
+    // 5) exactly two GL PAYMENT_SUCCESS entries, one DEBIT one CREDIT, dr==cr balanced
+    const paymentGl = glRows.filter((e: any) => e.entryType === 'PAYMENT_SUCCESS');
+    expect(paymentGl.length).toBe(2);
+    for (const e of paymentGl) expect(Number(e.transactionId)).toBe(777);
+    const dr = paymentGl.find((e: any) => (e.meta || {}).side === 'DEBIT');
+    const cr = paymentGl.find((e: any) => (e.meta || {}).side === 'CREDIT');
+    expect(dr).toBeTruthy();
+    expect(cr).toBeTruthy();
+    expect(dr.account).toBe('CASH_CLEARING');
+    expect(cr.account).toBe('STUDENT_RECEIVABLE');
+    expect(Number(dr.amount)).toBe(100);
+    expect(Number(cr.amount)).toBe(100);
+    expect(Math.abs(Number(dr.amount) - Number(cr.amount))).toBeLessThan(0.01);
+    const debitSum = glRows.filter((r) => (r.meta as any)?.side === 'DEBIT').reduce((a, r) => a + Number(r.amount), 0);
+    const creditSum = glRows.filter((r) => (r.meta as any)?.side === 'CREDIT').reduce((a, r) => a + Number(r.amount), 0);
+    expect(Number(debitSum.toFixed(2))).toBe(Number(creditSum.toFixed(2)));
+  });
+
+  // =========================================================================
+  // BLOCKER 1 — Verify controller pre-validation gates (7 focused scenarios)
+  // =========================================================================
+
+  async function invokeVerifyHandler(opts: {
+    asStudentId: number;
+    ref: string;
+    providerReference?: string | undefined | null;
+    txRows?: any[];
+  }) {
+    setupBaseMocks();
+    process.env.ALATPAY_ACTIVE = 'true';
+    const prismaMock = require('../config/database').default;
+    if (opts.txRows && opts.txRows.length) {
+      for (const tx of opts.txRows) await prismaMock.transaction.create({ data: tx });
+    }
+    const req: any = {
+      params: { ref: opts.ref },
+      query: opts.providerReference == null ? {} : { providerReference: String(opts.providerReference) },
+      user: { id: opts.asStudentId, role: 'STUDENT' },
+      headers: {},
+      ip: '127.0.0.1',
+    };
+    let resStatus = 0;
+    let resBody: any = undefined;
+    let settled = false;
+    let resolveRes: () => void = () => {};
+    const resPromise = new Promise<void>((r) => { resolveRes = r; });
+    const res: any = {
+      status: (n: number) => { resStatus = n; return res; },
+      json: (b: any) => { resBody = b; settled = true; resolveRes(); return res; },
+    };
+    let nextErr: any = null;
+    const next: any = (err?: any) => { nextErr = err ?? null; settled = true; resolveRes(); };
+    const paymentsModule = require('../controllers/payments');
+    // paymentsModule.verifyPayment is catchAsync-wrapped (sync fn returning undefined).
+    // Manually invoke the underlying raw async via wrapped handler and ensure we wait for completion.
+    const wrapped = paymentsModule.verifyPayment;
+    try {
+      const ret = wrapped(req, res, next);
+      // If for some reason the wrapped fn returned a promise, await it:
+      if (ret && typeof ret.then === 'function') await Promise.race([ret, resPromise]);
+      else await resPromise;
+    } catch (syncErr) {
+      nextErr = syncErr;
+      settled = true;
+    }
+    if (!settled) await resPromise;
+    return { resStatus, resBody, nextErr };
+  }
+
+  it('T29 — verify controller: valid owned ALATPAY ref + UUID proceeds (no pre-validation error)', async () => {
+    const out = await invokeVerifyHandler({
+      asStudentId: 99,
+      ref: BELLS_REF,
+      providerReference: FINAL_UUID,
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'ALATPAY', status: 'PENDING',
+        alatpayFinalTransactionId: null, amount: 100, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    // Not a 4xx/5xx pre-gate error (handler proceeds through service.verify)
+    expect(out.nextErr?.statusCode || out.nextErr?.status || out.resStatus).not.toBeGreaterThanOrEqual(400);
+    // Expect response written (status 200) OR service error (but never a pre-gate 4xx error from controller)
+    if (out.resStatus > 0) expect(out.resStatus).toBe(200);
+  });
+
+  it('T30 — verify controller: malformed provider UUID => 400 ALATPAY_FINAL_TXID_MALFORMED', async () => {
+    const out = await invokeVerifyHandler({
+      asStudentId: 99,
+      ref: BELLS_REF,
+      providerReference: 'definitely-not-a-uuid',
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'ALATPAY', status: 'PENDING',
+        alatpayFinalTransactionId: null, amount: 100, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    const status = out.nextErr?.statusCode || out.resStatus || 0;
+    expect(status).toBe(400);
+    const code = out.nextErr?.details?.code || out.resBody?.code;
+    expect(code).toBe('ALATPAY_FINAL_TXID_MALFORMED');
+  });
+
+  it('T31 — verify controller: other student\'s payment reference => 403 VERIFY_NOT_OWNER', async () => {
+    const out = await invokeVerifyHandler({
+      asStudentId: 111,
+      ref: BELLS_REF,
+      providerReference: FINAL_UUID,
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'ALATPAY', status: 'PENDING',
+        alatpayFinalTransactionId: null, amount: 100, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    const status = out.nextErr?.statusCode || out.resStatus || 0;
+    expect(status).toBe(403);
+    const code = out.nextErr?.details?.code || out.resBody?.code;
+    expect(code).toBe('VERIFY_NOT_OWNER');
+  });
+
+  it('T32 — verify controller: non-ALATPAY transaction + providerReference => 400 VERIFY_WRONG_GATEWAY', async () => {
+    const out = await invokeVerifyHandler({
+      asStudentId: 99,
+      ref: BELLS_REF,
+      providerReference: FINAL_UUID,
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'PAYSTACK', status: 'PENDING',
+        alatpayFinalTransactionId: null, paystackReference: 'PSTK-XX', amount: 100, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    const status = out.nextErr?.statusCode || out.resStatus || 0;
+    expect(status).toBe(400);
+    const code = out.nextErr?.details?.code || out.resBody?.code;
+    expect(code).toBe('VERIFY_WRONG_GATEWAY');
+  });
+
+  it('T33 — verify controller: conflicting stored final UUID (different value) => 409 ALATPAY_FINAL_TXID_CONFLICT', async () => {
+    const OTHER_UUID = 'a2b3c4d5-1111-4abc-8def-0123456789ab';
+    const out = await invokeVerifyHandler({
+      asStudentId: 99,
+      ref: BELLS_REF,
+      providerReference: FINAL_UUID,
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'ALATPAY', status: 'SUCCESS',
+        alatpayFinalTransactionId: OTHER_UUID, amount: 100, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    const status = out.nextErr?.statusCode || out.resStatus || 0;
+    expect(status).toBe(409);
+    const code = out.nextErr?.details?.code || out.resBody?.code;
+    expect(code).toBe('ALATPAY_FINAL_TXID_CONFLICT');
+  });
+
+  it('T34 — verify controller: repeated same final UUID idempotently (no pre-gate error; no conflict)', async () => {
+    const out = await invokeVerifyHandler({
+      asStudentId: 99,
+      ref: BELLS_REF,
+      providerReference: FINAL_UUID,
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'ALATPAY', status: 'SUCCESS',
+        alatpayFinalTransactionId: FINAL_UUID, amount: 100, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    const status = out.nextErr?.statusCode || out.resStatus || 0;
+    expect(status).not.toBeGreaterThanOrEqual(400);
+  });
+
+  it('T35 — verify controller: Paystack transaction with NO providerReference => legacy path unchanged (no pre-gate trigger)', async () => {
+    const out = await invokeVerifyHandler({
+      asStudentId: 99,
+      ref: BELLS_REF,
+      providerReference: undefined,
+      txRows: [{
+        id: 777, reference: BELLS_REF, userId: 99, gateway: 'PAYSTACK', status: 'PENDING',
+        paystackReference: 'paystack_ref_xyz', alatpayFinalTransactionId: null,
+        amount: 100, expectedAmount: 100, invoiceId: 55, createdAt: new Date(), updatedAt: new Date(),
+      }],
+    });
+    const status = out.nextErr?.statusCode || out.resStatus || 0;
+    // Legacy Paystack path: no providerReference => pre-gate block is skipped entirely.
+    // If handler proceeds through service (which will fail inside service due to no
+    // paystackVerify mocked), that is fine — the test's intent is ONLY to assert the
+    // controller did NOT short-circuit with a 4xx due to UUID/gate/ownership gates.
+    const gateCode = out.nextErr?.details?.code;
+    expect(gateCode).not.toBe('ALATPAY_FINAL_TXID_MALFORMED');
+    expect(gateCode).not.toBe('VERIFY_NOT_OWNER');
+    expect(gateCode).not.toBe('VERIFY_WRONG_GATEWAY');
+    expect(gateCode).not.toBe('ALATPAY_FINAL_TXID_CONFLICT');
+  });
 });

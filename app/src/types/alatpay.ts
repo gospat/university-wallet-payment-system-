@@ -1,5 +1,10 @@
 export type AlatpayCheckoutEnv = 'sandbox' | 'production';
 
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function isAlatpayUuid(s: unknown): s is string {
+  return typeof s === 'string' && UUID_V4_RE.test(s.trim());
+}
+
 export type AlatpayPublicBusiness = {
   readonly id: string;
   readonly businessId: string;
@@ -37,6 +42,7 @@ export type AlatpayNativeModalLaunchCallbacks = {
     orderReference: string;
     initPaymentReference: string;
     providerTx: unknown;
+    extractedFinalTxId: string | null;
   }) => void;
   onError?: (err: { code?: string; message: string }) => void;
   onClosed?: () => void;

@@ -279,8 +279,14 @@ export const studentFeeApi = {
     if (payload.idempotencyKey) body.idempotencyKey = payload.idempotencyKey;
     return api.post('/students/payments/initiate', body).then((r) => unwrap(r));
   },
-  verifyPayment(reference: string): Promise<any> {
-    return api.get(`/students/payments/verify/${encodeURIComponent(reference)}`).then((r) => unwrap(r));
+  verifyPayment(reference: string, opts?: { providerReference?: string | null | undefined }): Promise<any> {
+    const params: any = {};
+    if (opts?.providerReference && String(opts.providerReference).trim()) {
+      params.providerReference = String(opts.providerReference).trim();
+    }
+    const qs = new URLSearchParams(params).toString();
+    const url = `/students/payments/verify/${encodeURIComponent(reference)}` + (qs ? `?${qs}` : '');
+    return api.get(url).then((r) => unwrap(r));
   },
   async downloadReceiptPdfByReference(reference: string): Promise<Blob> {
     const r: any = await api.get('/students/receipts', { params: { reference, limit: 1 } });

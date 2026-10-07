@@ -3,6 +3,7 @@ import type {
   AlatpayNativeModalLaunchCallbacks,
   AlatpayPublicCheckout,
 } from '../types/alatpay';
+import { isAlatpayUuid } from '../types/alatpay';
 
 const SDK_SRC: Record<AlatpayCheckoutEnv, string> = {
   production: 'https://web.alatpay.ng/js/alatpay.js',
@@ -28,6 +29,37 @@ function isWindowAlatpayReady(): boolean {
     && typeof (window as any).Alatpay === 'object'
     && (window as any).Alatpay !== null
     && typeof (window as any).Alatpay.setup === 'function';
+}
+
+function extractAlatpayFinalTxId(providerTx: unknown): string | null {
+  if (providerTx == null) return null;
+  if (isAlatpayUuid(providerTx)) return (providerTx as string).trim();
+  const seen = new WeakSet<object>();
+  const queue: unknown[] = [providerTx];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (cur == null) continue;
+    if (typeof cur === 'string') {
+      if (isAlatpayUuid(cur)) return cur.trim();
+      continue;
+    }
+    if (typeof cur !== 'object') continue;
+    const obj = cur as object;
+    if (seen.has(obj)) continue;
+    seen.add(obj);
+    if (Array.isArray(obj)) {
+      for (let i = 0; i < obj.length; i++) queue.push((obj as any)[i]);
+      continue;
+    }
+    const keys = Object.keys(obj);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const v = (obj as any)[k];
+      if (typeof v === 'string' && isAlatpayUuid(v)) return v.trim();
+      if (v != null && typeof v === 'object') queue.push(v);
+    }
+  }
+  return null;
 }
 
 export function loadAlatpaySdk(env?: AlatpayCheckoutEnv): Promise<void> {
@@ -151,6 +183,7 @@ export async function launchAlatpayNativeModal(
         orderReference: String(checkout.metadata?.order_reference ?? ''),
         initPaymentReference: String(checkout.metadata?.init_payment_reference ?? ''),
         providerTx,
+        extractedFinalTxId: extractAlatpayFinalTxId(providerTx),
       });
     },
     onClose: () => {
