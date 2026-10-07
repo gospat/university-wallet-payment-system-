@@ -28,9 +28,18 @@ export type InitializeResult = {
   access_code?: string | null;
   providerReference: string;
   sessionId?: string | null;
+  orderReference?: string | null;
+  initPaymentReference?: string | null;
   feeBreakdown: PaymentBreakdown;
   channelsUsed?: string[] | null;
   raw: any;
+};
+
+export type VerifyPaymentOptions = {
+  req?: any;
+  assertStudentId?: number;
+  providerReference?: string;
+  expectedTransactionId?: number;
 };
 
 export type VerifyResult = {

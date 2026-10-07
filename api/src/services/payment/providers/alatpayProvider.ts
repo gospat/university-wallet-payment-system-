@@ -13,6 +13,7 @@ import {
   ALATPAY_CHANNEL_CODES,
   isAlatpayPassChargeEnabled,
   getDefaultEmailDomain,
+  serializeAlatpayCustomerMetadata,
 } from '../../../utils/alatpay';
 
 function money(n: number | string | null | undefined): number {
@@ -54,7 +55,18 @@ export class AlatpayProvider implements IPaymentProvider {
     const defaultEmailDomain = getDefaultEmailDomain();
     const wemaReference = `WEMA-${opts.reference}`;
     const orderId = wemaReference;
-    const metadataArray: Array<Record<string, any>> = [];
+    const metadataForProvider: Record<string, unknown> = {
+      ...(opts.metadata && typeof opts.metadata === 'object' ? opts.metadata : {}),
+      transaction_id: (opts.metadata as any)?.transaction_id ?? undefined,
+      bells_payment_reference: opts.reference,
+      student_id: (opts.metadata as any)?.student_id ?? undefined,
+      invoice_id: (opts.metadata as any)?.invoice_id ?? undefined,
+      fee_id: (opts.metadata as any)?.fee_id ?? undefined,
+      academic_session: (opts.metadata as any)?.academic_session ?? undefined,
+      fee_name: (opts.metadata as any)?.fee_name ?? undefined,
+      idempotency_key: (opts.metadata as any)?.idempotency_key ?? undefined,
+    };
+    const metadataJsonString = serializeAlatpayCustomerMetadata(metadataForProvider);
     const body: Record<string, any> = {
       email: email || `${opts.reference}@${defaultEmailDomain}`,
       firstName: opts.firstName ?? opts.reference,
@@ -67,7 +79,7 @@ export class AlatpayProvider implements IPaymentProvider {
       reference: wemaReference,
       orderId,
       passCharge: false,
-      metadata: metadataArray,
+      metadata: metadataJsonString,
     };
     if (merchantId) body.merchantId = merchantId;
     if (opts.phone) body.phone = opts.phone;
@@ -136,6 +148,8 @@ export class AlatpayProvider implements IPaymentProvider {
         access_code: sessionId,
         providerReference: providerRef,
         sessionId,
+        orderReference: orderId,
+        initPaymentReference: (data.paymentReference ?? providerRef) as string | undefined,
         feeBreakdown: breakdown,
         channelsUsed: opts.channels ?? null,
         raw: response?.data ?? data,

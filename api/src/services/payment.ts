@@ -30,7 +30,8 @@ import { dispatchEmail } from '../queues/emailQueue';
 import { AdminNotificationService } from './adminNotification';
 import { SystemSettingsService } from './systemSettings';
 import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerFactory';
-import { gatewayLabel } from './payment/types';
+import { gatewayLabel, VerifyPaymentOptions } from './payment/types';
+import { parseAlatpayCustomerMetadata } from '../utils/alatpay';
 
 type ReqLike = any;
 
@@ -250,8 +251,15 @@ export class PaymentService {
           },
         } as Prisma.InputJsonValue;
       } else {
+        const orderReference = init?.orderReference ?? `WEMA-${paymentRef}`;
+        const initPaymentRef = init?.initPaymentReference ?? gatewayRef;
         (gatewayData as any).alatpayReference = gatewayRef;
         (gatewayData as any).alatpaySessionId = init?.sessionId ?? null;
+        (gatewayData as any).alatpayOrderReference = orderReference;
+        (gatewayData as any).alatpayInitPaymentReference = initPaymentRef;
+        if (init?.checkoutUrl) {
+          (gatewayData as any).alatpayCheckoutUrl = init.checkoutUrl;
+        }
         const existingMeta =
           txRow.metadata && typeof txRow.metadata === 'object'
             ? (txRow.metadata as Record<string, any>)
@@ -261,6 +269,8 @@ export class PaymentService {
           alatpay: {
             checkout_url: init?.checkoutUrl ?? null,
             session_id: init?.sessionId ?? null,
+            order_reference: orderReference,
+            init_payment_reference: initPaymentRef,
             provider_reference: gatewayRef,
             channels_used: init?.channelsUsed ?? null,
           },
@@ -333,6 +343,105 @@ export class PaymentService {
     }
   }
 
+  static async locateAlatpayTransactionFromWebhook(input: {
+    transaction_id_from_metadata?: number | string | null;
+    bells_payment_reference?: string | null;
+    order_reference?: string | null;
+    init_payment_reference?: string | null;
+    session_id?: string | null;
+    final_transaction_id?: string | null;
+  }): Promise<{ id: number; reference: string; gateway: PaymentGateway } | { ambiguity: true; diagnostic: string } | { notFound: true; diagnostic: string }> {
+    const {
+      transaction_id_from_metadata: metaTxId,
+      bells_payment_reference: bellsRef,
+      order_reference: orderRef,
+      init_payment_reference: initRef,
+      session_id: sessionId,
+      final_transaction_id: finalTxId,
+    } = input;
+
+    const numericTxId =
+      metaTxId !== undefined && metaTxId !== null && metaTxId !== '' && Number.isFinite(Number(metaTxId))
+        ? Number(metaTxId)
+        : undefined;
+
+    // Priority A: internal transaction_id from metadata (strongest)
+    if (numericTxId) {
+      const row = await prisma.transaction.findUnique({
+        where: { id: numericTxId },
+        select: { id: true, reference: true, gateway: true, alatpayOrderReference: true, alatpayInitPaymentReference: true, alatpayFinalTransactionId: true, alatpaySessionId: true },
+      });
+      if (row) {
+        if (row.gateway !== PaymentGateway.ALATPAY) {
+          return { notFound: true, diagnostic: `metadata tx #${numericTxId} gateway=${row.gateway} not ALATPAY` };
+        }
+        const matchesAnyBreadcrumb =
+          (!!bellsRef && row.reference === bellsRef) ||
+          (!!orderRef && row.alatpayOrderReference === orderRef) ||
+          (!!initRef && row.alatpayInitPaymentReference === initRef) ||
+          (!!sessionId && row.alatpaySessionId === sessionId) ||
+          (!!finalTxId && row.alatpayFinalTransactionId === finalTxId) ||
+          (!bellsRef && !orderRef && !initRef && !sessionId && !finalTxId);
+        if (matchesAnyBreadcrumb) return { id: row.id, reference: row.reference, gateway: row.gateway };
+        return { notFound: true, diagnostic: `metadata tx #${numericTxId} does not match provided order/init/session/final breadcrumbs` };
+      }
+    }
+
+    // Priority B: Bells internal reference (PAY-XXXX)
+    if (bellsRef && typeof bellsRef === 'string') {
+      const rows = await prisma.transaction.findMany({
+        where: { reference: bellsRef, gateway: PaymentGateway.ALATPAY },
+        select: { id: true, reference: true, gateway: true },
+        orderBy: [{ updatedAt: 'desc' }],
+        take: 5,
+      });
+      if (rows.length === 1) return { id: rows[0].id, reference: rows[0].reference, gateway: rows[0].gateway };
+      if (rows.length > 1) return { ambiguity: true, diagnostic: `multiple matches for Bells reference ${bellsRef} (${rows.length})` };
+    }
+
+    // Priority C: stored init/session/order reference
+    const tierCClauses: Prisma.TransactionWhereInput[] = [];
+    if (orderRef) tierCClauses.push({ alatpayOrderReference: orderRef });
+    if (initRef) tierCClauses.push({ alatpayInitPaymentReference: initRef });
+    if (sessionId) tierCClauses.push({ alatpaySessionId: sessionId });
+    if (orderRef) tierCClauses.push({ alatpayReference: orderRef });
+    if (initRef) tierCClauses.push({ alatpayReference: initRef });
+    if (tierCClauses.length > 0) {
+      const rows = await prisma.transaction.findMany({
+        where: { AND: [{ gateway: PaymentGateway.ALATPAY }, { OR: tierCClauses }] },
+        select: { id: true, reference: true, gateway: true },
+        orderBy: [{ updatedAt: 'desc' }],
+        take: 10,
+      });
+      if (rows.length === 1) return { id: rows[0].id, reference: rows[0].reference, gateway: rows[0].gateway };
+      if (rows.length > 1) return { ambiguity: true, diagnostic: `ambiguous tier C matches order/init/session (${rows.length})` };
+    }
+
+    // Priority D: final provider transaction UUID if already known
+    if (finalTxId) {
+      const rows = await prisma.transaction.findMany({
+        where: {
+          AND: [
+            { gateway: PaymentGateway.ALATPAY },
+            {
+              OR: [
+                { alatpayFinalTransactionId: finalTxId },
+                { alatpayReference: finalTxId },
+              ],
+            },
+          ],
+        },
+        select: { id: true, reference: true, gateway: true },
+        orderBy: [{ updatedAt: 'desc' }],
+        take: 10,
+      });
+      if (rows.length === 1) return { id: rows[0].id, reference: rows[0].reference, gateway: rows[0].gateway };
+      if (rows.length > 1) return { ambiguity: true, diagnostic: `ambiguous tier D matches for finalTxId ${finalTxId} (${rows.length})` };
+    }
+
+    return { notFound: true, diagnostic: 'no Bells transaction matched any correlation tier (A->B->C->D)' };
+  }
+
   private static pickAlatpayBestMatch<T extends { id: number; status: any; updatedAt: any; alatpayReference?: string | null }>(
     rows: T[],
     lookupRef: string
@@ -385,32 +494,53 @@ export class PaymentService {
   // Verify payment — called both by GET /student/payments/verify/:ref AND
   // by the Paystack / ALAT Pay webhook handler. Idempotent (safe to call twice).
   // -----------------------------------------------------------------------
-  static async verifyPayment(paystackOrPaymentRef: string, opts: { req?: ReqLike; assertStudentId?: number; } = {}) {
+  static async verifyPayment(paystackOrPaymentRef: string, opts: VerifyPaymentOptions = {}) {
     const ref = paystackOrPaymentRef;
-    if (!ref || !String(ref).trim()) throw new AppError(i18n.errors.paystack.verifyFailed, 400);
+    if (!opts.expectedTransactionId && (!ref || !String(ref).trim())) {
+      throw new AppError(i18n.errors.paystack.verifyFailed, 400);
+    }
 
     // 0. Determine which provider + gateway this tx uses — pre-fetch the row
-    const lookupWhere: Prisma.TransactionWhereInput = {
-      OR: [
-        { reference: ref },
-        { paystackReference: ref },
-        { alatpayReference: ref },
-      ],
-    };
+    const lookupWhere: Prisma.TransactionWhereInput = opts.expectedTransactionId
+      ? { id: Number(opts.expectedTransactionId) }
+      : {
+          OR: [
+            { reference: ref },
+            { paystackReference: ref },
+            { alatpayReference: ref },
+            { alatpayOrderReference: ref },
+            { alatpayInitPaymentReference: ref },
+            { alatpayFinalTransactionId: ref },
+          ],
+        };
     const preRows = await prisma.transaction.findMany({
       where: lookupWhere,
       orderBy: [{ updatedAt: 'desc' }],
-      select: { id: true, gateway: true, reference: true, paystackReference: true, alatpayReference: true, metadata: true, status: true, updatedAt: true },
+      select: {
+        id: true, gateway: true, reference: true, paystackReference: true, alatpayReference: true,
+        alatpayOrderReference: true, alatpayInitPaymentReference: true, alatpayFinalTransactionId: true,
+        alatpayCheckoutUrl: true, alatpaySessionId: true, metadata: true, status: true, updatedAt: true,
+      },
     });
     const preTx = PaymentService.pickAlatpayBestMatch(preRows, ref);
     if (!preTx) throw new AppError(i18n.errors.payment.transactionNotFound, 404);
     const txGateway: PaymentGateway = preTx.gateway ?? PaymentGateway.ALATPAY;
     const provider = getPaymentProvider(txGateway);
     // Pass the correct-looking ref to the provider:
-    const providerRefToVerify =
-      txGateway === PaymentGateway.PAYSTACK
-        ? preTx.paystackReference ?? preTx.reference ?? ref
-        : preTx.alatpayReference ?? preTx.reference ?? ref;
+    // Split lookup ref vs provider verify ref. Explicit override wins.
+    let providerRefToVerify: string;
+    if (opts.providerReference && String(opts.providerReference).trim()) {
+      providerRefToVerify = String(opts.providerReference).trim();
+    } else if (txGateway === PaymentGateway.PAYSTACK) {
+      providerRefToVerify = preTx.paystackReference ?? preTx.reference ?? ref;
+    } else {
+      providerRefToVerify =
+        preTx.alatpayFinalTransactionId ??
+        preTx.alatpayReference ??
+        preTx.alatpayInitPaymentReference ??
+        preTx.reference ??
+        ref;
+    }
 
     // 1. Call provider verify (throws AppError on failure).
     const verifyResult = await provider.verify(providerRefToVerify);
@@ -444,17 +574,27 @@ export class PaymentService {
     }
 
     // 2. Find pending transaction (by paymentRef OR providerRef OR id).
-    const txWhere: Prisma.TransactionWhereInput = {
-      OR: [
-        { reference: ref },
-        { reference: providerRef },
-        { paystackReference: ref },
-        { paystackReference: providerRef },
-        { alatpayReference: ref },
-        { alatpayReference: providerRef },
-        ...(transactionId && Number.isFinite(transactionId) ? [{ id: transactionId }] : []),
-      ],
-    };
+    const explicitTxId = opts.expectedTransactionId && Number.isFinite(Number(opts.expectedTransactionId))
+      ? Number(opts.expectedTransactionId)
+      : (transactionId && Number.isFinite(transactionId) ? transactionId : undefined);
+    const txWhere: Prisma.TransactionWhereInput = explicitTxId
+      ? { id: explicitTxId }
+      : {
+          OR: [
+            { reference: ref },
+            { reference: providerRef },
+            { paystackReference: ref },
+            { paystackReference: providerRef },
+            { alatpayReference: ref },
+            { alatpayReference: providerRef },
+            { alatpayOrderReference: ref },
+            { alatpayOrderReference: providerRef },
+            { alatpayInitPaymentReference: ref },
+            { alatpayInitPaymentReference: providerRef },
+            { alatpayFinalTransactionId: ref },
+            { alatpayFinalTransactionId: providerRef },
+          ],
+        };
     const initialRows: any[] = await prisma.transaction.findMany({
       where: txWhere,
       orderBy: [{ updatedAt: 'desc' }],
@@ -462,6 +602,8 @@ export class PaymentService {
         id: true, reference: true, status: true, userId: true, invoiceId: true,
         expectedAmount: true, amount: true, metadata: true, gateway: true,
         paystackReference: true, alatpayReference: true, updatedAt: true,
+        alatpayOrderReference: true, alatpayInitPaymentReference: true, alatpayFinalTransactionId: true,
+        alatpayCheckoutUrl: true, alatpaySessionId: true,
         user: { select: { id: true, email: true, firstName: true, lastName: true, matricNumber: true, role: true } },
       },
     });
@@ -495,6 +637,8 @@ export class PaymentService {
         select: {
           id: true, reference: true, status: true, userId: true, invoiceId: true,
           expectedAmount: true, amount: true, metadata: true, gateway: true,
+          alatpayOrderReference: true, alatpayInitPaymentReference: true, alatpayFinalTransactionId: true,
+          alatpayCheckoutUrl: true, alatpaySessionId: true,
           invoice: {
             select: {
               id: true, invoiceNumber: true, amountDue: true, amountPaid: true, status: true,
@@ -544,6 +688,9 @@ export class PaymentService {
             updateData.paystackChannel = channel;
           } else {
             updateData.alatpayReference = providerRef;
+            if (providerRef && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(providerRef)) {
+              updateData.alatpayFinalTransactionId = providerRef;
+            }
           }
           await tx.transaction.update({
             where: { id: latest.id },
@@ -626,12 +773,24 @@ export class PaymentService {
         };
       } else {
         updateSuccessData.alatpayReference = providerRef;
+        if (providerRef && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(providerRef)) {
+          updateSuccessData.alatpayFinalTransactionId = providerRef;
+        }
+        if (latest.alatpayFinalTransactionId && !updateSuccessData.alatpayFinalTransactionId) {
+          updateSuccessData.alatpayFinalTransactionId = latest.alatpayFinalTransactionId;
+        }
         const existingAlatMeta =
           existingMeta.alatpay && typeof existingMeta.alatpay === 'object'
             ? (existingMeta.alatpay as Record<string, any>)
             : {};
+        const latestRow = latest as any;
         (updateSuccessData.metadata as any).alatpay = {
           ...existingAlatMeta,
+          init_payment_reference: latestRow?.alatpayInitPaymentReference ?? latestRow?.metadata?.alatpay?.init_payment_reference ?? existingAlatMeta.init_payment_reference ?? null,
+          order_reference: latestRow?.alatpayOrderReference ?? latestRow?.metadata?.alatpay?.order_reference ?? existingAlatMeta.order_reference ?? null,
+          session_id: latestRow?.alatpaySessionId ?? latestRow?.metadata?.alatpay?.session_id ?? existingAlatMeta.session_id ?? null,
+          checkout_url: latestRow?.alatpayCheckoutUrl ?? latestRow?.metadata?.alatpay?.checkout_url ?? existingAlatMeta.checkout_url ?? null,
+          final_transaction_id: updateSuccessData.alatpayFinalTransactionId ?? providerRef ?? null,
           paid_at: paidAt.toISOString(),
           paid_minor: paidMinor,
           paid_naira: paidNaira,

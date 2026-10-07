@@ -41,7 +41,15 @@ import { Router, Request, Response } from 'express';
 import prisma from '../config/database';
 import { dispatchJob, registerHandler } from '../config/queue';
 import { verifyPaystackHmac } from '../utils/paystack';
-import { verifyAlatpayHmac, isAlatpayWhitelistedIp, AlatpayWebhookEnvelope, normalizeAlatStatus } from '../utils/alatpay';
+import {
+  verifyAlatpayHmac,
+  isAlatpayWhitelistedIp,
+  AlatpayWebhookEnvelope,
+  normalizeAlatStatus,
+  parseAlatpayCustomerMetadata,
+  selectAlatpayFinalTxId,
+  AlatpayCustomerMetadata,
+} from '../utils/alatpay';
 import { i18n } from '../i18n/en';
 import { AdminNotificationService } from '../services/adminNotification';
 
@@ -519,6 +527,22 @@ router.post('/alatpay', async (req: Request, res: Response) => {
 
 // =============================================================================
 // ALAT Pay webhook handler — registered at module import.
+// -----------------------------------------------------------------------------
+// Correlation (A -> B -> C -> D):
+//   A) internal transaction_id from Customer.Metadata (strongest)
+//   B) Bells internal payment reference (PAY-XXXX) — may come from:
+//        - Metadata.bells_payment_reference  OR
+//        - OrderId with WEMA- prefix stripped
+//   C) stored init/session/order reference (WEMA-/paykXXX)
+//   D) final provider transaction UUID if already persisted
+//
+// After locating a single unambiguous Bells transaction, the AUTHORITATIVE
+// verify ref (for AlatpayProvider.verify) is the FINAL provider transaction
+// UUID (Value.Data.Id or Customer.TransactionId-UUID-shape), NOT the OrderId
+// nor the init paymentReference.
+//
+// Provider server-side verification remains authoritative; webhook Status
+// alone never writes SUCCESS.
 // =============================================================================
 registerHandler('alatpay.webhook', async (payload, _ctx) => {
   const { alatpayEventId, eventType, forceReprocess } = payload as {
@@ -536,15 +560,73 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
   let failureReason: string | null = null;
   const envelope: AlatpayWebhookEnvelope | null = row.payload as any;
   const data = envelope?.Value?.Data ?? {};
-  // Priority match: 1) Customer.Metadata.orderId (stringified JSON we wrote) 2) OrderId 3) Customer.TransactionId 4) alatpayEventId fallback
-  let verifyRef = typeof data.OrderId === 'string' && data.OrderId ? data.OrderId : typeof data.Customer?.TransactionId === 'string' ? data.Customer.TransactionId : null;
-  if (!verifyRef) verifyRef = alatpayEventId;
+
+  // 1. Extract raw fields
+  const dataId = typeof data.Id === 'string' ? data.Id.trim() : null;
+  const orderIdRaw = typeof data.OrderId === 'string' ? data.OrderId.trim() : null;
+  const customerTxIdRaw = typeof data.Customer?.TransactionId === 'string' ? data.Customer.TransactionId.trim() : null;
+  const sessionIdRaw =
+    typeof data.SessionId === 'string'
+      ? data.SessionId.trim()
+      : typeof (envelope as any)?.Value?.Data?.sessionId === 'string'
+        ? (envelope as any).Value.Data.sessionId.trim()
+        : null;
+  const finalTxId: string | null =
+    selectAlatpayFinalTxId(envelope, dataId ?? customerTxIdRaw ?? null) ||
+    dataId ||
+    (customerTxIdRaw && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(customerTxIdRaw) ? customerTxIdRaw : null);
+
+  // 2. Parse Customer.Metadata safely (object or string JSON)
+  const customerMeta: AlatpayCustomerMetadata | null = parseAlatpayCustomerMetadata(data.Customer?.Metadata ?? null);
+  const metaTxId = customerMeta?.transaction_id ?? null;
+  const metaBellsRef = customerMeta?.bells_payment_reference ?? null;
+
+  // 3. Bells reference from metadata or by stripping WEMA- prefix from orderId
+  const inferredBellsRef: string | null =
+    (metaBellsRef && typeof metaBellsRef === 'string' ? metaBellsRef : null) ||
+    (orderIdRaw && orderIdRaw.startsWith('WEMA-') ? orderIdRaw.slice('WEMA-'.length) : null);
+
+  // 4. Locate Bells transaction deterministically (ties -> ambiguity, no money touched)
+  const { PaymentService } = await import('../services/payment');
+  const locate = await PaymentService.locateAlatpayTransactionFromWebhook({
+    transaction_id_from_metadata: metaTxId,
+    bells_payment_reference: inferredBellsRef,
+    order_reference: orderIdRaw,
+    init_payment_reference: customerTxIdRaw && !/^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-/.test(customerTxIdRaw) ? customerTxIdRaw : null,
+    session_id: sessionIdRaw,
+    final_transaction_id: finalTxId,
+  });
+
+  // Sanitized diagnostic (never include customer PII/secrets)
+  const diag = (reason: string) =>
+    `[alatpay webhook ${eventType}] ${reason}; eventId=${alatpayEventId.slice(0, 40)} orderId=${orderIdRaw ? `${orderIdRaw.slice(0, 40)}` : 'null'} finalTxIdPresent=${!!finalTxId}`;
 
   try {
     switch (eventType) {
       case 'charge.success': {
-        const { PaymentService } = await import('../services/payment');
-        const result = await PaymentService.verifyPayment(String(verifyRef), {});
+        if ('ambiguity' in locate) {
+          failureReason = diag(`correlation ambiguous: ${locate.diagnostic}; retry skipped to prevent double credit`);
+          newProcessed = false;
+          break;
+        }
+        if ('notFound' in locate) {
+          failureReason = diag(`no Bells transaction found: ${locate.diagnostic}`);
+          newProcessed = false;
+          break;
+        }
+        // Authoritative verify reference: the actual final ALATPAY transaction UUID.
+        // If for any reason we don't have a final UUID, we CANNOT safely call verify,
+        // because OrderId and init paymentReference are not valid for /transactions/{uuid}.
+        const providerVerifyRef = finalTxId;
+        if (!providerVerifyRef || !String(providerVerifyRef).trim()) {
+          failureReason = diag('missing authoritative final provider transaction UUID; cannot safely call /transactions verify endpoint');
+          newProcessed = false;
+          break;
+        }
+        const result = await PaymentService.verifyPayment(locate.reference, {
+          providerReference: providerVerifyRef,
+          expectedTransactionId: locate.id,
+        });
         if (result.verified || (result as any).status === 'SUCCESS') {
           newProcessed = true;
         } else {
@@ -557,39 +639,61 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
       }
       case 'charge.failed':
       case 'charge.unknown': {
-        if (verifyRef) {
-          const existing = await prisma.transaction.findFirst({
-            where: {
-              OR: [
-                { reference: String(verifyRef) },
-                { paystackReference: String(verifyRef) },
-                { alatpayReference: String(verifyRef) },
-              ],
-            },
-            select: { id: true, status: true, userId: true },
-          });
-          if (existing && existing.status !== 'SUCCESS' && existing.status !== 'UNDERPAID' && existing.status !== 'OVERPAID') {
-            await prisma.transaction.updateMany({
-              where: { id: existing.id, status: 'PENDING' as any },
-              data: { status: 'FAILED' as any, underpaidReason: `alatpay event ${eventType} / ${data.Status ?? 'unknown'}`.slice(0, 190) },
-            });
-          }
-          if (existing) {
-            await prisma.auditLog.create({
-              data: {
-                action: 'PAYMENT_FAILED',
-                entityType: 'TRANSACTION',
-                entityId: String(existing.id),
-                userId: existing.userId ?? null,
-                newValue: { alatpayEvent: eventType, rawStatus: data.Status ?? null, verifyRef } as any,
-              },
-            }).catch(() => {});
-          }
+        // SAFETY: Never downgrade SUCCESS, UNDERPAID, OVERPAID rows.
+        // Only mark FAILED rows we can SAFELY correlate (A/B/C/D exactly one match).
+        if ('ambiguity' in locate) {
+          failureReason = diag(`correlation ambiguous for failed/unknown: ${locate.diagnostic}`);
+          newProcessed = false;
+          break;
         }
+        if ('notFound' in locate) {
+          // unknown order = no record to update, still ack event processed (safe — no tx ever existed)
+          newProcessed = true;
+          break;
+        }
+        const existing = await prisma.transaction.findUnique({
+          where: { id: locate.id },
+          select: { id: true, status: true, userId: true },
+        });
+        if (!existing) {
+          newProcessed = true;
+          break;
+        }
+        // NEVER DOWNGRADE success rows
+        if (
+          existing.status === 'SUCCESS' ||
+          existing.status === 'UNDERPAID' ||
+          existing.status === 'OVERPAID' ||
+          existing.status === 'REVERSED'
+        ) {
+          newProcessed = true;
+          break;
+        }
+        await prisma.transaction.updateMany({
+          where: { id: existing.id, status: 'PENDING' as any },
+          data: { status: 'FAILED' as any, underpaidReason: `alatpay event ${eventType} / ${data.Status ?? 'unknown'}`.slice(0, 190) },
+        });
+        await prisma.auditLog
+          .create({
+            data: {
+              action: 'PAYMENT_FAILED',
+              entityType: 'TRANSACTION',
+              entityId: String(existing.id),
+              userId: existing.userId ?? null,
+              newValue: {
+                alatpayEvent: eventType,
+                rawStatus: data.Status ?? null,
+                finalTxIdPresent: !!finalTxId,
+                orderId: orderIdRaw?.slice(0, 80) ?? null,
+              } as any,
+            },
+          })
+          .catch(() => {});
         newProcessed = true;
         break;
       }
       default:
+        // Unknown event — still ack, never touch money
         newProcessed = true;
     }
   } catch (err) {
@@ -604,27 +708,38 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
       processedAt: newProcessed ? new Date() : null,
       attempts: { increment: 1 },
       lastError: newProcessed ? null : failureReason,
+      transactionReference:
+        'id' in locate && locate.reference ? locate.reference : row.transactionReference ?? undefined,
     },
     select: { attempts: true, transactionReference: true, id: true },
   });
 
   if (!newProcessed && updatedEvent.attempts >= 3) {
     try {
-      const ref = updatedEvent.transactionReference ?? verifyRef ?? alatpayEventId;
+      const ref = updatedEvent.transactionReference ?? ('id' in locate ? locate.reference : null) ?? alatpayEventId;
       void AdminNotificationService.emitWebhookFail3(ref);
     } catch (notifErr) {
       console.warn('[webhook:alatpay handler] emitWebhookFail3 failed:', (notifErr as Error)?.message);
     }
   }
 
-  await prisma.auditLog.create({
-    data: {
-      action: newProcessed ? 'WEBHOOK_PROCESSED' : 'WEBHOOK_FAILED',
-      entityType: 'WEBHOOK_EVENT',
-      entityId: alatpayEventId,
-      newValue: { provider: 'ALATPAY', eventType, processed: newProcessed, failure: failureReason ?? null } as any,
-    },
-  }).catch(() => {});
+  await prisma.auditLog
+    .create({
+      data: {
+        action: newProcessed ? 'WEBHOOK_PROCESSED' : 'WEBHOOK_FAILED',
+        entityType: 'WEBHOOK_EVENT',
+        entityId: alatpayEventId,
+        newValue: {
+          provider: 'ALATPAY',
+          eventType,
+          processed: newProcessed,
+          failure: failureReason ?? null,
+          correlation: 'id' in locate ? { tier: 'located', id: locate.id, ref: locate.reference.slice(0, 40) } : locate,
+          finalTxIdPresent: !!finalTxId,
+        } as any,
+      },
+    })
+    .catch(() => {});
 });
 
 export default router;

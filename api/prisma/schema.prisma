@@ -265,6 +265,10 @@ model Transaction {
   paystackChannel     String?
   alatpayReference    String?           @unique
   alatpaySessionId    String?
+  alatpayOrderReference String?
+  alatpayInitPaymentReference String?
+  alatpayFinalTransactionId String?     @unique
+  alatpayCheckoutUrl  String?           @db.VarChar(1000)
   expectedAmount      Decimal?          @db.Decimal(15, 2)
   amount              Decimal           @db.Decimal(15, 2)
   type                TransactionType
