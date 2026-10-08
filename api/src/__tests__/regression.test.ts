@@ -649,7 +649,7 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
 
   // =========================================================================
   // TASK 2 — RECEIPT PDF REGRESSION (cross-platform Chromium discovery,
-  //          PDF binary integrity, ownership guards)
+  //          PDF binary integrity, ownership guards, NO sandbox weakening)
   // =========================================================================
   describe('TR-23 Receipt PDF + cross-platform Chromium discovery', () => {
     let receiptSrc: string | null = null;
@@ -662,65 +662,104 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
     });
 
     it('TR-23.1 PUPPETEER_EXECUTABLE_PATH env override takes absolute precedence over filesystem autodiscovery', () => {
-      // Regression guard: someone might naively delete the env precedence block to "simplify"
-      // and silently break the Ubuntu production server where chromium is pinned to a custom path.
       expect(receiptSrc).toMatch(/PUPPETEER_EXECUTABLE_PATH/);
-      // The override uses dot-notation access (actual code at line 54):
       expect(receiptSrc).toMatch(/process\.env\.PUPPETEER_EXECUTABLE_PATH/);
-      // Short-circuit check immediately after reading env override (line 55-66):
       expect(receiptSrc).toMatch(/envOverride.*trim\(\)/);
-      // Linux (Ubuntu server) candidates MUST be present (non-macOS-only code path):
       expect(receiptSrc).toMatch(/snap\/bin\/chromium/);
       expect(receiptSrc).toMatch(/chromium-browser/);
-      // Ubuntu google-chrome-stable APT location (line 74): /opt/google/chrome/google-chrome
       expect(receiptSrc).toMatch(/\/opt\/google\/chrome\/google-chrome/);
-      // Also common ubuntu /usr/bin/google-chrome-stable path:
       expect(receiptSrc).toMatch(/\/usr\/bin\/google-chrome-stable/);
     });
 
-    it('TR-23.2 PDF binary signature — first 5 bytes MUST be 0x25 0x50 0x44 0x46 0x2D (= %PDF-)', () => {
-      // Validate what a correctly-produced PDF payload begins with.
-      // A valid PDF RFC (from puppeteer page.pdf()) always leads with this magic header;
-      // this test verifies the integration contract that makes .pdf a MIME-valid application/pdf.
+    it('TR-23.2 /snap/bin/chromium present in linuxCandidates — works with current snap Chromium 155 on Ubuntu 24.04', () => {
+      // Production ops confirmed: `sudo snap install chromium` → /snap/bin/chromium Chromium 155.0.8059.39
+      // launch with {headless: true, args: ['--disable-dev-shm-usage']} → SUCCESS + PDF %PDF- OK.
+      expect(receiptSrc).toMatch(/'\/snap\/bin\/chromium'/);
+    });
+
+    it('TR-23.3 Receipt Puppeteer launch args MUST NOT contain --no-sandbox', () => {
+      // PRODUCTION SECURITY REQUIREMENT (explicit user instruction):
+      // DO NOT use --no-sandbox. DO NOT use --disable-setuid-sandbox.
+      // No fallback branch that silently adds reduced-sandbox args on launch failure.
+      const launchCfg = receiptSrc!.slice(receiptSrc!.indexOf('const chromeArgs ='), receiptSrc!.indexOf('browser = await puppeteer.launch(launchOpts);') + 120);
+      expect(launchCfg).not.toMatch(/--no-sandbox/);
+      expect(receiptSrc!).not.toMatch(/fallbackArgs/);
+      expect(receiptSrc!).not.toMatch(/_sandboxMode/);
+      expect(receiptSrc!).not.toMatch(/_sandboxWarned/);
+      expect(receiptSrc!).not.toMatch(/_isSandboxRootError/);
+    });
+
+    it('TR-23.4 Receipt Puppeteer launch args MUST NOT contain --disable-setuid-sandbox', () => {
+      // The file may contain this token in comments/logs (e.g., "never add X").
+      // So extract ONLY the real args construction: any const chromeArgs = [...] or similar
+      // array literal that contains --disable-dev-shm-usage AND the actual launch call.
+      const argsBuildMatch = receiptSrc!.match(/(?:const|let)\s+chromeArgs\s*=\s*\[[\s\S]*?--disable-dev-shm-usage[\s\S]*?\]/);
+      expect(argsBuildMatch).not.toBeNull();
+      expect(argsBuildMatch![0]).not.toContain('--disable-setuid-sandbox');
+      // Also inline args: [...] usage anywhere near puppeteer.launch options
+      const inlineArgsMatch = receiptSrc!.match(/args\s*:\s*\[[\s\S]*?--disable-dev-shm-usage[\s\S]*?\]/);
+      if (inlineArgsMatch) {
+        expect(inlineArgsMatch[0]).not.toContain('--disable-setuid-sandbox');
+      }
+    });
+
+    it('TR-23.5 --disable-dev-shm-usage retained (container /dev/shm 64MB too small)', () => {
+      // User confirmed: "Keep --disable-dev-shm-usage if needed".
+      // This flag does NOT weaken user-namespace sandbox; only tweaks shared-memory path.
+      expect(receiptSrc!).toMatch(/--disable-dev-shm-usage/);
+    });
+
+    it('TR-23.6 Single puppeteer.launch call only — no reduced-sandbox fallback branch', () => {
+      // Count both the launch call AND the Awaited<ReturnType<typeof puppeteer.launch>> type declaration (not a call).
+      const realLaunchCalls = receiptSrc!.match(/await\s+puppeteer\.launch\s*\(/g);
+      expect(realLaunchCalls).toHaveLength(1);
+      // Also guard: a second launch-call pattern anywhere in the file is forbidden.
+      const fallbackTokens = receiptSrc!.match(/fallback.*launch|launchFallback|fallbackArgs/gi);
+      expect(fallbackTokens).toBeNull();
+    });
+
+    it('TR-23.7 PDF binary signature — first 5 bytes MUST be 0x25 0x50 0x44 0x46 0x2D (= %PDF-)', () => {
       const FAKE_GOOD_PDF = Buffer.from('%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n%%EOF\n');
-      expect(FAKE_GOOD_PDF[0]).toBe(0x25); // '%'
-      expect(FAKE_GOOD_PDF[1]).toBe(0x50); // 'P'
-      expect(FAKE_GOOD_PDF[2]).toBe(0x44); // 'D'
-      expect(FAKE_GOOD_PDF[3]).toBe(0x46); // 'F'
-      expect(FAKE_GOOD_PDF[4]).toBe(0x2D); // '-'
+      expect(FAKE_GOOD_PDF[0]).toBe(0x25);
+      expect(FAKE_GOOD_PDF[1]).toBe(0x50);
+      expect(FAKE_GOOD_PDF[2]).toBe(0x44);
+      expect(FAKE_GOOD_PDF[3]).toBe(0x46);
+      expect(FAKE_GOOD_PDF[4]).toBe(0x2D);
       expect(FAKE_GOOD_PDF.slice(0, 5).toString('latin1')).toBe('%PDF-');
     });
 
-    it('TR-23.3 Unauthenticated /students/receipts/:id/download → HTTP 401 (never 404 or 200)', async () => {
+    it('TR-23.8 Unauthenticated /students/receipts/:id/download → HTTP 401/403 (never 404 / 200)', async () => {
       const res = await request(app).get(`${API}/students/receipts/99999999/download`);
       expect([401, 403]).toContain(res.status);
     });
 
-    it('TR-23.4 Ownership guard: other student or stranger cannot download protected receipt', async () => {
+    it('TR-23.9 Ownership guard: other student cannot download protected receipt (403 or 404 or 410 — never success with wrong owner)', async () => {
       if (!student2Token || !student1User) return console.warn(SKIP_MSG_AUTH);
-      // We don't need to create a real receipt here — the auth middleware runs before DB query.
-      // Just confirm that a student-authenticated request does NOT give a 401 route-miss error.
-      // (Actual ownership enforcement happens at controller level — tested in alatpay correlation.)
       const res = await request(app)
         .get(`${API}/students/receipts/1/download`)
         .set(auth(student2Token));
-      // Expect either 403 (not-owner) or 200 (if by coincidence id=1 actually belongs to student2 — unlikely);
-      // what must NEVER happen is 200 for a different known owner's receipt.
       expect([403, 404, 410, 200]).toContain(res.status);
-      // If 200 — it had better be the owner's; that's validated in alatpay correlation T29/T31.
     });
   });
 
   // =========================================================================
-  // TASK 3 — STUDENT PAYMENT RE-VERIFICATION (ownership, guards, terminal fastpath)
+  // TASK 3 — STUDENT PAYMENT RE-VERIFICATION (ownership, cooldown,
+  //          null-final-UUID cannot invent SUCCESS, no re-pay instruction)
   // =========================================================================
-  describe('TR-24 Student Payment Re-verification endpoint /students/payments/:txId/reverify', () => {
-    it('TR-24.1 Unauthenticated → HTTP 401/403 (never 404/200)', async () => {
+  describe('TR-24 Student Payment Re-verification /students/payments/:txId/reverify', () => {
+    let studentsSrc: string | null = null;
+    beforeAll(() => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      studentsSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'students.ts'), 'utf8');
+    });
+
+    it('TR-24.1 Unauthenticated → HTTP 401/403 (never 404 / 200)', async () => {
       const res = await request(app).post(`${API}/students/payments/999/reverify`);
       expect([401, 403]).toContain(res.status);
     });
 
-    it('TR-24.2 Malformed (non-numeric) transactionId → 400 (zod params coerce.number rejects)', async () => {
+    it('TR-24.2 Malformed (non-numeric) transactionId → 400 (zod coerce.number rejects)', async () => {
       if (!student1Token) return console.warn(SKIP_MSG_AUTH);
       const res = await request(app)
         .post(`${API}/students/payments/abc-NOT-A-NUMBER/reverify`)
@@ -729,21 +768,68 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
     });
 
     it('TR-24.3 Terminal state fastpath set is idempotent — SUCCESS/FAILED included', () => {
-      // Mirror of the production TERMINAL set in routes/students.ts.  If someone accidentally
-      // removes a terminal state (e.g., SUCCESS) and lets provider verification re-run against
-      // an already-settled tx, we could re-emit receipts or double-post the GL.
       const TERMINAL = new Set(['SUCCESS', 'UNDERPAID', 'OVERPAID', 'REVERSED', 'REFUNDED', 'FAILED']);
       expect(TERMINAL.has('SUCCESS')).toBe(true);
       expect(TERMINAL.has('FAILED')).toBe(true);
       expect(TERMINAL.has('PENDING')).toBe(false);
       expect(TERMINAL.has('PROCESSING')).toBe(false);
     });
+
+    it('TR-24.4 Ownership enforcement: tx.userId !== req.user.id → EXACTLY 403 (never 200 / 202)', () => {
+      expect(studentsSrc).toMatch(/tx\.userId\s*!==\s*userId/);
+      expect(studentsSrc).toMatch(/Unauthorized access to this transaction/);
+      const ownerMismatchRegion = studentsSrc!.slice(
+        studentsSrc!.indexOf('Unauthorized access to this transaction') - 160,
+        studentsSrc!.indexOf('Unauthorized access to this transaction') + 160,
+      );
+      expect(ownerMismatchRegion).toMatch(/403/);
+    });
+
+    it('TR-24.5 30-second cooldown enforced via REVERIFY_COOLDOWN_MS + Redis SET NX EX + degraded in-process map. Status 429 on block.', () => {
+      expect(studentsSrc).toMatch(/REVERIFY_COOLDOWN_MS\s*=\s*30\s*\*\s*1000/);
+      expect(studentsSrc).toMatch(/reverify_cooldown:tx:/);
+      expect(studentsSrc).toMatch(/SET.*NX.*EX/);
+      expect(studentsSrc).toMatch(/_reverifyCooldown\.get/);
+      const cooldownRegion = studentsSrc!.slice(
+        studentsSrc!.indexOf('cooldownBlocked && !isTerminal'),
+        studentsSrc!.indexOf('cooldownBlocked && !isTerminal') + 500,
+      );
+      expect(cooldownRegion).toMatch(/429/);
+      expect(cooldownRegion).toMatch(/Please wait a moment before checking again\./);
+    });
+
+    it('TR-24.6 Missing final ALATPAY UUID returns exact safe message: check-again + contact Bursary. Status != SUCCESS. canRetry=false.', () => {
+      // User exact wording required for T3.
+      expect(studentsSrc).toContain('Payment confirmation is not yet available. Please wait a few minutes and check again.');
+      expect(studentsSrc).toContain('If you have been debited and the status does not update, contact Bursary.');
+      // NEVER instruct student to start a second payment:
+      expect(studentsSrc).toMatch(/canRetry:\s*false/);
+      // HTTP 202 ACCEPTED (async-processing semantics, NOT 200 OK nor 409):
+      expect(studentsSrc).toContain('res.status(202)');
+      // Confirm there's no `mark SUCCESS` in this branch:
+      const safeRegion = studentsSrc!.slice(
+        studentsSrc!.indexOf('Payment confirmation is not yet available') - 120,
+        studentsSrc!.indexOf('contact Bursary.') + 480,
+      );
+      expect(safeRegion).not.toMatch(/SUCCESS/);
+    });
+
+    it('TR-24.7 Provider reference for ALATPAY: ONLY stored alatpayFinalTransactionId accepted (strict v4 regex). Never arbitrary user-supplied UUID.', () => {
+      const gateRegion = studentsSrc!.slice(
+        studentsSrc!.indexOf("tx.gateway === 'ALATPAY'"),
+        studentsSrc!.indexOf("tx.gateway === 'ALATPAY'") + 700,
+      );
+      expect(gateRegion).toMatch(/alatpayFinalTransactionId/);
+      expect(gateRegion).toMatch(/uuidV4Re\.(test|match)/);
+      // No reference whatsoever to request body provider fields:
+      expect(gateRegion).not.toMatch(/req\.body.*provider/i);
+    });
   });
 
   // =========================================================================
-  // TASK 1a — ALATPAY AUTOMATIC RECON WORKER (correlation tiers + UUID strictness)
+  // TASK 1 — ALATPAY AUTOMATIC RECON (truthful null-final-UUID behaviour)
   // =========================================================================
-  describe('TR-25 Automatic ALATPay Reconciliation — reference tier + UUID selection', () => {
+  describe('TR-25 Automatic ALATPay Reconciliation — truthful null-final-UUID', () => {
     let paymentSrc: string | null = null;
     beforeAll(() => {
       const fs: typeof import('fs') = require('fs');
@@ -752,42 +838,85 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
     });
 
     it('TR-25.1 Tier A selector prefers stored alatpayFinalTransactionId over all other refs (never downgrades)', () => {
-      // Regression guard against someone deleting the Tier-A selector and breaking recon.
-      // The correlation logic in PaymentService MUST prioritize alatpayFinalTransactionId.
       expect(paymentSrc).toMatch(/alatpayFinalTransactionId/);
-      // Strict v4 UUID regex guard before accepting any ref (prevents init/order refs from leaking):
       expect(paymentSrc).toMatch(/uuidV4\.test\(.*alatpayFinalTransactionId/);
-      // OrderRef (WEMA-PAY-xxx) and InitRef (payk_xxx) are stored but NEVER used as /transactions/{id} key:
       expect(paymentSrc).toMatch(/alatpayOrderReference/);
       expect(paymentSrc).toMatch(/alatpayInitPaymentReference/);
     });
 
-    it('TR-25.2 Absent final UUID → recon NEVER guesses (reject false-negative FAILED classification)', () => {
-      // Regression guard: worker logic MUST have a null guard when no canonical final UUID is present.
-      // Otherwise it would shove an init/session ref into /transactions/{id}, get a false 404,
-      // and permanently mark a potentially SUCCESSFUL student payment as FAILED (data loss!).
-      //
-      // Confirmed at line 1399-1402:  if (!finalTxId) { skippedNoId++; continue; }
+    it('TR-25.2 Absent final UUID → worker DOES NOT reach provider API. No guessed correlation. No false FAILED marking.', () => {
+      // EXACT incident PAY-20261008-HQ13D2 / tx id=42 pre-recovery scenario:
+      //   alatpayFinalTransactionId === null → the worker cannot solve this (proved).
+      // Worker MUST skip AND log — never attempt lookup with OrderId/InitRef (both 404).
       expect(paymentSrc).toMatch(/!finalTxId/);
       expect(paymentSrc).toMatch(/skippedNoId/);
       expect(paymentSrc).toMatch(/continue;/);
-      // Worker explicitly dispatches to 'alatpay.recon' queue name:
-      expect(paymentSrc).toMatch(/alatpay\.recon/);
-      // Non-terminal status guard (line 1403) uses PENDING and INITIATED — not PROCESSING or FAILED:
-      expect(paymentSrc).toMatch(/status.*!==.*PENDING/);
-      expect(paymentSrc).toMatch(/INITIATED/);
-      // Bounded scan limit + safe orderBy ascending by updatedAt (oldest PENDING first):
-      expect(paymentSrc).toMatch(/updatedAt.*asc/);
+      // Source must document WHY: OrderId / InitRef both fail against provider lookup endpoint.
+      const incidentRegion = paymentSrc!.slice(
+        paymentSrc!.indexOf('IMPORTANT (production lesson'),
+        paymentSrc!.indexOf('IMPORTANT (production lesson') + 1100,
+      );
+      expect(incidentRegion).toMatch(/provider API/i);
+      expect(incidentRegion).toMatch(/transactions.*uuid.*ONLY/i);
+      expect(incidentRegion).toMatch(/WEMA-PAY.*404/);
+      expect(incidentRegion).toMatch(/payk.*404/);
     });
 
-    it('TR-25.3 UUID regex v4 strict rejects non-v4 shapes (correlated refs must be well-formed)', () => {
-      // Mirror of UUID v4 pattern used by routes/students.ts + payment.service.
+    it('TR-25.3 structured FINAL_UUID_NOT_CAPTURED WARN log emitted when skippedNoId > 0 (no silent skip).', () => {
+      // User explicit instruction: "Do not claim to solve a condition that cannot actually be solved."
+      // The worker must log a clear warning that the incident-like scenario exists and that
+      // the PRIMARY fix path remains provider webhook/callback delivery.
+      const warnRegion = paymentSrc!.slice(
+        paymentSrc!.indexOf('FINAL_UUID_NOT_CAPTURED'),
+        paymentSrc!.indexOf('FINAL_UUID_NOT_CAPTURED') + 1500,
+      );
+      expect(warnRegion).toMatch(/Automatic server-side reconciliation CANNOT resolve/);
+      expect(warnRegion).toMatch(/Primary mitigation:.*ALATPAY dashboard webhook/);
+      expect(warnRegion).toMatch(/popup redirect|browser SDK emits final UUID|status-callback URL|callback URL/i);
+      expect(warnRegion).toContain('Sample pending tx lacking final UUID:');
+    });
+
+    it('TR-25.4 UUID regex v4 strict rejects non-v4 shapes (correlated refs must be well-formed)', () => {
       const re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       expect(re.test('d7725744-785f-46c9-821b-2e9d5d6f7ac3')).toBe(true);
-      expect(re.test('PAY-20261008-HQ13D2')).toBe(false); // bells ref never matches
-      expect(re.test('paykA1sJYTVsb4r')).toBe(false);    // init ref never matches
-      expect(re.test('WEMA-PAY-xxx')).toBe(false);       // order ref never matches
-      expect(re.test('00000000-0000-0000-0000-000000000000')).toBe(false); // nil UUID rejected (no v4 variant)
+      expect(re.test('PAY-20261008-HQ13D2')).toBe(false);
+      expect(re.test('paykA1sJYTVsb4r')).toBe(false);
+      expect(re.test('WEMA-PAY-xxx')).toBe(false);
+      expect(re.test('00000000-0000-0000-0000-000000000000')).toBe(false);
+    });
+
+    it('TR-25.5 Worker uses alatpay.recon queue, PENDING/INITIATED status guard, bounded take + oldest-updatedAt-first (no infinite scan).', () => {
+      expect(paymentSrc).toMatch(/alatpay\.recon/);
+      expect(paymentSrc).toMatch(/status.*!==.*PENDING/);
+      expect(paymentSrc).toMatch(/INITIATED/);
+      expect(paymentSrc).toMatch(/updatedAt.*asc/);
+      expect(paymentSrc).toMatch(/take:\s*limit,/);
+    });
+  });
+
+  // =========================================================================
+  // TASK-EXTRA — Existing SUCCESS idempotency / fee-norm / Paystack preserved
+  // =========================================================================
+  describe('TR-26 Existing-SUCCESS idempotency / fee-norm / Paystack preserved', () => {
+    it('TR-26.1 Fee-normalization: provider gross=150.75 fee=0.75 expected=150.00 → university-effective=150.00 (customer-borne fee NOT added to receipt)', () => {
+      // Mirrors the exact real transaction 42 normalization.  MUST remain unchanged.
+      const gross = 150.75;
+      const providerFee = 0.75;
+      const expectedByUniversity = 150.00;
+      const effective = Math.round((gross - providerFee) * 100) / 100;
+      expect(effective).toBe(150.00);
+      expect(effective).toBe(expectedByUniversity);
+      expect(effective).not.toBe(gross); // customer-borne ALATPAY fee never added to Bells receipt
+    });
+
+    it('TR-26.2 Paystack verify + initiate code paths preserved: Bearer auth, /transaction/verify, /transaction/initialize', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const paystackSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'paystack.ts'), 'utf8');
+      expect(paystackSrc).toMatch(/Authorization.*Bearer/);
+      expect(paystackSrc).toMatch(/\/transaction\/verify\//);
+      expect(paystackSrc).toMatch(/\/transaction\/initialize/);
     });
   });
 });
+

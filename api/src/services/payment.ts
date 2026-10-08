@@ -1391,6 +1391,7 @@ export class PaymentService {
     let totalEnqueued = 0;
     let skippedNoId = 0;
     let skippedTerminal = 0;
+    const noStoredFinalUuidTxSample: string[] = [];
     for (const tx of rows) {
       const finalTxId =
         typeof tx.alatpayFinalTransactionId === 'string' && uuidV4.test(tx.alatpayFinalTransactionId.trim())
@@ -1398,6 +1399,29 @@ export class PaymentService {
           : null;
       if (!finalTxId) {
         skippedNoId++;
+        // IMPORTANT (production lesson, incident PAY-20261008-HQ13D2 / tx id 42):
+        //   At this point tx.alatpayFinalTransactionId is NULL. The browser/callback
+        //   never fired (student closed popup or lost connectivity) AND the ALATPAY
+        //   webhook has also not delivered yet. The provider-side transaction IS
+        //   settled on ALATPAY's dashboard but we have no stored trustworthy identifier
+        //   to reach it with.
+        //
+        // The provider API (/transactions/{uuid}) ONLY accepts a final UUID. Using:
+        //   - alatpayOrderReference (WEMA-PAY-xxx shape) → provider responds 404
+        //   - alatpayInitPaymentReference (payk_xxx shape) → provider responds 404
+        //   - alatpaySessionId → wrong identifier type
+        //   - amount + student info → guessing = finance data loss (forbidden).
+        //
+        // THEREFORE: this worker MUST NOT invent a UUID or do a weak lookup by amount/
+        // student identity. It MUST skip and log the transaction so ops can identify:
+        //   (a) whether webhook configuration is broken (primary fix path), or
+        //   (b) whether the student needs to be advised to complete callback redirect.
+        if (noStoredFinalUuidTxSample.length < 5) {
+          noStoredFinalUuidTxSample.push(
+            `txId=${tx.id} ref=${String(tx.reference || '').slice(0, 24)} status=${String(tx.status || '')} ` +
+            `orderRef=(${!!tx.alatpayOrderReference}) initRef=(${!!tx.alatpayInitPaymentReference}) sessionId=(${!!tx.alatpaySessionId})`,
+          );
+        }
         continue;
       }
       if (tx.status !== 'PENDING' && (tx.status as any) !== 'INITIATED') {
@@ -1421,6 +1445,24 @@ export class PaymentService {
         // inline when Redis unavailable; if THAT also throws we silently skip
         // to next row (BullMQ retries will pick up the tx on next interval).
       }
+    }
+    // Structured log at WARN level: only printed when at least 1 tx has no stored final UUID
+    // so that operators can tell at a glance whether webhook/callback capture is failing broadly.
+    if (skippedNoId > 0) {
+      console.warn(
+        `[recon.scheduler] FINAL_UUID_NOT_CAPTURED=${skippedNoId}/${rows.length} pending ALATPAY tx have NO stored alatpayFinalTransactionId. ` +
+        'Automatic server-side reconciliation CANNOT resolve these without a trustworthy provider reference. ' +
+        'Primary mitigation: ensure ALATPAY dashboard webhook URL is correctly configured + HMAC secret matches env. ' +
+        'Secondary: advise student to complete popup redirect OR open status-callback URL so browser SDK emits final UUID. ' +
+        'Primary provider verification by worker only: when final UUID stored, enqueue proceeds. ' +
+        `Total scanned=${rows.length}; total enqueued=${totalEnqueued}; skipped-terminal=${skippedTerminal}. ` +
+        `Sample pending tx lacking final UUID: ${noStoredFinalUuidTxSample.join('; ') || '(none logged)'}`,
+      );
+    } else if (rows.length > 0) {
+      console.info(
+        `[recon.scheduler] enqueued ${totalEnqueued} / total scanned ${rows.length} pending ALATPAY tx. ` +
+        `skipped-terminal=${skippedTerminal}. All scanned pending rows had stored final UUID.`,
+      );
     }
     return { scanned: rows.length, totalEnqueued, skippedNoId, skippedTerminal };
   }

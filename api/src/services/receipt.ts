@@ -28,12 +28,10 @@ type PuppeteerApi = { launch: (opts?: unknown) => Promise<any> };
 let _puppeteerPromise: Promise<PuppeteerApi> | null = null;
 let _puppeteerApi: PuppeteerApi | null = null;
 let _puppeteerLoadFailed: Error | null = null;
-type _SandboxMode = 'strict' | 'fallback_nosandbox' | 'unknown';
-let _sandboxMode: _SandboxMode = 'unknown';
-let _sandboxWarned = false;
 let _headlessShellWarned = false;
 let _sandboxHomeRedirected = false;
 let _headlessShellCopyPath: string | null = null;
+let _executableLoggedOnce = false;
 
 function ensureSandboxHomeRedirected() {
   if (_sandboxHomeRedirected) return;
@@ -375,14 +373,6 @@ function chargeSourceHtml(info: DirectBillInfo): string {
   return `<div class="charge-source">Charge source: <strong>Direct Bill</strong> (Bursary assignment #${info.assignmentId})${matricPart}</div>`;
 }
 
-function _isSandboxRootError(msg: string): boolean {
-  const m = msg.toLowerCase();
-  return (
-    m.includes('running as root without --no-sandbox is not supported') ||
-    m.includes('setuid sandbox')
-  );
-}
-
 function assertSafeImageUrl(url: string | undefined | null): string | null {
   if (!url) return null;
   try {
@@ -423,7 +413,7 @@ function _isAllowedImageUrl(url: string): boolean {
 
 async function render(html: string) {
   ensureSandboxHomeRedirected();
-  const headlessShellBin = ensureChromeHeadlessShellCopied();
+  const executablePath = ensureChromeHeadlessShellCopied();
   const puppeteer = await loadPuppeteer();
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
   const userDataDir = `/tmp/uni-wallet-pdf-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -434,7 +424,16 @@ async function render(html: string) {
   };
 
   try {
-    const defaultChromeFlags = [
+    // IMPORTANT: Chromium user-namespace sandbox MUST remain enabled.
+    //   - NEVER add --no-sandbox or --disable-setuid-sandbox (production security rule).
+    //   - Ubuntu 24.04 + snap/chromium (Chromium 155) works with default sandbox enabled.
+    //   - --disable-dev-shm-usage is retained because container-style /dev/shm is often too small
+    //     (64 MB on default Docker/systemd slices) and would cause shared-memory OOM renders.
+    //   - executablePath precedence:
+    //       1. PUPPETEER_EXECUTABLE_PATH env override (X_OK verified)
+    //       2. platform auto-discovery list (includes /snap/bin/chromium for Ubuntu snap)
+    //       3. undefined (Puppeteer will attempt its own downloaded chrome path as last resort)
+    const chromeArgs = [
       '--disable-breakpad',
       '--disable-crash-reporter',
       '--crash-dumps-dir=/tmp/uni-wallet-crashpad',
@@ -450,43 +449,43 @@ async function render(html: string) {
       '--disable-dev-shm-usage',
       `--user-data-dir=${userDataDir}`,
     ];
-    const fallbackArgs = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      ...defaultChromeFlags,
-    ];
 
-    let baseOpts: any;
-    if (headlessShellBin) {
-      baseOpts = { headless: 'shell' as const, executablePath: headlessShellBin, ignoreHTTPSErrors: true, protocolTimeout: 60000 };
-    } else {
-      baseOpts = { headless: true, ignoreHTTPSErrors: true, protocolTimeout: 60000 };
+    if (!_executableLoggedOnce) {
+      _executableLoggedOnce = true;
+      console.info(
+        '[receipt.ts] Launching Puppeteer with Chromium sandbox ENABLED (no no-sandbox flags in use). ' +
+        `executablePath=${executablePath ? '"' + executablePath + '"' : '(auto, puppeteer default download)'} ` +
+        `node=${process.version} platform=${process.platform}`,
+      );
     }
 
-    if (_sandboxMode === 'unknown' || _sandboxMode === 'strict') {
-      try {
-        browser = await puppeteer.launch({ ...baseOpts, args: fallbackArgs });
-        if (_sandboxMode === 'unknown') _sandboxMode = 'strict';
-      } catch (err: any) {
-        const msg = err && typeof err.message === 'string' ? err.message : '';
-        if (_isSandboxRootError(msg) || msg.includes('EACCES') || msg.includes('sandbox')) {
-          if (!_sandboxWarned) {
-            _sandboxWarned = true;
-            console.warn(
-              '[receipt.ts] WARN: Chromium sandbox launch failed (running as root / sandbox exec EACCES?). ' +
-                'Falling back to --no-sandbox for this process lifetime. ' +
-                'For improved security run the server process as a non-root user in a sandboxed environment.',
-            );
-          }
-          _sandboxMode = 'fallback_nosandbox';
-          browser = await puppeteer.launch({ ...baseOpts, args: fallbackArgs });
-        } else {
-          throw err;
-        }
-      }
-    } else {
-      browser = await puppeteer.launch({ ...baseOpts, args: fallbackArgs });
+    if (!executablePath) {
+      // Fail server-side early with structured guidance; do not let students see internal path.
+      console.error(
+        '[receipt.ts] FATAL: No Chromium/Chrome executable found. ' +
+        'Install chromium-browser/chromium/google-chrome-stable on the server (e.g. `sudo snap install chromium` on Ubuntu) ' +
+        'or set PUPPETEER_EXECUTABLE_PATH to the absolute path of a valid sandboxed Chromium binary with +x permission. ' +
+        'Puppeteer will still attempt its default chrome search as a last-resort fallback.',
+      );
     }
+
+    // NOTE: headless 'shell' is for chrome-headless-shell which has the same
+    // PDF rendering pipeline as regular chrome. On a standard ubuntu snap
+    // chromium install we get a full Chromium binary — headless:true works just
+    // as well and is the mode the ops team manually validated on 2026-10-08.
+    const headlessMode = executablePath?.includes('chrome-headless-shell') ? ('shell' as const) : true;
+
+    // SINGLE STRICT LAUNCH — no fallback to reduced sandbox modes of any kind.
+    // If sandbox launch fails, throw so logs contain the real error and the
+    // user sees a generic 500 "Failed to generate receipt PDF".
+    const launchOpts: any = {
+      headless: headlessMode,
+      executablePath: executablePath ?? undefined,
+      ignoreHTTPSErrors: true,
+      protocolTimeout: 60000,
+      args: chromeArgs,
+    };
+    browser = await puppeteer.launch(launchOpts);
 
     const page = await browser.newPage();
     // Force Puppeteer's FrameManager to walk any existing pages and wire

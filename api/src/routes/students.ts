@@ -209,10 +209,33 @@ router.post(
       providerMissingReason = 'unsupported_gateway';
     }
     if (!isTerminal && providerMissingReason) {
-      return res.status(409).json({
-        status: 'unable_to_confirm',
+      // EXACT behaviour for the incident-like scenario where final UUID is NULL:
+      //   - transaction remains in whatever state it was before (typically PENDING)
+      //   - we DO NOT mark SUCCESS
+      //   - we DO NOT tell the student to start a second payment
+      //   - we DO NOT accept any uncorrelated provider identifier
+      //   - we explain that confirmation isn't yet available; student can wait
+      //     and retry later; if debited and still not updated, contact Bursary.
+      // Status 202 = Accepted for asynchronous processing; no server-side action
+      // has been taken against the provider yet because no trustworthy correlation
+      // data exists.  Frontend displays a non-success non-failure state.
+      return res.status(202).json({
+        status: 'pending_confirmation',
         reason: providerMissingReason,
-        message: 'Unable to confirm payment automatically. Please contact Bursary with your payment reference.',
+        uiState: 'unavailable',
+        message:
+          'Payment confirmation is not yet available. Please wait a few minutes and check again. ' +
+          'If you have been debited and the status does not update, contact Bursary.',
+        supportContact: true,
+        transaction: {
+          id: tx.id,
+          reference: tx.reference,
+          status: tx.status,
+          gateway: tx.gateway,
+          canRetry: false,       // NEVER instruct to re-pay
+          shouldContactSupport: true,
+          nextCheckHint: 'You can press Check Payment Status again in a few minutes.',
+        },
       });
     }
 
