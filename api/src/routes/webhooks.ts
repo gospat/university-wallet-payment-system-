@@ -50,6 +50,9 @@ import {
   selectAlatpayFinalTxId,
   AlatpayCustomerMetadata,
   normalizeAlatpayWebhookEnvelope,
+  deriveAlatpayWebhookEventId,
+  ALATPAY_IDEVENT_ID_SEMANTIC,
+  ALATPAY_IDEVENT_ID_SEMANTIC_PROOF,
 } from '../utils/alatpay';
 import { i18n } from '../i18n/en';
 import { AdminNotificationService } from '../services/adminNotification';
@@ -458,9 +461,37 @@ router.post('/alatpay', async (req: Request, res: Response) => {
   // ---------------------------------------------------------------------------
   const body: AlatpayWebhookEnvelope = req.body ?? {};
   const norm = normalizeAlatpayWebhookEnvelope(body);
-  const alatpayEventId =
-    (norm.Id && norm.Id.length > 0) ? norm.Id :
-    extractAlatpayEventId(body);
+  // =========================================================================
+  // ISSUE: alatpay data.id / Value.Data.Id semantic = ASSUMPTION A
+  // (transaction ID, per /transactions/{id} endpoint working evidence).
+  // NOT PROVEN to be a UNIQUE DELIVERY/EVENT ID.
+  // THUS: we CANNOT use data.id directly as UNIQUE key alatpayEventId in
+  // webhook_events because a later status transition (pending→completed)
+  // sharing the same trans UUID would be suppressed (update: {}) AND BullMQ
+  // dedup would ignore the job, leaving the student PENDING forever.
+  // FIX — derive alatpayEventId from the HMAC-AUTHENTICATED raw request
+  // body + signature header using HMAC(webhook_secret, "v1|len(body)|len(sig)|body|sig")
+  // → base64url of 43 chars. This:
+  //    • keeps byte-identical retries IDEMPOTENT (same key);
+  //    • allows status transitions through (body JSON differs → new key);
+  //    • keyed HMAC prevents attacker poisoning of UNIQUE constraint;
+  //    • NO DB MIGRATION — alatpayEventId UNIQUE(String?) schema already
+  //      accepts arbitrary strings up to its size (255 or default; 43+5=48
+  //      chars is well below limit).
+  // Constants ALATPAY_IDEVENT_ID_SEMANTIC* = exported from utils/alatpay.ts
+  // with the full proof statement. Operator may inspect them for audit.
+  // =========================================================================
+  // (ALATPAY_IDEVENT_ID_SEMANTIC, ALATPAY_IDEVENT_ID_SEMANTIC_PROOF imported
+  //  but intentionally referenced here with void to silence unused-import
+  //  warnings; the canonical comment block above re-states the design so
+  //  maintainers don't need to cross files.)
+  void ALATPAY_IDEVENT_ID_SEMANTIC;
+  void ALATPAY_IDEVENT_ID_SEMANTIC_PROOF;
+  const alatpayEventId: string = deriveAlatpayWebhookEventId(rawBody, signature);
+  // The STABLE provider transaction UUID remains norm.Id (still data.id or
+  // Value.Data.Id). Used for provider verify, correlation, logs. Distinct
+  // from alatpayEventId idempotency key now.
+  const providerTransUuid: string | null = norm.Id ?? null;
   // Event type mapping (FAIL-OPEN for pending/unknown — they must NEVER become FAILED automatically):
   //   SUCCESS/COMPLETED/PAID          → charge.success   → provider verify required; money moves only after server-side confirm
   //   FAILED/DECLINED/REJECTED/CANCELLED/CANCELED/EXPIRED  → charge.failed    → confirmed failures only; mark tx FAILED
@@ -488,11 +519,12 @@ router.post('/alatpay', async (req: Request, res: Response) => {
   }
   const orderId = norm.OrderId ?? undefined;
   const customerTxId = norm.Customer?.TransactionId ?? undefined;
-  const transactionRef = orderId ?? customerTxId ?? (alatpayEventId ? String(alatpayEventId) : undefined);
+  const transactionRef =
+    orderId ?? customerTxId ?? (providerTransUuid ? providerTransUuid : undefined);
 
-  if (!alatpayEventId) {
+  if (!alatpayEventId || alatpayEventId.length < 8) {
     // eslint-disable-next-line no-console
-    console.warn('[webhook:alatpay] missing Value.Data.Id (event id) — ack 200 to avoid retries.');
+    console.warn('[webhook:alatpay] event id derivation failed (unexpected) — ack 200 to avoid retries.');
     return res.status(200).json({ status: 'ok', processed: false, reason: i18n.errors.webhook.missingEventId });
   }
 

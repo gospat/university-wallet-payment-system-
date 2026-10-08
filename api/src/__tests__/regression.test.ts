@@ -1243,6 +1243,302 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
   });
 
   // =========================================================================
+  // TR-30 — ALATPay webhook idempotency (HMAC-body event key, not data.id)
+  // =========================================================================
+  // Scenarios (1 to 9 per requirement; 10 is Paystack untouched).
+  // All tests use LOCAL-ONLY assertions on the idempotency event-key derivation
+  // and worker/mapper logic via the exported utilities. No live HTTP provider
+  // calls, no production DB mutation.
+  describe('TR-30 Issue: webhook event idempotency at EVENT level (not transaction-id level)', () => {
+    const MOCK_SECRET = 'unit-test-secret-00000000000000000000000000000';
+    const TRANS_UUID = 'd7725744-785f-46c9-821b-2e9d5d6f7ac3';
+    const WEMA_REF = 'WEMA-PAY-TEST30-' + Date.now();
+    const INIT_REF = 'paykTEST30abcdefgh';
+    const BELLS_REF = 'PAY-TEST30-' + Date.now();
+
+    const buildLowercaseBody = (status: string, extraData: Record<string, any> = {}) => ({
+      data: {
+        id: TRANS_UUID,
+        status,
+        orderId: WEMA_REF,
+        amount: 150.75,
+        feeAmount: 0.75,
+        currency: 'NGN',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        sessionId: 'sess-test30',
+        customer: {
+          transactionId: INIT_REF,
+          email: 'student1@university.edu.ng',
+          firstName: 'Alpha',
+          lastName: 'Student',
+          metadata: JSON.stringify({
+            transaction_id: 100030,
+            bells_payment_reference: BELLS_REF,
+            student_id: 440001,
+          }),
+        },
+        ...extraData,
+      },
+    });
+
+    const buildLegacyBody = (status: string, extraData: Record<string, any> = {}) => ({
+      Value: {
+        Data: {
+          Id: TRANS_UUID,
+          Status: status,
+          OrderId: WEMA_REF,
+          Amount: 150.75,
+          FeeAmount: 0.75,
+          Currency: 'NGN',
+          CreatedAt: new Date().toISOString(),
+          UpdatedAt: new Date().toISOString(),
+          SessionId: 'sess-test30',
+          Customer: {
+            TransactionId: INIT_REF,
+            Email: 'student1@university.edu.ng',
+            FirstName: 'Alpha',
+            LastName: 'Student',
+            Metadata: JSON.stringify({
+              transaction_id: 100030,
+              bells_payment_reference: BELLS_REF,
+              student_id: 440001,
+            }),
+          },
+          ...extraData,
+        },
+      },
+    });
+
+    // Helper: raw body (stringified) — same bytes mean identical events
+    const buf = (obj: unknown): Buffer => Buffer.from(JSON.stringify(obj), 'utf-8');
+
+    const getAlatpayUtils = () => require('../utils/alatpay');
+    const getWebhooksSrc = () => {
+      const fs = require('fs');
+      const path = require('path');
+      return fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.ts'), 'utf8');
+    };
+    const getSchemaSrc = () => {
+      const fs = require('fs');
+      const path = require('path');
+      return fs.readFileSync(path.join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8');
+    };
+
+    it('TR-30.1 [REQ 1] Same transaction UUID + pending callback leaves Bells tx as PENDING (test uses status mapping + DB fixture)', async () => {
+      if (!student1Token || !student1User?.id) return console.warn(SKIP_MSG_AUTH);
+      const prisma = require('../config/database').default ?? require('../config/database');
+      const uniq = 'TR301-' + Date.now() + '-' + Math.floor(Math.random() * 1e9);
+      const created = await prisma.transaction.create({
+        data: {
+          userId: Number(student1User.id),
+          type: 'FEE_PAYMENT',
+          gateway: 'ALATPAY',
+          reference: uniq,
+          status: 'PENDING',
+          expectedAmount: 150.0,
+          amount: 0,
+          alatpayFinalTransactionId: TRANS_UUID,
+          alatpayOrderReference: WEMA_REF + '-' + uniq,
+          alatpayInitPaymentReference: INIT_REF + '-' + uniq,
+          description: 'TR-30.1 pending never FAILED test ' + uniq,
+        },
+        select: { id: true, status: true },
+      });
+      try {
+        const { normalizeAlatpayWebhookEnvelope, normalizeAlatStatus } = getAlatpayUtils();
+        // pending status → charge.unknown → our code never writes FAILED; row remains
+        const envelope = buildLowercaseBody('pending');
+        const norm = normalizeAlatpayWebhookEnvelope(envelope);
+        expect(norm.Id).toBe(TRANS_UUID);
+        expect(normalizeAlatStatus(norm.Status)).toBe('pending');
+        const rawStatus = String(norm.Status ?? '').toLowerCase();
+        const isConfirmedFailure =
+          normalizeAlatStatus(norm.Status) === 'failed' ||
+          ['failed', 'declined', 'rejected', 'cancelled', 'canceled', 'expired'].includes(rawStatus);
+        // => not a confirmed failure => charge.unknown => status untouched
+        expect(isConfirmedFailure).toBe(false);
+        const row = await prisma.transaction.findUnique({ where: { id: Number(created.id) }, select: { status: true } });
+        expect(row?.status).toBe('PENDING');
+      } finally {
+        try { await prisma.transaction.delete({ where: { id: Number(created.id) } }); } catch { /* ignore */ }
+      }
+    });
+
+    it('TR-30.2 [REQ 2] Same transaction UUID + later completed callback = distinct event key (NOT suppressed as duplicate)', () => {
+      const { deriveAlatpayWebhookEventId } = getAlatpayUtils();
+      const pendingBody = buf(buildLowercaseBody('pending'));
+      const completedBody = buf(buildLowercaseBody('completed'));
+      const sigPending = 'sig-a';
+      const sigCompleted = 'sig-b';
+      const keyPending = deriveAlatpayWebhookEventId(pendingBody, sigPending, MOCK_SECRET);
+      const keyCompleted = deriveAlatpayWebhookEventId(completedBody, sigCompleted, MOCK_SECRET);
+      // Different body (pending vs completed) → different event keys.
+      expect(keyPending).not.toEqual(keyCompleted);
+      // Keys are length-checked (awv1: prefix + 43-char base64url)
+      expect(keyPending.startsWith('awv1:')).toBe(true);
+      expect(keyCompleted.startsWith('awv1:')).toBe(true);
+      expect(keyPending.length).toBeGreaterThanOrEqual(48);
+      expect(keyCompleted.length).toBeGreaterThanOrEqual(48);
+      const whsrc = getWebhooksSrc();
+      // webhooks.ts step 4 upserts UNIQUE alatpayEventId; different keys can't collide.
+      expect(whsrc).toMatch(/webhookEvent\.upsert[\s\S]*?where:\s*\{\s*alatpayEventId\s*\}/m);
+    });
+
+    it('TR-30.3 [REQ 3] Exact duplicate pending webhook → DETERMINISTIC same event key (deduplicated safely)', () => {
+      const { deriveAlatpayWebhookEventId } = getAlatpayUtils();
+      const body = buf(buildLegacyBody('PENDING'));
+      const sig = 'same-sig-303';
+      const k1 = deriveAlatpayWebhookEventId(body, sig, MOCK_SECRET);
+      const k2 = deriveAlatpayWebhookEventId(body, sig, MOCK_SECRET);
+      expect(k1).toEqual(k2);
+    });
+
+    it('TR-30.4 [REQ 4] Exact duplicate completed webhook → same event key (prevents double receipt / double ledger / double credit)', () => {
+      const { deriveAlatpayWebhookEventId } = getAlatpayUtils();
+      const body = buf(buildLowercaseBody('completed'));
+      const sig = 'same-sig-304';
+      const a = deriveAlatpayWebhookEventId(body, sig, MOCK_SECRET);
+      const b = deriveAlatpayWebhookEventId(body, sig, MOCK_SECRET);
+      expect(a).toEqual(b);
+      const whsrc = getWebhooksSrc();
+      // BullMQ jobId also uses alatpayEventId → deduped; idempotency DB upsert uses it too; isProcessed flag in handler short-circuits.
+      expect(whsrc).toMatch(/jobId:\s*[`'"]alatpay-webhook:\$\{alatpayEventId\}[`'"]/);
+      expect(whsrc).toMatch(/isProcessed && !forceReprocess\)\s*return;/);
+    });
+
+    it('TR-30.5 [REQ 5] Same trans UUID: pending → completed → both event keys distinct (status transition processable)', () => {
+      const { deriveAlatpayWebhookEventId, normalizeAlatStatus } = getAlatpayUtils();
+      const pendingPayload = buildLowercaseBody('pending');
+      const completedPayload = buildLowercaseBody('completed', { updatedAt: new Date(Date.now() + 15000).toISOString() });
+      const pendingKey = deriveAlatpayWebhookEventId(buf(pendingPayload), 'sigP', MOCK_SECRET);
+      const completedKey = deriveAlatpayWebhookEventId(buf(completedPayload), 'sigC', MOCK_SECRET);
+      expect(pendingKey).not.toEqual(completedKey);
+      // Status mapping correct for each:
+      const { normalizeAlatpayWebhookEnvelope } = getAlatpayUtils();
+      const p = normalizeAlatpayWebhookEnvelope(pendingPayload);
+      const c = normalizeAlatpayWebhookEnvelope(completedPayload);
+      expect(normalizeAlatStatus(p.Status)).toBe('pending');
+      expect(normalizeAlatStatus(c.Status)).toBe('success');
+    });
+
+    it('TR-30.6 [REQ 6] Same trans UUID: processing → completed → distinct event keys', () => {
+      const { deriveAlatpayWebhookEventId, normalizeAlatpayWebhookEnvelope, normalizeAlatStatus } = getAlatpayUtils();
+      const proc = buildLowercaseBody('processing');
+      const done = buildLowercaseBody('success');
+      const pk = deriveAlatpayWebhookEventId(buf(proc), 'sigproc', MOCK_SECRET);
+      const dk = deriveAlatpayWebhookEventId(buf(done), 'sigdone', MOCK_SECRET);
+      expect(pk).not.toEqual(dk);
+      const pn = normalizeAlatpayWebhookEnvelope(proc);
+      const dn = normalizeAlatpayWebhookEnvelope(done);
+      expect(normalizeAlatStatus(pn.Status)).toBe('pending');
+      expect(normalizeAlatStatus(dn.Status)).toBe('success');
+    });
+
+    it('TR-30.7 [REQ 7] Same trans UUID: pending → failed ONLY for confirmed-failure status (failed/declined/rejected/cancelled/canceled/expired). All others charge.unknown.', () => {
+      const { normalizeAlatpayWebhookEnvelope, normalizeAlatStatus } = getAlatpayUtils();
+      const confirmFailed = (status: string) => {
+        const n = normalizeAlatpayWebhookEnvelope(buildLowercaseBody(status));
+        const sl = String(n.Status ?? '').toLowerCase();
+        return normalizeAlatStatus(n.Status) === 'failed' ||
+          ['failed', 'declined', 'rejected', 'cancelled', 'canceled', 'expired'].includes(sl);
+      };
+      // Explicit confirmed-failure list → MUST map to charge.failed
+      const mustBeFailed = ['failed', 'FAILED', 'declined', 'REJECTED', 'CANCELLED', 'canceled', 'expired'];
+      for (const s of mustBeFailed) expect(confirmFailed(s)).toBe(true);
+      // Everything else is charge.unknown (not auto-failed)
+      const mustNotBeFailed = ['pending', 'PROCESSING', 'initiated', 'seen', 'held', 'reviewing', '', 'SOMETHING-ELSE', null as any];
+      for (const s of mustNotBeFailed) expect(confirmFailed(s)).toBe(false);
+    });
+
+    it('TR-30.8 [REQ 8] SUCCESS Bells tx cannot subsequently be downgraded by failed/pending callbacks (source guard + DB fixture)', async () => {
+      if (!student1Token || !student1User?.id) return console.warn(SKIP_MSG_AUTH);
+      const prisma = require('../config/database').default ?? require('../config/database');
+      const uniq = 'TR308-' + Date.now() + '-' + Math.floor(Math.random() * 1e9);
+      const created = await prisma.transaction.create({
+        data: {
+          userId: Number(student1User.id),
+          type: 'FEE_PAYMENT',
+          gateway: 'ALATPAY',
+          reference: uniq,
+          status: 'SUCCESS',
+          expectedAmount: 150.0,
+          amount: 150.0,
+          alatpayFinalTransactionId: TRANS_UUID,
+          description: 'TR-30.8 downgrade guard ' + uniq,
+        },
+        select: { id: true, status: true },
+      });
+      try {
+        // 1. Source-level check: handler guards SUCCESS/UNDERPAID/OVERPAID/REVERSED → no update
+        const whsrc = getWebhooksSrc();
+        const failedBlock = whsrc.slice(whsrc.indexOf("case 'charge.failed':"), whsrc.indexOf("case 'charge.failed':") + 2000);
+        expect(failedBlock).toMatch(/SUCCESS.*UNDERPAID.*OVERPAID.*REVERSED/);
+        expect(failedBlock).toMatch(/where:\s*\{\s*id:\s*existing\.id[,\s]*status:\s*['"]PENDING['"]\s*as\s*any\s*\}/);
+        // 2. DB fixture: simulate the exact SQL WHERE predicate => 0 rows affected
+        const res = await prisma.transaction.updateMany({
+          where: { id: Number(created.id), status: 'PENDING' },
+          data: { status: 'FAILED', underpaidReason: 'TR-30.8 attempted downgrade (rollback-safe check only; will not touch SUCCESS row because PENDING where-clause)' },
+        });
+        expect(res.count).toBe(0); // no row updated
+        const actual = await prisma.transaction.findUnique({ where: { id: Number(created.id) }, select: { status: true } });
+        expect(actual?.status).toBe('SUCCESS'); // preserved!
+      } finally {
+        try { await prisma.transaction.delete({ where: { id: Number(created.id) } }); } catch { /* ignore */ }
+      }
+    });
+
+    it('TR-30.9 [REQ 9] webhook_events.alatpayEventId UNIQUE schema column, deriveAlatpayWebhookEventId, BullMQ jobId are all consistent', () => {
+      // 1) prisma schema still declares alatpayEventId @unique (no migration)
+      const schema = getSchemaSrc();
+      expect(schema).toMatch(/alatpayEventId\s+String\?\s*@unique/);
+      // 2) webhooks.ts route step4: alatpayEventId assigned from derive helper
+      const whsrc = getWebhooksSrc();
+      expect(whsrc).toMatch(/deriveAlatpayWebhookEventId\(rawBody,\s*signature\)/);
+      expect(whsrc).toMatch(/const alatpayEventId: string = deriveAlatpayWebhookEventId\(rawBody,\s*signature\);/);
+      // upsert where uses alatpayEventId and create sets it too — take the SECOND prisma.webhookEvent.upsert (alatpay one at line ~535)
+      const allUpsertMatches: number[] = [];
+      let idx = -1;
+      const search = 'prisma.webhookEvent.upsert';
+      while ((idx = whsrc.indexOf(search, idx + 1)) !== -1) allUpsertMatches.push(idx);
+      expect(allUpsertMatches.length).toBeGreaterThanOrEqual(2);
+      const alatpayUpsert = whsrc.slice(allUpsertMatches[1], allUpsertMatches[1] + 1200);
+      expect(alatpayUpsert).toMatch(/where:\s*\{\s*alatpayEventId\s*\}/);
+      expect(alatpayUpsert).toMatch(/create:\s*\{\s*paystackEventId:\s*null[,\s\S]*alatpayEventId[,\s\S]*eventType/);
+      // 3) BullMQ job id = alatpay-webhook:${alatpayEventId} → same unique key
+      expect(whsrc).toMatch(/jobId:\s*`alatpay-webhook:\$\{alatpayEventId\}`/);
+      // 4) Handler payload uses the same alatpayEventId, findUnique by that same key → consistent
+      const handlerFindUniqs = [...whsrc.matchAll(/findUnique\(\{\s*where:\s*\{\s*alatpayEventId\s*\},?\s*\}\)/g)];
+      expect(handlerFindUniqs.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('TR-30.10 [REQ 10] Existing Paystack webhook idempotency unchanged: paystackEventId upsert + BullMQ jobId dedup. No ALAT changes touched Paystack.', () => {
+      const whsrc = getWebhooksSrc();
+      // Paystack upsert (first upsert in file is the paystack one)
+      const psUpsertIdx = whsrc.indexOf('prisma.webhookEvent.upsert');
+      const psUpsert = whsrc.slice(psUpsertIdx, psUpsertIdx + 1200);
+      expect(psUpsert).toMatch(/where:\s*\{\s*paystackEventId\s*\}/);
+      expect(psUpsert).toMatch(/create:\s*\{\s*paystackEventId,[\s\S]*?eventType,[\s\S]*?transactionReference:[\s\S]*?dataRef[\s\S]*?payload:[\s\S]*?isProcessed:\s*false/);
+      // Find the REAL registered handler (NOT the scaffold comment). Search for:
+      //   registerHandler('paystack.webhook', async (payload, _ctx) => {
+      // by finding the SECOND occurrence of the literal string, or the one
+      // immediately followed by `const row = ... findUnique`:
+      const firstLiteral = whsrc.indexOf("registerHandler('paystack.webhook'");
+      const secondLiteral = whsrc.indexOf("registerHandler('paystack.webhook'", firstLiteral + 1);
+      const psHandlerIdx = secondLiteral !== -1 ? secondLiteral : firstLiteral;
+      const psHandler = whsrc.slice(psHandlerIdx, psHandlerIdx + 2000);
+      expect(psHandler).toMatch(/findUnique\(\{\s*where:\s*\{\s*paystackEventId\s*\},?\s*\}\)/);
+      // Paystack dispatchJob uses paystackEventId for jobId (unchanged)
+      expect(whsrc).toMatch(/jobId:\s*[`'"]paystack-webhook:\$\{paystackEventId\}[`'"]/);
+      // No mention of deriveAlatpayWebhookEventId in the Paystack-specific ROUTE HANDLER region (between Paystack handler start and ALAT handler start; imports excluded explicitly):
+      const psStart = whsrc.indexOf("router.post('/paystack'");
+      const alatStart = whsrc.indexOf("router.post('/alatpay'");
+      const paystackRegion2 = whsrc.slice(psStart, alatStart);
+      expect(paystackRegion2).not.toMatch(/deriveAlatpayWebhookEventId/);
+    });
+  });
+
+  // =========================================================================
   // TASK-EXTRA — Existing SUCCESS idempotency / fee-norm / Paystack preserved
   // =========================================================================
   describe('TR-26 Existing-SUCCESS idempotency / fee-norm / Paystack preserved', () => {

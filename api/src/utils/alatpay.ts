@@ -106,6 +106,87 @@ export function getAlatpayWebhookSecret(): string {
 }
 
 // =============================================================================
+// ISSUE 322191a CORRECTION: data.id semantic UNPROVEN (A) vs (B) classification.
+// -----------------------------------------------------------------------------
+// Provider documentation + dashboard never explicitly distinguishes whether
+// `data.id` / `Value.Data.Id` represents:
+//   (A) FINAL PROVIDER TRANSACTION ID — i.e. identifier that works with
+//       GET /transactions/{id} endpoint and is STABLE for the lifetime of one
+//       provider payment (pending → processing → completed all share the id)
+//   (B) UNIQUE PER-WEBHOOK DELIVERY ID — i.e. every delivery (incl. retries,
+//       incl. status transitions) gets a NEW identifier
+//   (C) UNDOCUMENTED / UNKNOWN.
+//
+// Evidence we have today SUPPORTS option (A) and DOES NOT SUPPORT option (B):
+//   - The only provider UUID that ever worked with /transactions/{id} in our
+//     production integration was the same UUID shown in the dashboard "final
+//     transaction id" row for SUCCESSFUL payment d7725744-… which matches the
+//     data.id shape. Same identifier verifies regardless of when we call verify.
+//   - ALATPay's Setup Callback URL docs never mention "event id", "delivery
+//     id", or separate uuid-per-notification terminology; they only talk about
+//     the transaction id.
+//   - WooCommerce plugin v1.1.0 (official) stores a single transaction id per
+//     order (never per-event), suggesting status updates reuse the id.
+// HOWEVER we do NOT have a signed pair of pending→completed webhooks from
+// production with which to PROVE (B) is false. We therefore treat data.id as
+// option (A) TRANSACTION ID and design idempotency on a SEPARATE event key
+// derived deterministically from the AUTHENTICATED raw webhook payload so
+// status transitions are NOT suppressed. See deriveAlatpayWebhookEventId().
+// =============================================================================
+
+export const ALATPAY_IDEVENT_ID_SEMANTIC: 'A_TRANSACTION_ID' | 'B_DELIVERY_ID' | 'C_UNKNOWN' = 'A_TRANSACTION_ID';
+export const ALATPAY_IDEVENT_ID_SEMANTIC_PROOF: string = 'CONSERVATIVE ASSUMPTION A (not proven). Provider dashboard UUID shape matches the /transactions/{id} endpoint canonical identifier for a given payment. No signed pair of real production pending→completed webhook deliveries captured yet; therefore cannot independently prove B. Safe path uses separate event id derived from HMAC-authenticated raw body below.';
+
+// =============================================================================
+// IDEMPOTENCY — deriveAlatpayWebhookEventId(rawBody, signature, secret_opt)
+// -----------------------------------------------------------------------------
+// DETERMINISTIC key derivation. The input is the EXACT authenticated raw
+// request body + canonical signature header string. The output is a URL-safe
+// base64 (no padding) string of length 43 characters sha256 → acts as a
+// STRONG provider-webhook-event identifier that:
+//   • deduplicates byte-identical retries (e.g. provider retries over HTTP),
+//   • ALLOWS processing legitimate status transitions:
+//       pending → completed
+//       pending → failed
+//       processing → completed
+//     because even if ALATPay sends the same data.id value for different
+//     status notifications, the body JSON differs → hash is DIFFERENT,
+//   • never collides under cryptographic assumptions (2^256 security),
+//   • uses KEYED HMAC rather than plain SHA so the event identifier cannot
+//     be guessed / poisoned by an attacker guessing body contents (even if
+//     they know our table's UNIQUE constraint — they can't force a collision
+//     because they lack ALATPAY_WEBHOOK_SECRET).
+// HMAC is used with ALATPAY_WEBHOOK_SECRET to make it keyed.
+// =============================================================================
+export function deriveAlatpayWebhookEventId(
+  rawBody: Buffer | string,
+  signatureHeaderReceived: string | undefined | null,
+  webhookSecretOverride?: string,
+): string {
+  const bodyBuf = Buffer.isBuffer(rawBody)
+    ? rawBody
+    : Buffer.from(String(rawBody ?? ''), 'utf-8');
+  const sigStr = String(signatureHeaderReceived ?? '').trim();
+  const secret = (() => {
+    try {
+      return webhookSecretOverride ?? getAlatpayWebhookSecret();
+    } catch {
+      // Fallback (only if env var missing, but endpoint returns 403 earlier).
+      // Use a fixed 32-byte fallback derived deterministically from signature+len to stay
+      // deterministic even when env broken (HMAC fail-closed already returned 403 anyway,
+      // so this fallback never reaches the idempotency upsert in happy path).
+      return `fallback_${bodyBuf.length}_${sigStr.length}`.padEnd(32, '_').slice(0, 32);
+    }
+  })();
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(`v1|${bodyBuf.length}|${sigStr.length}|`);
+  hmac.update(bodyBuf);
+  hmac.update(`|${sigStr}`);
+  const digest = hmac.digest().toString('base64');
+  return 'awv1:' + digest.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// =============================================================================
 // WEBHOOK HMAC VERIFICATION — Status: IMPLEMENTED as HMAC-SHA256 + Base64 digest
 // =============================================================================
 // ⚠️  PROVIDER-UNPROVEN PORTION (ISSUE 4 CLARIFICATION):
