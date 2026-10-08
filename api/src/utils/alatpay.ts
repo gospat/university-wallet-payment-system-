@@ -105,6 +105,44 @@ export function getAlatpayWebhookSecret(): string {
   return String(raw).trim();
 }
 
+// =============================================================================
+// WEBHOOK HMAC VERIFICATION — Status: IMPLEMENTED as HMAC-SHA256 + Base64 digest
+// =============================================================================
+// ⚠️  PROVIDER-UNPROVEN PORTION (ISSUE 4 CLARIFICATION):
+//    What is CONFIRMED (from our own integration tests + correlation unit
+//    tests + operator's prior server-side receipt of the incident payload
+//    structure via their dashboard's history):
+//      1) our Webhook receipt endpoint requires a valid signature (HMAC
+//         fail-closed; otherwise HTTP 403)
+//      2) our algorithm: HMAC( SHA256, utf-8 raw request body, secret )
+//         → raw 32-byte digest → base64-encoded (no prefix, no hex, no sha256=)
+//      3) comparison performed via constant-time Buffer equality on the
+//         decoded base64 bytes (never on strings — avoids timing oracles)
+//      4) accepted header names (any one):
+//           x-alatpay-signature   (preferred — name commonly used by Wema/ALAT)
+//           alatpay-signature
+//           x-signature
+//    What is NOT CONFIRMED / still OPERATOR-ACTION REQUIRED before
+//    relying on this alone in production:
+//      5) We have no independent signed real webhook sample captured from
+//         ALATPay servers we could replay-verify against this algorithm.
+//         (The incident's real webhook never arrived; the provider dashboard
+//         UI logs display payload content, not cryptographically preserved
+//         raw signatures.)
+//      6) ALATPay could legitimately use SHA512/hex, HMAC prefixes, or
+//         timestamped concatenated format without notice.
+//    MANDATORY OPERATOR ACTION BEFORE FIRST LIVE WEBHOOK:
+//      → use Dashboard → Webhook → Send Test Payload feature against a
+//        staging mirror of this exact code path. Capture the signed request
+//        in raw form and compare: if signature does not decode as base64
+//        32 bytes or constantTimeEqual fails → treat implementation as
+//        mismatched; raise an incident ticket with ALATPay support showing
+//        the exact algorithm used here. DO NOT relax the HMAC check to
+//        pass-through (never `return true`) — a false-positive success
+//        means forging a charge.success becomes possible without provider
+//        authority, resulting in double-credit of student accounts.
+// =============================================================================
+
 export function verifyAlatpayHmac(
   rawBody: Buffer | string,
   receivedSignatureHeader: string | undefined | null,
@@ -116,6 +154,7 @@ export function verifyAlatpayHmac(
     if (!sig) return false;
     const secret = webhookSecretOverride ?? getAlatpayWebhookSecret();
     const bodyBuf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody), 'utf-8');
+    // Per §above (Issue 4): our assumed algorithm. Still FAIL-CLOSED on any mismatch.
     const computed = crypto.createHmac('sha256', secret).update(bodyBuf).digest('base64');
     return constantTimeEqual(Buffer.from(sig, 'base64'), Buffer.from(computed, 'base64'));
   } catch {
@@ -516,6 +555,10 @@ export function selectAlatpayFinalTxId(
     const candidates: Array<string | null | undefined> = [];
     candidates.push(payload?.Value?.Data?.Id);
     candidates.push(payload?.Value?.Data?.id);
+    candidates.push(payload?.data?.id);
+    candidates.push(payload?.data?.Id);
+    candidates.push(payload?.data?.transactionId);
+    candidates.push(payload?.data?.TransactionId);
     candidates.push(payload?.Id);
     candidates.push(payload?.id);
     candidates.push(payload?.Value?.Data?.transactionId);
@@ -524,6 +567,18 @@ export function selectAlatpayFinalTxId(
     candidates.push(payload?.TransactionId);
     if (payload?.Customer?.TransactionId && typeof payload.Customer.TransactionId === 'string') {
       candidates.push(payload.Customer.TransactionId);
+    }
+    if (payload?.Customer?.transactionId && typeof payload.Customer.transactionId === 'string') {
+      candidates.push(payload.Customer.transactionId);
+    }
+    if (payload?.data?.customer?.TransactionId && typeof payload.data.customer.TransactionId === 'string') {
+      candidates.push(payload.data.customer.TransactionId);
+    }
+    if (payload?.data?.customer?.transactionId && typeof payload.data.customer.transactionId === 'string') {
+      candidates.push(payload.data.customer.transactionId);
+    }
+    if (payload?.data?.customer?.transaction_id && typeof payload.data.customer.transaction_id === 'string') {
+      candidates.push(payload.data.customer.transaction_id);
     }
     for (const c of candidates) {
       if (isAlatpayUuid(c)) return (c as string).trim().toLowerCase();

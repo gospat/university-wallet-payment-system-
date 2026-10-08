@@ -461,12 +461,31 @@ router.post('/alatpay', async (req: Request, res: Response) => {
   const alatpayEventId =
     (norm.Id && norm.Id.length > 0) ? norm.Id :
     extractAlatpayEventId(body);
-  const eventType =
-    normalizeAlatStatus(norm.Status) === 'success'
-      ? 'charge.success'
-      : normalizeAlatStatus(norm.Status) === 'failed'
-      ? 'charge.failed'
-      : 'charge.unknown';
+  // Event type mapping (FAIL-OPEN for pending/unknown — they must NEVER become FAILED automatically):
+  //   SUCCESS/COMPLETED/PAID          → charge.success   → provider verify required; money moves only after server-side confirm
+  //   FAILED/DECLINED/REJECTED/CANCELLED/CANCELED/EXPIRED  → charge.failed    → confirmed failures only; mark tx FAILED
+  //   PENDING/PROCESSING/INITIATED/anything else           → charge.unknown   → ack; status UNCHANGED (never auto-FAIL!)
+  const normalizedStatus = normalizeAlatStatus(norm.Status);
+  const rawStatusLower = String(norm.Status ?? '').trim().toLowerCase();
+  let eventType: 'charge.success' | 'charge.failed' | 'charge.unknown';
+  if (normalizedStatus === 'success') {
+    eventType = 'charge.success';
+  } else if (
+    normalizedStatus === 'failed' ||
+    rawStatusLower === 'failed' ||
+    rawStatusLower === 'declined' ||
+    rawStatusLower === 'rejected' ||
+    rawStatusLower === 'cancelled' ||
+    rawStatusLower === 'canceled' ||
+    rawStatusLower === 'expired'
+  ) {
+    eventType = 'charge.failed';
+  } else {
+    // pending, processing, initiated, empty, null, or anything unrecognized →
+    // DO NOT mark our Bells tx as FAILED. Keep status unchanged; server-side
+    // reconcile/reverify webhooks or explicit provider confirmations can resolve later.
+    eventType = 'charge.unknown';
+  }
   const orderId = norm.OrderId ?? undefined;
   const customerTxId = norm.Customer?.TransactionId ?? undefined;
   const transactionRef = orderId ?? customerTxId ?? (alatpayEventId ? String(alatpayEventId) : undefined);
@@ -645,17 +664,18 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
         }
         break;
       }
-      case 'charge.failed':
-      case 'charge.unknown': {
-        // SAFETY: Never downgrade SUCCESS, UNDERPAID, OVERPAID rows.
-        // Only mark FAILED rows we can SAFELY correlate (A/B/C/D exactly one match).
+      case 'charge.failed': {
+        // SAFETY: Only mark FAILED when provider status is explicitly a
+        // confirmed failure/cancellation (FAILED/DECLINED/REJECTED/CANCELLED/EXPIRED).
+        // NEVER downgrade SUCCESS, UNDERPAID, OVERPAID, REVERSED. Also never mark
+        // anything without an exact single correlated Bells transaction.
         if ('ambiguity' in locate) {
-          failureReason = diag(`correlation ambiguous for failed/unknown: ${locate.diagnostic}`);
+          failureReason = diag(`correlation ambiguous for charge.failed: ${locate.diagnostic}; deliberately not marking FAILED to prevent double-bookkeeping`);
           newProcessed = false;
           break;
         }
         if ('notFound' in locate) {
-          // unknown order = no record to update, still ack event processed (safe — no tx ever existed)
+          // unknown order = no record to update, still ack event processed
           newProcessed = true;
           break;
         }
@@ -667,7 +687,7 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
           newProcessed = true;
           break;
         }
-        // NEVER DOWNGRADE success rows
+        // NEVER DOWNGRADE terminal success rows
         if (
           existing.status === 'SUCCESS' ||
           existing.status === 'UNDERPAID' ||
@@ -697,6 +717,22 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
             },
           })
           .catch(() => {});
+        newProcessed = true;
+        break;
+      }
+      case 'charge.unknown': {
+        // Provider sent pending / processing / initiated / null / empty / unrecognized status.
+        // NEVER mark a Bells transaction FAILED based on this class of webhook event.
+        // ACK the event (to avoid provider retries) but leave the transaction status
+        // UNCHANGED. Subsequent explicit provider verify (reverify endpoint, reconcile
+        // worker, or a later confirmed charge.success / charge.failed webhook) can resolve.
+        // SUCCESS transactions remain SUCCESS (preserved). PENDING stay PENDING.
+        failureReason =
+          diag(
+            `provider status=${JSON.stringify(norm.Status ?? null)} is not a confirmed success nor confirmed failure. ` +
+            `Acking webhook; leaving transaction status UNCHANGED (not FAILED, not SUCCESS). ` +
+            `correlation=${'ambiguity' in locate ? 'AMBIGUOUS' : 'notFound' in locate ? 'NOT_FOUND' : 'FOUND id=' + locate.id}`,
+          );
         newProcessed = true;
         break;
       }
