@@ -167,17 +167,16 @@ export function deriveAlatpayWebhookEventId(
     ? rawBody
     : Buffer.from(String(rawBody ?? ''), 'utf-8');
   const sigStr = String(signatureHeaderReceived ?? '').trim();
-  const secret = (() => {
-    try {
-      return webhookSecretOverride ?? getAlatpayWebhookSecret();
-    } catch {
-      // Fallback (only if env var missing, but endpoint returns 403 earlier).
-      // Use a fixed 32-byte fallback derived deterministically from signature+len to stay
-      // deterministic even when env broken (HMAC fail-closed already returned 403 anyway,
-      // so this fallback never reaches the idempotency upsert in happy path).
-      return `fallback_${bodyBuf.length}_${sigStr.length}`.padEnd(32, '_').slice(0, 32);
-    }
-  })();
+  // FAIL CLOSED: require the actual webhook secret. No synthetic fallback.
+  // If the secret is unavailable, HMAC verification (which runs earlier in
+  // the route) would already have rejected the request, so this branch only
+  // fires on misconfiguration (which we surface as a hard throw rather than
+  // inventing a substitute secret).
+  const secret: string =
+    (() => {
+      if (webhookSecretOverride !== undefined) return webhookSecretOverride;
+      return getAlatpayWebhookSecret();
+    })();
   const hmac = crypto.createHmac('sha256', secret);
   hmac.update(`v1|${bodyBuf.length}|${sigStr.length}|`);
   hmac.update(bodyBuf);

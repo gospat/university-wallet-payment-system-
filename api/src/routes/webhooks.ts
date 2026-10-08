@@ -487,7 +487,21 @@ router.post('/alatpay', async (req: Request, res: Response) => {
   //  maintainers don't need to cross files.)
   void ALATPAY_IDEVENT_ID_SEMANTIC;
   void ALATPAY_IDEVENT_ID_SEMANTIC_PROOF;
-  const alatpayEventId: string = deriveAlatpayWebhookEventId(rawBody, signature);
+  let alatpayEventId: string;
+  try {
+    alatpayEventId = deriveAlatpayWebhookEventId(rawBody, signature);
+  } catch (err) {
+    // Event-key derivation only throws when ALATPAY_WEBHOOK_SECRET env is
+    // missing (derive no longer generates synthetic fallback secrets — fail
+    // closed). 503 so provider retries with the same payload → safe.
+    // eslint-disable-next-line no-console
+    console.error('[webhook:alatpay] deriveAlatpayWebhookEventId failed (secret missing/config):', err);
+    return res.status(503).json({
+      status: 'error',
+      received: false,
+      reason: 'webhook_persistence_unavailable',
+    });
+  }
   // The STABLE provider transaction UUID remains norm.Id (still data.id or
   // Value.Data.Id). Used for provider verify, correlation, logs. Distinct
   // from alatpayEventId idempotency key now.
@@ -524,8 +538,12 @@ router.post('/alatpay', async (req: Request, res: Response) => {
 
   if (!alatpayEventId || alatpayEventId.length < 8) {
     // eslint-disable-next-line no-console
-    console.warn('[webhook:alatpay] event id derivation failed (unexpected) — ack 200 to avoid retries.');
-    return res.status(200).json({ status: 'ok', processed: false, reason: i18n.errors.webhook.missingEventId });
+    console.warn('[webhook:alatpay] event id derivation failed (unexpected) — 503 to force provider retry.');
+    return res.status(503).json({
+      status: 'error',
+      received: false,
+      reason: 'webhook_persistence_unavailable',
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -546,11 +564,19 @@ router.post('/alatpay', async (req: Request, res: Response) => {
       select: { id: true },
     });
   } catch (err) {
+    // PERSISTENCE FAILURE → DO NOT return HTTP 200.
+    // If we ack 200 without a durable webhook_event row, the provider may stop
+    // retrying and the callback final UUID is lost → exactly the production
+    // incident (tx PENDING forever, recon cannot recover).
+    // Return HTTP 503 so ALATPay retries; deterministic alatpayEventId means
+    // retries are idempotent and will use the same event key.
     // eslint-disable-next-line no-console
-    console.error('[webhook:alatpay] prisma.upsert webhookEvent failed (still 200 to ALAT):', err);
-    return res
-      .status(200)
-      .json({ status: 'ok', processed: false, reason: 'persistence_error_deferred_retry' });
+    console.error('[webhook:alatpay] prisma.upsert webhookEvent FAILED — returning 503 for provider retry:', err);
+    return res.status(503).json({
+      status: 'error',
+      received: false,
+      reason: 'webhook_persistence_unavailable',
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -568,8 +594,22 @@ router.post('/alatpay', async (req: Request, res: Response) => {
       },
     );
   } catch (err) {
+    // DISPATCH FAILURE → DO NOT return HTTP 200.
+    // The DB row has been written (isProcessed=false, which is correct — we
+    // never set it to true from the route). But if no BullMQ job exists AND
+    // there is no guaranteed unprocessed-event sweeper (today there is NOT),
+    // then returning 200 would strand the event. Return 503 so provider may
+    // retry: on retry alatpayEventId is identical (deterministic) so DB
+    // upsert is a no-op and dispatch is attempted fresh; no double credit
+    // can occur because of idempotent keys AND handler's verifyPayment
+    // authoritativeness.
     // eslint-disable-next-line no-console
-    console.error('[webhook:alatpay] dispatchJob failed after final retries for event', alatpayEventId, err);
+    console.error('[webhook:alatpay] dispatchJob(alatpay.webhook) FAILED after retries. Returning 503 for provider retry. eventId=', alatpayEventId, err);
+    return res.status(503).json({
+      status: 'error',
+      received: false,
+      reason: 'webhook_persistence_unavailable',
+    });
   }
 
   return res.status(200).json({

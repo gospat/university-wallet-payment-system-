@@ -43,6 +43,37 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
 
   const SKIP_MSG_AUTH = 'credentials unavailable in this environment — skipping safely';
 
+  // ============= GLOBAL HELPERS (shared across TR-30, TR-31, etc.) =============
+  const buf = (obj: unknown): Buffer => Buffer.from(JSON.stringify(obj), 'utf-8');
+  const getAlatpayUtils = () => require('../utils/alatpay');
+  const getWebhooksSrc = () => {
+    const fs = require('fs');
+    const path = require('path');
+    return fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.ts'), 'utf8');
+  };
+  const getSchemaSrc = () => {
+    const fs = require('fs');
+    const path = require('path');
+    return fs.readFileSync(path.join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8');
+  };
+  const getAlatpayUtilsSrc = () => {
+    const fs = require('fs');
+    const path = require('path');
+    return fs.readFileSync(path.join(__dirname, '..', 'utils', 'alatpay.ts'), 'utf8');
+  };
+  const getRegSrc = () => {
+    const fs = require('fs');
+    return fs.readFileSync(__filename, 'utf8');
+  };
+  const hasIt = (src: string, id: string) => new RegExp(`it\\(\\s*['"]\\s*${id.replace(/\./g, '\\.')}[\\s\\S]*?['"]`).test(src);
+  const isSkipped = (src: string, id: string) => {
+    const re1 = new RegExp(`(it\\.skip|xit|describe\\.skip|xdescribe)\\s*\\(\\s*['"]\\s*${id.replace(/\./g, '\\.')}[\\s\\S]*?['"]`);
+    if (re1.test(src)) return true;
+    const re2 = new RegExp(`it\\.skip\\([\\s\\S]{0,120}${id.replace(/\./g, '\\.')}`);
+    return re2.test(src);
+  };
+  const getPrisma = () => require('../config/database').default ?? require('../config/database');
+
   beforeAll(async () => {
     const [s1, s2, b, a] = await Promise.all([
       login(STUDENT1_EMAIL, DEFAULT_PW_STUDENT),
@@ -1311,19 +1342,7 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
     });
 
     // Helper: raw body (stringified) — same bytes mean identical events
-    const buf = (obj: unknown): Buffer => Buffer.from(JSON.stringify(obj), 'utf-8');
-
-    const getAlatpayUtils = () => require('../utils/alatpay');
-    const getWebhooksSrc = () => {
-      const fs = require('fs');
-      const path = require('path');
-      return fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhooks.ts'), 'utf8');
-    };
-    const getSchemaSrc = () => {
-      const fs = require('fs');
-      const path = require('path');
-      return fs.readFileSync(path.join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8');
-    };
+    // (buf function is declared at describe top-level; re-export alias for local readability)
 
     it('TR-30.1 [REQ 1] Same transaction UUID + pending callback leaves Bells tx as PENDING (test uses status mapping + DB fixture)', async () => {
       if (!student1Token || !student1User?.id) return console.warn(SKIP_MSG_AUTH);
@@ -1495,7 +1514,9 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // 2) webhooks.ts route step4: alatpayEventId assigned from derive helper
       const whsrc = getWebhooksSrc();
       expect(whsrc).toMatch(/deriveAlatpayWebhookEventId\(rawBody,\s*signature\)/);
-      expect(whsrc).toMatch(/const alatpayEventId: string = deriveAlatpayWebhookEventId\(rawBody,\s*signature\);/);
+      expect(whsrc).toMatch(/alatpayEventId\s*=\s*deriveAlatpayWebhookEventId\(rawBody,\s*signature\)/);
+      // Fail-closed: derive errors route → HTTP 503 response (no synthetic secret fallback)
+      expect(whsrc).toMatch(/deriveAlatpayWebhookEventId[\s\S]{0,2000}?res\.status\(503\)\.json\(\s*\{\s*status:\s*'error'[\s\S]*received:\s*false/);
       // upsert where uses alatpayEventId and create sets it too — take the SECOND prisma.webhookEvent.upsert (alatpay one at line ~535)
       const allUpsertMatches: number[] = [];
       let idx = -1;
@@ -1560,6 +1581,236 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(paystackSrc).toMatch(/Authorization.*Bearer/);
       expect(paystackSrc).toMatch(/\/transaction\/verify\//);
       expect(paystackSrc).toMatch(/\/transaction\/initialize/);
+    });
+  });
+
+  // =========================================================================
+  // TR-31 — FINAL WEBHOOK RELIABILITY: non-2xx ack only when durably accepted
+  // =========================================================================
+  // Requirements:
+  //   1. Valid HMAC + DB persistence failure → HTTP 503 (non-2xx), NOT 200
+  //   2. Valid HMAC + dispatch failure (no successful fallback) → HTTP 503
+  //   3. Provider retry after transient persist failure → deterministic event key (same)
+  //   4. Provider retry after dispatch failure → no duplicate DB row
+  //   5. Success (persist + dispatch) → HTTP 200
+  //   6. Exact duplicate already-processed → HTTP 200 (dedup)
+  //   7. Invalid/missing HMAC → HTTP 403 (fail closed, unchanged)
+  //   8. deriveAlatpayWebhookEventId: NO synthetic fallback secrets (fail closed if env missing)
+  //   9. TR-30 status transition behavior still passes: pending→completed is NOT suppressed
+  //   10. Existing receipt/ledger/payment idempotency still passes (TR-26 + 23.9 + 24.5b run, no skip)
+  describe('TR-31 Final: ALATPay webhook ack reliability (persist/dispatch fail → 503)', () => {
+    it('TR-31.1 [REQ 1] Valid HMAC but DB persistence failure → HTTP 503 (not 200). Route returns 503 json with received=false.', () => {
+      const whsrc = getWebhooksSrc();
+      // Locate the 2nd prisma.webhookEvent.upsert (alatpay one) then its catch to the 503 return
+      const allUpsertMatches: number[] = [];
+      let idx = -1;
+      const search = 'prisma.webhookEvent.upsert';
+      while ((idx = whsrc.indexOf(search, idx + 1)) !== -1) allUpsertMatches.push(idx);
+      expect(allUpsertMatches.length).toBeGreaterThanOrEqual(2);
+      const alatUpsertStart = allUpsertMatches[1];
+      // From 2nd upsert, find only lines 552-580 (upsert + catch block) up to before dispatch try.
+      const dispatchTryIdx = whsrc.indexOf("'alatpay.webhook'");
+      expect(dispatchTryIdx).toBeGreaterThan(-1);
+      const region = whsrc.slice(alatUpsertStart, Math.min(dispatchTryIdx, alatUpsertStart + 2000));
+      // Must contain status(503) + received:false persistence_error shape
+      expect(region).toMatch(/res\.status\(503\)\.json\(\s*\{\s*status:\s*'error'[\s\S]*received:\s*false/);
+      // Match ONLY inside the catch(...) block: find text from `} catch` to next closing return 503.
+      const catchIdx = region.lastIndexOf('} catch');
+      const catchOnly = region.slice(catchIdx === -1 ? 0 : catchIdx);
+      // The catch MUST NOT contain a status(200) JSON return. But regex must be specific to skip comments.
+      const codeLines = catchOnly.split('\n').filter((l: string) => !l.trim().startsWith('//')).join('\n');
+      expect(codeLines).not.toMatch(/res\s*\.\s*status\s*\(\s*200\s*\)\s*\.\s*json\s*\(/);
+      // Broken legacy message must be absent
+      expect(region).not.toMatch(/persistence_error_deferred_retry/);
+    });
+
+    it('TR-31.2 [REQ 2] Valid HMAC persist OK but dispatch failure with no proven fallback → HTTP 503 (non-2xx). Row keeps isProcessed=false.', () => {
+      const whsrc = getWebhooksSrc();
+      const dispatchIdx = whsrc.indexOf("'alatpay.webhook'");
+      expect(dispatchIdx).toBeGreaterThan(-1);
+      const afterDispatch = whsrc.slice(dispatchIdx, dispatchIdx + 2500);
+      // Catch of the dispatch try block — first `} catch` literal after dispatch call
+      const firstCatch = afterDispatch.search(/\}\s*catch\b/);
+      expect(firstCatch).toBeGreaterThan(-1);
+      const afterCatch = afterDispatch.slice(firstCatch);
+      // Get up to the first 503 response return (end of catch body return)
+      const return503Idx = afterCatch.indexOf("res.status(503).json({");
+      expect(return503Idx).toBeGreaterThan(-1);
+      const catchBlock = afterCatch.slice(0, return503Idx + 200);
+      expect(catchBlock).toMatch(/res\.status\(503\)\.json\(/);
+      expect(catchBlock).toMatch(/received:\s*false/);
+      // No 200 JSON response in catch code (strip comments). The catch only has console.error then return 503 so just take 120 past 503 return:
+      const justCatchReturn = afterCatch.slice(0, return503Idx + 160);
+      const catchCode = justCatchReturn.split('\n').filter((l: string) => !l.trim().startsWith('//')).join('\n');
+      expect(catchCode).not.toMatch(/res\s*\.\s*status\s*\(\s*200\s*\)\s*\.\s*json\s*\(/);
+      // No delete webhook row in alatpay handler
+      const webhookBlock = whsrc.slice(whsrc.indexOf("router.post('/alatpay'"), whsrc.indexOf("router.post('/alatpay'") + 9000);
+      expect(webhookBlock).not.toMatch(/prisma\.webhookEvent\.delete/);
+      // Upsert create always contains isProcessed:false
+      expect(webhookBlock).toMatch(/create:\s*\{\s*paystackEventId:\s*null[,\s\S]*isProcessed:\s*false/);
+    });
+
+    it('TR-31.3 [REQ 3] Provider retry after transient persistence failure: deriveAlatpayWebhookEventId produces the SAME deterministic key given identical rawBody + signature.', () => {
+      const { deriveAlatpayWebhookEventId } = require('../utils/alatpay');
+      const TEST_SECRET = 'testsecret_testsecret_testsecret_ts';
+      const body1 = Buffer.from('{"data":{"id":"aaa-bbb-ccc","status":"completed","orderId":"WEMA-PAY-001"}}');
+      const sig1 = 'abc123base64hmac==';
+      const keyA = deriveAlatpayWebhookEventId(body1, sig1, TEST_SECRET);
+      const keyB = deriveAlatpayWebhookEventId(body1, sig1, TEST_SECRET);
+      expect(typeof keyA).toBe('string');
+      expect(keyA).toHaveLength(48);
+      expect(keyA.startsWith('awv1:')).toBe(true);
+      expect(keyA).toEqual(keyB); // deterministic → identical
+      // Simulate provider retry after transient DB fail (identical bytes) → same key
+      const retry1 = deriveAlatpayWebhookEventId(Buffer.from(body1.toString('utf8'), 'utf8'), sig1, TEST_SECRET);
+      expect(retry1).toEqual(keyA);
+    });
+
+    it('TR-31.4 [REQ 4] Provider retry after dispatch failure → upsert idempotent → no duplicate DB row (structural).', async () => {
+      // Insert a webhook_event with alatpayEventId, perform identical upsert again,
+      // assert count remains 1 (no duplicate row created).
+      const { randomUUID } = require('crypto') as typeof import('crypto');
+      const prisma = getPrisma();
+      const uniqueKey = 'awv1:testkey_' + randomUUID().slice(0, 20);
+      let row1Id: number | undefined;
+      try {
+        const r1 = await prisma.webhookEvent.upsert({
+          where: { alatpayEventId: uniqueKey },
+          update: {},
+          create: {
+            paystackEventId: null,
+            alatpayEventId: uniqueKey,
+            eventType: 'charge.success',
+            transactionReference: 'WEMA-RETRY-DISPATCH-001',
+            payload: { dummy: true } as any,
+            isProcessed: false,
+          },
+          select: { id: true },
+        });
+        row1Id = r1.id;
+        // Provider retries because dispatch failed → identical event key → upsert again (structural duplicate attempt)
+        const r2 = await prisma.webhookEvent.upsert({
+          where: { alatpayEventId: uniqueKey },
+          update: {},
+          create: {
+            paystackEventId: null,
+            alatpayEventId: uniqueKey,
+            eventType: 'charge.success',
+            transactionReference: 'WEMA-RETRY-DISPATCH-001',
+            payload: { dummy: true } as any,
+            isProcessed: false,
+          },
+          select: { id: true },
+        });
+        expect(r2.id).toBe(row1Id);
+        const count = await prisma.webhookEvent.count({ where: { alatpayEventId: uniqueKey } });
+        expect(count).toBe(1);
+      } finally {
+        try { await prisma.webhookEvent.delete({ where: { alatpayEventId: uniqueKey } }); } catch { /* ignore */ }
+      }
+    });
+
+    it('TR-31.5 [REQ 5] Successfully persisted + successfully dispatched webhook → HTTP 200 json with received:true and eventId/eventType.', () => {
+      const whsrc = getWebhooksSrc();
+      // After alatpay dispatch try/catch block, the route returns HTTP 200 when both succeed.
+      const alatRouteStart = whsrc.indexOf("router.post('/alatpay'");
+      const alatRouteEnd = whsrc.indexOf("registerHandler('alatpay.webhook'");
+      const alatRoute = whsrc.slice(alatRouteStart, alatRouteEnd);
+      // The final return (dispatch success path) must be status 200 + received:true + eventId/eventType fields
+      expect(alatRoute).toMatch(/return\s+res\.status\(200\)\.json\(\s*\{\s*status:\s*'ok'[\s\S]*received:\s*true[\s\S]*eventId:\s*alatpayEventId[\s\S]*eventType[\s\S]*transactionRef/);
+    });
+
+    it('TR-31.6 [REQ 6] Exact duplicate already-processed webhook_event → route still returns HTTP 200 (deduped). No new row + dispatch dedup via same jobId.', () => {
+      const whsrc = getWebhooksSrc();
+      const alatRouteStart = whsrc.indexOf("router.post('/alatpay'");
+      const alatRouteEnd = whsrc.indexOf("registerHandler('alatpay.webhook'");
+      const alatRoute = whsrc.slice(alatRouteStart, alatRouteEnd);
+      // The upsert is always update:{} (no DB mutation on existing key) — even if row exists + isProcessed=true, route still returns 200 after dispatch success (dispatch dedupes via identical jobId)
+      expect(alatRoute).toMatch(/upsert\(\{\s*where:\s*\{\s*alatpayEventId\s*\},?\s*update:\s*\{\}/);
+      // jobId constant: alatpay-webhook:${alatpayEventId} → same key dedupes
+      expect(alatRoute).toMatch(/jobId:\s*`alatpay-webhook:\$\{alatpayEventId\}`/);
+      // The handler registered also skips reprocess if isProcessed=true — prevents double processing
+      const handlerStart = whsrc.indexOf("registerHandler('alatpay.webhook'");
+      const handlerBlock = whsrc.slice(handlerStart, handlerStart + 1200);
+      expect(handlerBlock).toMatch(/if\s*\(\s*row\.isProcessed\s*&&\s*!forceReprocess\s*\)\s*return/);
+    });
+
+    it('TR-31.7 [REQ 7] Invalid / missing HMAC remains fail-closed → HTTP 403 with message: Invalid HMAC.', () => {
+      const whsrc = getWebhooksSrc();
+      const alatRouteStart = whsrc.indexOf("router.post('/alatpay'");
+      // Take up to 2500 chars to cover both IP whitelist AND the HMAC fail-closed return
+      const routeEarly = whsrc.slice(alatRouteStart, alatRouteStart + 2500);
+      expect(routeEarly).toMatch(/verifyAlatpayHmac\(rawBody,\s*signature\)/);
+      expect(routeEarly).toMatch(/return\s+res\.status\(403\)\.json\(\s*\{\s*message:\s*'Invalid HMAC'\s*\}\)/);
+    });
+
+    it('TR-31.8 [REQ 8] deriveAlatpayWebhookEventId NEVER creates a synthetic fallback secret. If env missing it THROWS (fail closed); only accepts secretOverride or actual env secret.', () => {
+      const alatSrc = getAlatpayUtilsSrc();
+      // Remove the fallback catch block entirely: no `fallback_${}`, no .padEnd(32,'_') inside derive
+      const deriveIdx = alatSrc.indexOf('export function deriveAlatpayWebhookEventId(');
+      const verifyIdx = alatSrc.indexOf('export function verifyAlatpayHmac');
+      const deriveBlock = alatSrc.slice(deriveIdx, verifyIdx !== -1 ? verifyIdx : deriveIdx + 2000);
+      // Must NOT contain any of these old fallback markers:
+      expect(deriveBlock).not.toMatch(/fallback_\$\{/);
+      expect(deriveBlock).not.toMatch(/padEnd\(32,\s*['_"]/);
+      expect(deriveBlock).not.toMatch(/catch\s*\(\s*err\s*\)\s*\{\s*return\s*`fallback_/);
+      // MUST either call getAlatpayWebhookSecret or use override (fail closed when both missing)
+      expect(deriveBlock).toMatch(/getAlatpayWebhookSecret\(\)/);
+      // Behavioral check: calling with NO secret AND no ALATPAY_WEBHOOK_SECRET env → throws (non-deterministically → never returns same-key fallback)
+      const oldVal1 = process.env.ALATPAY_WEBHOOK_SECRET;
+      const oldVal2 = process.env.WEMA_ALATPAY_WEBHOOK_SECRET;
+      try {
+        delete process.env.ALATPAY_WEBHOOK_SECRET;
+        delete process.env.WEMA_ALATPAY_WEBHOOK_SECRET;
+        jest.resetModules();
+        const { deriveAlatpayWebhookEventId: deriveNoSecret } = require('../utils/alatpay');
+        let threw = false;
+        try {
+          deriveNoSecret(Buffer.from('x'), 'y');
+        } catch (e) {
+          threw = true;
+        }
+        expect(threw).toBe(true); // fail closed: no synthetic
+      } finally {
+        if (oldVal1) process.env.ALATPAY_WEBHOOK_SECRET = oldVal1;
+        if (oldVal2) process.env.WEMA_ALATPAY_WEBHOOK_SECRET = oldVal2;
+        jest.resetModules();
+      }
+    });
+
+    it('TR-31.9 [REQ 9] TR-30 pending→completed behavior still passes: status transitions produce DISTINCT event keys (not suppressed).', () => {
+      const { deriveAlatpayWebhookEventId, normalizeAlatStatus } = require('../utils/alatpay');
+      const S = 'hunter2hunter2hunter2hunter2';
+      const pending = Buffer.from(JSON.stringify({ data: { id: 'x-y-z', status: 'pending', orderId: 'A1' } }));
+      const completed = Buffer.from(JSON.stringify({ data: { id: 'x-y-z', status: 'completed', orderId: 'A1' } }));
+      const processing = Buffer.from(JSON.stringify({ data: { id: 'x-y-z', status: 'processing', orderId: 'A1' } }));
+      const k_pending = deriveAlatpayWebhookEventId(pending, 'sig_p', S);
+      const k_completed = deriveAlatpayWebhookEventId(completed, 'sig_c', S);
+      const k_processing = deriveAlatpayWebhookEventId(processing, 'sig_pr', S);
+      expect(k_pending).not.toEqual(k_completed);
+      expect(k_processing).not.toEqual(k_completed);
+      // status normalize still SUCCESS / failed / pending categories
+      expect(normalizeAlatStatus('COMPLETED')).toBe('success');
+      expect(normalizeAlatStatus('pending')).toBe('pending');
+    });
+
+    it('TR-31.10 [REQ 10] Existing receipt/ledger/payment idempotency tests run (not .skip). TR-26, 23.9, 24.5b, 27/28 all exist as it() without skip.', () => {
+      const src = getRegSrc();
+      // TR-26.1/26.2 no .skip
+      expect(hasIt(src, 'TR-26.1')).toBe(true);
+      expect(hasIt(src, 'TR-26.2')).toBe(true);
+      expect(isSkipped(src, 'TR-26.1')).toBe(false);
+      expect(isSkipped(src, 'TR-26.2')).toBe(false);
+      // TR-23.9 and TR-24.5b live in THIS regression.test.ts file (confirmed above via grep) — not .skip
+      expect(hasIt(src, 'TR-23.9')).toBe(true);
+      expect(hasIt(src, 'TR-24.5b')).toBe(true);
+      expect(isSkipped(src, 'TR-23.9')).toBe(false);
+      expect(isSkipped(src, 'TR-24.5b')).toBe(false);
+      // TR-27.1 (charge unknown no fail) and TR-28.1 (data.id final UUID) no skip
+      expect(hasIt(src, 'TR-27.1')).toBe(true);
+      expect(isSkipped(src, 'TR-27.1')).toBe(false);
+      expect(hasIt(src, 'TR-28.1')).toBe(true);
+      expect(isSkipped(src, 'TR-28.1')).toBe(false);
     });
   });
 });
