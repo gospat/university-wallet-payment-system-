@@ -91,23 +91,15 @@ async function loadPuppeteer(): Promise<PuppeteerApi> {
   _puppeteerPromise = (async (): Promise<PuppeteerApi> => {
     try {
       let ns: any;
-      const cwd = process.cwd();
-      try {
-        const localRequire = createRequire(cwd + '/package.json');
-        const abs = localRequire.resolve('puppeteer');
-        if (!abs) {
-          throw new Error('createRequire.resolve returned empty for puppeteer');
-        }
-        ns = localRequire('puppeteer');
-      } catch (_cjsErr) {
-        try {
-          const localRequire = createRequire(cwd + '/src/services/receipt.ts');
-          const abs = localRequire.resolve('puppeteer');
-          ns = abs ? await import(`file://${abs}`) : await import('puppeteer');
-        } catch {
-          ns = await import('puppeteer');
-        }
-      }
+      // Puppeteer 23+ ships PURE ESM only.  TypeScript --module commonjs will
+      // statically-transform `await import('puppeteer')` into
+      //   Promise.resolve().then(() => __importStar(require('puppeteer')))
+      // which still triggers ERR_REQUIRE_ESM at runtime.  To force Node's REAL
+      // ESM dynamic-loader path (skipping the CJS require() entry), evaluate
+      // import() inside a new Function.  TS cannot see inside the string; Node
+      // parses it at runtime and uses the correct loader.
+      const dynamicImport = new Function('spec', 'return import(spec)') as (s: string) => Promise<any>;
+      ns = await dynamicImport('puppeteer');
       const resolved: PuppeteerApi =
         ns && ns.default && typeof ns.default.launch === 'function'
           ? ns.default
