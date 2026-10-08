@@ -1,5 +1,6 @@
 import express from 'express';
 import { z } from 'zod';
+import fs from 'fs';
 import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { catchAsync } from '../utils/catchAsync';
@@ -174,7 +175,7 @@ function sendExport(res: any, result: Awaited<ReturnType<typeof dispatchReportEx
   res.setHeader('Content-Disposition', result.contentDisposition);
   res.setHeader('X-Report-UUID', result.reportUuid);
   res.setHeader('X-Row-Count', String(result.rowCount));
-  return res.status(200).end(result.buffer);
+  return res.status(200).send(result.buffer);
 }
 
 // ============================================================================
@@ -1033,19 +1034,33 @@ router.get('/download/:reportUuid',
       where: { reportUuid: req.params.reportUuid },
     });
     if (!rec) return next(new AppError('Report export not found', 404));
-    // Authorization: only creator OR ADMIN can download.
-    // Any other non-ADMIN user attempting a different creator's UUID → 403.
     const uid = Number(req.user?.id);
     const role = req.user?.role as Role | undefined;
     if (role !== 'ADMIN' && rec.generatedById !== uid) {
       return next(new AppError('Not permitted to download this report (creator or ADMIN only)', 403));
     }
-    if (rec.status !== 'COMPLETED' || !rec.storagePath) {
-      return res.status(202).json({ status: rec.status, message: 'Report not ready or was generated in-memory; re-run export.' });
+    if (rec.status === 'COMPLETED' && rec.storagePath) {
+      const safeFormat = String(rec.format ?? 'XLSX').toUpperCase();
+      const ct = safeFormat === 'PDF' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const ext = safeFormat === 'PDF' ? 'pdf' : 'xlsx';
+      const rawName = String(rec.reportName ?? rec.reportUuid ?? 'report');
+      const safeBase = rawName.replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 160) || 'report';
+      const safeFull = `${safeBase}.${ext}`;
+      const safeQuoted = safeFull.replace(/"/g, '\\"');
+      const cd = `attachment; filename="${safeQuoted}"; filename*=UTF-8''${encodeURIComponent(safeFull)}`;
+      try {
+        await fs.promises.access(rec.storagePath, fs.constants.R_OK);
+        const stat = await fs.promises.stat(rec.storagePath);
+        res.setHeader('Content-Type', ct);
+        res.setHeader('Content-Disposition', cd);
+        if (Number.isFinite(stat.size)) res.setHeader('Content-Length', String(stat.size));
+        res.setHeader('X-Report-UUID', String(rec.reportUuid));
+        return fs.createReadStream(rec.storagePath).pipe(res);
+      } catch {
+        return res.status(202).json({ status: rec.status, message: 'Report file no longer available on disk; re-run export.' });
+      }
     }
-    // NOTE: When BullMQ async exports are stored to disk, storagePath is set.
-    // This skeleton returns JSON status. File streaming added when storage layer enabled.
-    res.status(202).json({ status: rec.status, data: { id: rec.id, rowCount: rec.rowCount, format: rec.format, createdAt: rec.createdAt, expiresAt: rec.expiresAt } });
+    return res.status(202).json({ status: rec.status, message: 'Report not ready or was generated in-memory; re-run export.' });
   }),
 );
 

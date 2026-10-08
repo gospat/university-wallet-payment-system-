@@ -359,21 +359,47 @@ function isSecretValue(value: unknown): boolean {
   return false;
 }
 
-function scanRecursivelyForSecretFields(node: unknown, trail: string[] = []): string | null {
+type SecretScanOpts = {
+  allowExactTopLevelKeys?: ReadonlySet<string>;
+  depth?: number;
+};
+
+function scanRecursivelyForSecretFields(
+  node: unknown,
+  trail: string[] = [],
+  opts: SecretScanOpts = {},
+): string | null {
   if (node === null || node === undefined) return null;
+  const depth = opts.depth ?? 0;
   if (Array.isArray(node)) {
     for (let i = 0; i < node.length; i++) {
-      const hit = scanRecursivelyForSecretFields(node[i], [...trail, `[${i}]`]);
+      const hit = scanRecursivelyForSecretFields(node[i], [...trail, `[${i}]`], { ...opts, depth: depth + 1 });
       if (hit) return hit;
     }
     return null;
   }
   if (typeof node === 'object') {
     for (const rawKey of Object.keys(node as Record<string, unknown>)) {
-      // Nav-URL keys are dropped silently later by the allowlist picker; they must NOT abort.
       if (isNavUrlDropKey(rawKey)) continue;
+      const isTopLevel = depth === 0;
+      if (isTopLevel && opts.allowExactTopLevelKeys && opts.allowExactTopLevelKeys.has(rawKey)) {
+        // Narrow exception: exact depth-0 top-level key names only.
+        // Nested keys of the same name still abort (handled below when not skipped).
+        // Secret VALUE patterns are still checked via recursion into the value.
+        const childHit = scanRecursivelyForSecretFields(
+          (node as Record<string, unknown>)[rawKey],
+          [...trail, rawKey],
+          { ...opts, depth: depth + 1 },
+        );
+        if (childHit) return childHit;
+        continue;
+      }
       if (isSecretAbortKey(rawKey)) return `key=${rawKey} at ${[...trail, rawKey].join('.')}`;
-      const hit = scanRecursivelyForSecretFields((node as Record<string, unknown>)[rawKey], [...trail, rawKey]);
+      const hit = scanRecursivelyForSecretFields(
+        (node as Record<string, unknown>)[rawKey],
+        [...trail, rawKey],
+        { ...opts, depth: depth + 1 },
+      );
       if (hit) return hit;
     }
     return null;
@@ -467,6 +493,7 @@ export type AlatpayPublicCheckoutMetadata = {
 };
 
 export type AlatpayPublicCheckout = {
+  apiKey: string;
   amount: number;
   currency: 'NGN';
   businessId: string;
@@ -497,6 +524,7 @@ export function buildSanitizedAlatpayPublicCheckout(
     firstName?: string;
     lastName?: string;
     phone?: string;
+    popupModeEnabled: boolean;
   },
 ): AlatpayPublicCheckout {
   if (!ctx || typeof ctx !== 'object') {
@@ -507,6 +535,17 @@ export function buildSanitizedAlatpayPublicCheckout(
     throw new AlatpayPopupUnavailableError(
       'ALATPay business-for-plugin response contained credential-like fields before sanitization. Popup checkout mode aborted for safety.',
       { detected: preScan },
+    );
+  }
+  const publicKey = getAlatpayPublicKey();
+  if (ctx.popupModeEnabled && !publicKey) {
+    throw new AlatpayPopupUnavailableError(
+      'ALATPay native checkout requires ALATPAY_PUBLIC_KEY. Native popup mode disabled until a public key is configured server-side.',
+    );
+  }
+  if (!publicKey) {
+    throw new AlatpayPopupUnavailableError(
+      'ALATPay native checkout public key missing. Native popup mode aborted.',
     );
   }
   const body =
@@ -560,6 +599,7 @@ export function buildSanitizedAlatpayPublicCheckout(
       ? String(ctx.email).trim()
       : `${bellsRef}@${getDefaultEmailDomain()}`;
   const safe: AlatpayPublicCheckout = {
+    apiKey: publicKey,
     amount: amountNgnClean,
     currency: 'NGN',
     businessId: busId,
@@ -580,7 +620,9 @@ export function buildSanitizedAlatpayPublicCheckout(
       handshakeTimeoutMs: 4500,
     },
   };
-  const postScan = scanRecursivelyForSecretFields(safe);
+  const postScan = scanRecursivelyForSecretFields(safe, [], {
+    allowExactTopLevelKeys: new Set(['apiKey']),
+  });
   if (postScan) {
     throw new AlatpayPopupUnavailableError(
       'ALATPay native modal sanitized checkout contained credential-like fields after sanitization. Aborted.',

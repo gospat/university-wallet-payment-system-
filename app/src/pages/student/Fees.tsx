@@ -26,6 +26,7 @@ import studentFeeApi, {
   type InvoiceDetailResponse,
 } from '../../services/studentFees';
 import Modal from '../../components/Modal';
+import { launchAlatpayNativeModal } from '../../utils/alatpayCheckout';
 
 type AlertState = { isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info'; };
 
@@ -996,8 +997,34 @@ const InvoiceDetailPage: React.FC = () => {
       });
       const initData = (init as any)?.data ?? init;
       const gl = initData?.gateway_label ?? initData?.gatewayLabel ?? undefined;
+      const checkoutPopupMode: 'hosted_url_iframe' | 'alatpay_native_modal_v1' | undefined = initData?.checkout_popup_mode === 'alatpay_native_modal_v1'
+        ? 'alatpay_native_modal_v1'
+        : undefined;
+      const alatpayCheckout = initData?.alatpay_public_checkout ?? null;
+      const alatpayRef = initData?.alatpay_refs ?? null;
       const url = (init as any)?.authorization_url || (init as any)?.data?.authorization_url || '';
       const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
+      if (checkoutPopupMode === 'alatpay_native_modal_v1' && alatpayCheckout) {
+        const bellsReference = alatpayRef?.bells_reference || ref;
+        try {
+          await launchAlatpayNativeModal(alatpayCheckout, {
+            onReportTransaction: (_r) => {
+              navigate(`/student/payments/callback/${encodeURIComponent(bellsReference || ref)}`);
+            },
+            onError: (e) => {
+              const m = e?.message || 'Unable to initiate payment. Please try again shortly.';
+              setAlert({ isOpen: true, title: 'Payment error', message: typeof m === 'string' ? m : 'Unable to initiate payment. Please try again shortly.', type: 'error' });
+            },
+            onClosed: () => {},
+          });
+        } catch (_e: any) {
+          const m = _e?.message || 'Unable to initiate payment';
+          setAlert({ isOpen: true, title: 'Payment error', message: typeof m === 'string' ? m : 'Unable to initiate payment', type: 'error' });
+        } finally {
+          setPaying(false);
+        }
+        return;
+      }
       if (typeof url === 'string' && url.startsWith('http')) {
         setCheckoutModalUrl(url);
         setCheckoutModalRef(ref || undefined);

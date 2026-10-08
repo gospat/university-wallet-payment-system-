@@ -515,9 +515,11 @@ router.get('/reports/collections', requirePermission('VIEW_RECONCILIATION_REPORT
 
     const csv = Papa.unparse(csvRows, { delimiter: ',' });
     const ts = (d: any) => (d ? new Date(d).toISOString().slice(0, 10).replace(/-/g, '') : 'all');
-    const filename = `collections_report_${ts(dateFrom)}_${ts(dateTo)}_${Date.now()}.csv`;
+    const rawFilename = `collections_report_${ts(dateFrom)}_${ts(dateTo)}_${Date.now()}.csv`;
+    const safeFn = String(rawFilename ?? 'collections_report.csv').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 180) || 'collections_report.csv';
+    const cdSafeQ = safeFn.replace(/"/g, '\\"');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    res.setHeader('Content-Disposition', `attachment; filename="${cdSafeQ}"; filename*=UTF-8''${encodeURIComponent(safeFn)}`);
     res.send('\uFEFF' + csv);
     return;
   }
@@ -837,12 +839,17 @@ router.get(
       ]);
     }
     const ts = (d: any) => (d ? new Date(String(d)).toISOString().slice(0, 10).replace(/-/g, '') : 'all');
-    const filename = `receipts_${ts(q.dateFrom)}_${ts(q.dateTo)}_${Date.now()}.csv`;
+    const rawCsvFn = `receipts_${ts(q.dateFrom)}_${ts(q.dateTo)}_${Date.now()}.csv`;
+    const safeCsvFn = String(rawCsvFn ?? 'receipts_export.csv').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 180) || 'receipts_export.csv';
+    const csvQuoted = safeCsvFn.replace(/"/g, '\\"');
+    const rawJsonFn = `receipts_${ts(q.dateFrom)}_${ts(q.dateTo)}.json`;
+    const safeJsonFn = String(rawJsonFn ?? 'receipts_export.json').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 180) || 'receipts_export.json';
+    const jsonQuoted = safeJsonFn.replace(/"/g, '\\"');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    res.setHeader('Content-Disposition', `attachment; filename="${csvQuoted}"; filename*=UTF-8''${encodeURIComponent(safeCsvFn)}`);
     if (((q as any).format ?? 'csv') === 'json') {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename=receipts_${ts(q.dateFrom)}_${ts(q.dateTo)}.json`);
+      res.setHeader('Content-Disposition', `attachment; filename="${jsonQuoted}"; filename*=UTF-8''${encodeURIComponent(safeJsonFn)}`);
       return res.status(200).json({ status: 'success', data: { rows } });
     }
     const csvWithIntegrity = appendCsvIntegrityTrailer(csv);

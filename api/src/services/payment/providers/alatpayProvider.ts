@@ -110,6 +110,7 @@ export class AlatpayProvider implements IPaymentProvider {
           firstName: opts.firstName,
           lastName: opts.lastName,
           phone: opts.phone,
+          popupModeEnabled: isAlatpayPopupModeEnabled(),
         });
         const result: InitializeResult = {
           checkoutUrl: refs.checkoutUrl,

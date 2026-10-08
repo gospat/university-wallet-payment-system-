@@ -1312,9 +1312,24 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect(sanitized.fallback.enableRedirect).toBe(false);
     expect(sanitized.fallback.enablePopup).toBe(true);
     expect(sanitized.fallback.handshakeTimeoutMs).toBe(4500);
-    // NO credential fields anywhere in sanitized (top-level):
+    // NO credential fields anywhere except the single intentional top-level PUBLIC apiKey:
+    expect(sanitized).toHaveProperty('apiKey', expect.any(String));
+    expect(typeof sanitized.apiKey).toBe('string');
+    expect(sanitized.apiKey.length).toBeGreaterThanOrEqual(8);
+    const hasNestedKey = (node: unknown, depth = 0): boolean => {
+      if (node === null || node === undefined) return false;
+      if (Array.isArray(node)) return node.some((x) => hasNestedKey(x, depth + 1));
+      if (typeof node === 'object') {
+        const bad = /api[_-]?key|subscription[_-]?key|secret|webhook[_-]?secret|ocp[_-]?apim/i;
+        for (const k of Object.keys(node as Record<string, unknown>)) {
+          if (depth > 0 && bad.test(k)) return true;
+          if (hasNestedKey((node as Record<string, unknown>)[k], depth + 1)) return true;
+        }
+      }
+      return false;
+    };
+    expect(hasNestedKey(sanitized, 0)).toBe(false);
     const jsonFlat = JSON.stringify(sanitized);
-    expect(jsonFlat).not.toMatch(/api[_-]?key/i);
     expect(jsonFlat).not.toMatch(/subscription[_-]?key/i);
     expect(jsonFlat).not.toMatch(/secret/i);
   });

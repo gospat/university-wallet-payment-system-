@@ -35,8 +35,17 @@ export const downloadReceipt = catchAsync(async (req: Request, res: Response, ne
 
   const pdfBuffer = await ReceiptService.generateReceipt(transaction);
 
+  const _sanitize = (raw: string, fallback: string) => {
+    const s = String(raw ?? '').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 160);
+    return s || fallback;
+  };
+  const _rfcCd = (safe: string) => {
+    const q = safe.replace(/"/g, '\\"');
+    return `attachment; filename="${q}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
+  };
+  const r1 = _sanitize(String(reference || 'transaction'), 'receipt');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=receipt_${reference}.pdf`);
+  res.setHeader('Content-Disposition', _rfcCd(`receipt_${r1}.pdf`));
   res.setHeader('Content-Length', pdfBuffer.length);
 
   res.send(pdfBuffer);
@@ -60,8 +69,17 @@ export const downloadStatement = catchAsync(async (req: Request, res: Response, 
 
   const pdfBuffer = await ReceiptService.generateStatement(user, transactions, 0);
 
+  const _sanitizeDl = (raw: string, fallback: string) => {
+    const s = String(raw ?? '').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 160);
+    return s || fallback;
+  };
+  const _rfcCdDl = (safe: string) => {
+    const q = safe.replace(/"/g, '\\"');
+    return `attachment; filename="${q}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
+  };
+  const sm = _sanitizeDl(String(user.matricNumber || userId || 'student'), 'student');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=statement_${user.matricNumber || userId}.pdf`);
+  res.setHeader('Content-Disposition', _rfcCdDl(`statement_${sm}.pdf`));
   res.setHeader('Content-Length', pdfBuffer.length);
 
   res.send(pdfBuffer);
@@ -118,8 +136,17 @@ export const downloadFormalReceipt = catchAsync(async (req: Request, res: Respon
     } : null,
   });
 
+  const _sanitizeRcpt = (raw: string, fallback: string) => {
+    const s = String(raw ?? '').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 160);
+    return s || fallback;
+  };
+  const _rfcCdRcpt = (safe: string) => {
+    const q = safe.replace(/"/g, '\\"');
+    return `attachment; filename="${q}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
+  };
+  const rn = _sanitizeRcpt(String(row.receiptNumber || id), 'receipt');
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=receipt_${row.receiptNumber}.pdf`);
+  res.setHeader('Content-Disposition', _rfcCdRcpt(`receipt_${rn}.pdf`));
   res.setHeader('Content-Length', pdfBuffer.length);
   res.send(pdfBuffer);
 });

@@ -5,6 +5,7 @@ import HostedCheckoutModal from '../../components/HostedCheckoutModal';
 import { useAuth } from '../../context/AuthContext';
 import { i18n } from '../../i18n/en';
 import { studentFeeApi } from '../../services/studentFees';
+import { launchAlatpayNativeModal } from '../../utils/alatpayCheckout';
 import { ArrowRight, Loader2, CreditCard, AlertTriangle, ArrowLeft, Receipt, Calculator } from 'lucide-react';
 
 const fmt = (n: number) =>
@@ -106,16 +107,24 @@ const CheckoutPage: React.FC = () => {
       const url = (init as any)?.authorization_url || (init as any)?.data?.authorization_url || '';
       const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
       if (checkoutPopupMode === 'alatpay_native_modal_v1' && alatpayCheckout) {
-        setCheckoutMode('alatpay_native_modal_v1');
-        setAlatpayNativeModal(alatpayCheckout);
-        setAlatpayRefs(alatpayRef ?? null);
-        setCheckoutModalUrl('');
-        setCheckoutModalRef(ref || undefined);
-        setCheckoutModalAmount(amt);
-        setCheckoutModalInvoiceId(invoiceId);
-        setCheckoutModalGateway(gl);
-        setCheckoutModalOpen(true);
-        setProceeding(false);
+        const bellsReference = alatpayRef?.bells_reference || ref;
+        try {
+          await launchAlatpayNativeModal(alatpayCheckout, {
+            onReportTransaction: (_r) => {
+              navigate(`/student/payments/callback/${encodeURIComponent(bellsReference || ref)}`);
+            },
+            onError: (e) => {
+              const m = e?.message || t.failedInit;
+              setMsg(typeof m === 'string' ? m : t.failedInit);
+            },
+            onClosed: () => {},
+          });
+        } catch (_e: any) {
+          const m = _e?.message || t.failedInit;
+          setMsg(typeof m === 'string' ? m : t.failedInit);
+        } finally {
+          setProceeding(false);
+        }
         return;
       }
       if (typeof url === 'string' && url.startsWith('http')) {
