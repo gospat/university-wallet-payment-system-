@@ -283,6 +283,68 @@ test('J. sanitized ALATPAY tooling: getAlatpayBaseUrl returns documented host ap
   }
 });
 
+// K. ALATPAY CSP CONNECT-SRC REGRESSION (additive-only fix for production DevTools violation):
+//      Helmet CSP connect-src directive in api/src/app.ts MUST contain BOTH:
+//        - legacy:   https://alatpay.azure-api.net      (retained, no removal)
+//        - current:  https://apibox.alatpay.ng          (new — SDK v2.0.1 targets this)
+//      Also nginx payment.bellsuniversity.edu.ng.conf connect-src (served on static
+//      frontend document) MUST contain same apibox origin.
+//    Static parse only. No Express server launched. No DB, no network, no env change.
+test('K. ALATPAY CSP regression: Helmet + nginx connect-src BOTH include https://apibox.alatpay.ng (additive, no wildcards, retain legacy alatpay.azure-api.net)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const apiAppTs = fs.readFileSync(path.resolve(__dirname, '..', 'app.ts'), 'utf8');
+  const nginxConf = fs.readFileSync(
+    path.resolve(__dirname, '..', '..', '..', 'nginx', 'payment.bellsuniversity.edu.ng.conf'),
+    'utf8',
+  );
+
+  // --------- 1) api/src/app.ts helmet CSP connect-src directive checks ---------
+  expect(apiAppTs).toContain("'connect-src':");
+  // New apibox origin MUST be present (matches user's exact violation):
+  expect(apiAppTs).toMatch(/https:\/\/apibox\.alatpay\.ng/);
+  // Legacy alatpay.azure-api.net MUST STILL be present (additive only, no remove):
+  expect(apiAppTs).toMatch(/https:\/\/alatpay\.azure-api\.net/);
+  // web.alatpay.ng SDK script/iframe origin (for completeness):
+  expect(apiAppTs).toMatch(/https:\/\/web\.alatpay\.ng/);
+  // No wildcard hostnames in connect-src directive (no https:*, no *):
+  //   parse the connect-src line specifically (not the whole file) for wildcards:
+  const helmetConnectLineMatch = apiAppTs.match(/'connect-src':\s*\[([^\]]+)\]/);
+  expect(helmetConnectLineMatch).not.toBeNull();
+  const helmetConnectLine = helmetConnectLineMatch[1];
+  expect(helmetConnectLine).not.toMatch(/\*\.alatpay\.ng/);
+  expect(helmetConnectLine).not.toMatch(/\*\.azure-api\.net/);
+  // Origin must be full-qualified https:// exactly (no scheme-less or port-mixed):
+  expect(helmetConnectLine).toMatch(/alatpayPopupApiboxOrigin|https:\/\/apibox\.alatpay\.ng/);
+
+  // --------- 2) nginx payment.bellsuniversity.edu.ng.conf CSP header checks ---------
+  expect(nginxConf).toMatch(/add_header\s+Content-Security-Policy\s+/i);
+  // find the active (non-comment) add_header CSP line:
+  const cspLine = nginxConf
+    .split('\n')
+    .map((l: string) => l.trim())
+    .filter((l: string) => l.startsWith('add_header') && /Content-Security-Policy/i.test(l) && !/^#/.test(l))
+    .join('\n');
+  expect(cspLine.length).toBeGreaterThan(50);
+  // connect-src directive in the active header MUST contain new apibox origin:
+  expect(cspLine).toMatch(/connect-src[^;]*https:\/\/apibox\.alatpay\.ng/);
+  // connect-src directive MUST also retain legacy alatpay.azure-api.net (additive only):
+  expect(cspLine).toMatch(/connect-src[^;]*https:\/\/alatpay\.azure-api\.net/);
+  // existing connect-src self + paymentapi MUST still be present (not stripped):
+  expect(cspLine).toMatch(/connect-src[^;]*'self'/);
+  expect(cspLine).toMatch(/connect-src[^;]*https:\/\/paymentapi\.bellsuniversity\.edu\.ng/);
+  // No wildcards added for connect-src directive:
+  const connectSrcOnly = cspLine.match(/connect-src([^;]*);/i)?.[1] ?? '';
+  expect(connectSrcOnly).not.toMatch(/(^|\s)\*(?:\s|$)/);
+  expect(connectSrcOnly).not.toMatch(/\*\.alatpay\.ng/);
+  expect(connectSrcOnly).not.toMatch(/\*\.azure-api\.net/);
+  // No unsafe-eval introduced anywhere in the CSP:
+  expect(cspLine).not.toMatch(/unsafe-eval/i);
+  // frame-ancestors 'none' + form-action 'self' preserved:
+  expect(cspLine).toMatch(/frame-ancestors\s+'none'/);
+  expect(cspLine).toMatch(/form-action\s+'self'/);
+});
+
 // K. Extra: globalErrorHandler production → no stack trace / SQL exposure
 test('L (bonus). globalErrorHandler production non-operational → generic message, no stack leak', () => {
   const res: any = {

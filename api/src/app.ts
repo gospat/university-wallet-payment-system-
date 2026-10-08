@@ -106,6 +106,7 @@ const alatpayPopupSdkOrigins = [
   'https://alatpay-client.azurewebsites.net',
 ];
 const alatpayPopupMerchantOrigin = 'https://alatpay.azure-api.net';
+const alatpayPopupApiboxOrigin = 'https://apibox.alatpay.ng';
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: true,
@@ -134,7 +135,7 @@ app.use(helmet({
         'https://*.alathaba.ng',
         ...alatpayPopupSdkOrigins,
       ],
-      'connect-src': ["'self'", ...alatpayPopupSdkOrigins, alatpayPopupMerchantOrigin, 'https:'],
+      'connect-src': ["'self'", ...alatpayPopupSdkOrigins, alatpayPopupMerchantOrigin, alatpayPopupApiboxOrigin, 'https:'],
       'object-src': ["'none'"],
       'base-uri': ["'self'"],
       'form-action': ["'self'"],
