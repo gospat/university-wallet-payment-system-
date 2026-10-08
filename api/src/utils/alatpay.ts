@@ -184,9 +184,231 @@ export type AlatpayWebhookEnvelope = {
     Status?: boolean;
     Message?: string;
   };
+  // Documented ALATPay "Setup Callback URL" payload variant: lowercase root `data` object.
+  // Supported alongside the legacy Value.Data envelope for compatibility with
+  // either provider-documented or actual webhook payload shapes.
+  data?: {
+    id?: string;
+    amount?: number | string;
+    status?: string;
+    channel?: string;
+    currency?: string;
+    orderId?: string;
+    order_id?: string;
+    feeAmount?: number | string;
+    fee_amount?: number | string;
+    callbackUrl?: string;
+    sessionId?: string | null;
+    settlementType?: string;
+    updatedAt?: string;
+    createdAt?: string;
+    customer?: {
+      id?: string;
+      transactionId?: string;
+      transaction_id?: string;
+      email?: string;
+      phone?: string | null;
+      firstName?: string | null;
+      lastName?: string | null;
+      metadata?: string | null | Record<string, unknown>;
+    };
+  };
+  // Root-level identifiers (some providers emit id/status at the envelope root).
+  id?: string;
+  status?: string;
   StatusCode?: number;
   [k: string]: any;
 };
+
+export type AlatpayNormalizedData = {
+  Id: string | null;
+  Amount: number | null;
+  Status: string | null;
+  Channel: string | null;
+  Currency: string | null;
+  OrderId: string | null;
+  FeeAmount: number | null;
+  CallbackUrl: string | null;
+  SessionId: string | null;
+  UpdatedAt: string | null;
+  CreatedAt: string | null;
+  Customer: {
+    Id: string | null;
+    TransactionId: string | null;
+    Email: string | null;
+    Phone: string | null;
+    FirstName: string | null;
+    LastName: string | null;
+    Metadata: string | null | Record<string, unknown> | null;
+  } | null;
+};
+
+function asNumber(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function asString(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s.length === 0 ? null : s;
+}
+
+/**
+ * Normalize both known ALATPay webhook envelope variants into a single
+ * canonical shape so downstream handlers never need to branch on case:
+ *   1) Legacy { Value: { Data: { Id, Status, OrderId, Customer: { TransactionId, ... } } } }
+ *   2) Documented lowercase { data: { id, status, orderId, customer: { transactionId, ... } } }
+ *   3) Fallback root-level { id, status, ... } (if present)
+ * The HMAC/signature layer remains authoritative; normalization only affects
+ * field extraction after authentication has already passed.
+ */
+export function normalizeAlatpayWebhookEnvelope(raw: AlatpayWebhookEnvelope | any): AlatpayNormalizedData {
+  const vData = (raw?.Value?.Data ?? {}) as Record<string, any>;
+  const dData = (raw?.data ?? {}) as Record<string, any>;
+  const vCust = (vData.Customer ?? {}) as Record<string, any>;
+  const dCust = (dData.customer ?? {}) as Record<string, any>;
+
+  const id =
+    asString(vData.Id) ??
+    asString(vData.id) ??
+    asString(dData.id) ??
+    asString(dData.Id) ??
+    asString(raw?.id) ??
+    asString(raw?.Id) ??
+    null;
+
+  const amount =
+    asNumber(vData.Amount) ??
+    asNumber(dData.amount) ??
+    asNumber(raw?.amount) ??
+    null;
+
+  const status =
+    asString(vData.Status) ??
+    asString(vData.status) ??
+    asString(dData.status) ??
+    asString(dData.Status) ??
+    asString(raw?.status) ??
+    asString(raw?.Status) ??
+    null;
+
+  const channel =
+    asString(vData.Channel) ??
+    asString(dData.channel) ??
+    null;
+
+  const currency =
+    asString(vData.Currency) ??
+    asString(dData.currency) ??
+    null;
+
+  const orderId =
+    asString(vData.OrderId) ??
+    asString(dData.orderId) ??
+    asString(dData.order_id) ??
+    asString(raw?.orderId) ??
+    asString(raw?.orderReference) ??
+    null;
+
+  const feeAmount =
+    asNumber(vData.FeeAmount) ??
+    asNumber(dData.feeAmount) ??
+    asNumber(dData.fee_amount) ??
+    null;
+
+  const callbackUrl =
+    asString(vData.CallbackUrl) ??
+    asString(dData.callbackUrl) ??
+    null;
+
+  const sessionId =
+    asString(vData.SessionId) ??
+    asString(vData.sessionId) ??
+    asString(dData.sessionId) ??
+    null;
+
+  const updatedAt =
+    asString(vData.UpdatedAt) ??
+    asString(dData.updatedAt) ??
+    null;
+
+  const createdAt =
+    asString(vData.CreatedAt) ??
+    asString(dData.createdAt) ??
+    null;
+
+  const custId =
+    asString(vCust.Id) ??
+    asString(dCust.id) ??
+    null;
+
+  const custTxId =
+    asString(vCust.TransactionId) ??
+    asString(dCust.transactionId) ??
+    asString(dCust.transaction_id) ??
+    null;
+
+  const custEmail =
+    asString(vCust.Email) ??
+    asString(dCust.email) ??
+    null;
+
+  const custPhone =
+    asString(vCust.Phone) ??
+    asString(dCust.phone) ??
+    null;
+
+  const custFirst =
+    asString(vCust.FirstName) ??
+    asString(dCust.firstName) ??
+    null;
+
+  const custLast =
+    asString(vCust.LastName) ??
+    asString(dCust.lastName) ??
+    null;
+
+  const custMetaRaw =
+    (vCust.Metadata !== undefined && vCust.Metadata !== null) ? vCust.Metadata :
+    (dCust.metadata !== undefined && dCust.metadata !== null) ? dCust.metadata :
+    null;
+
+  const hasAnyCustomer =
+    custId !== null ||
+    custTxId !== null ||
+    custEmail !== null ||
+    custFirst !== null ||
+    custLast !== null ||
+    custMetaRaw !== null;
+
+  return {
+    Id: id,
+    Amount: amount,
+    Status: status,
+    Channel: channel,
+    Currency: currency,
+    OrderId: orderId,
+    FeeAmount: feeAmount,
+    CallbackUrl: callbackUrl,
+    SessionId: sessionId,
+    UpdatedAt: updatedAt,
+    CreatedAt: createdAt,
+    Customer: hasAnyCustomer
+      ? {
+          Id: custId,
+          TransactionId: custTxId,
+          Email: custEmail,
+          Phone: custPhone,
+          FirstName: custFirst,
+          LastName: custLast,
+          Metadata: custMetaRaw,
+        }
+      : null,
+  };
+}
+
 
 export function serializeAlatpayCustomerMetadata(meta: Record<string, unknown> | undefined | null): string {
   try {

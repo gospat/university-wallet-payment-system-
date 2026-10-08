@@ -49,6 +49,7 @@ import {
   parseAlatpayCustomerMetadata,
   selectAlatpayFinalTxId,
   AlatpayCustomerMetadata,
+  normalizeAlatpayWebhookEnvelope,
 } from '../utils/alatpay';
 import { i18n } from '../i18n/en';
 import { AdminNotificationService } from '../services/adminNotification';
@@ -452,18 +453,22 @@ router.post('/alatpay', async (req: Request, res: Response) => {
 
   // ---------------------------------------------------------------------------
   // Step 3 — Parse envelope + extract event/transaction references.
+  // Support both legacy { Value: { Data: {...} } } and documented lowercase
+  // { data: { id, status, ... } } envelope shapes via canonical normalizer.
   // ---------------------------------------------------------------------------
   const body: AlatpayWebhookEnvelope = req.body ?? {};
-  const data = body.Value?.Data ?? {};
-  const alatpayEventId = extractAlatpayEventId(body);
+  const norm = normalizeAlatpayWebhookEnvelope(body);
+  const alatpayEventId =
+    (norm.Id && norm.Id.length > 0) ? norm.Id :
+    extractAlatpayEventId(body);
   const eventType =
-    normalizeAlatStatus(data.Status) === 'success'
+    normalizeAlatStatus(norm.Status) === 'success'
       ? 'charge.success'
-      : normalizeAlatStatus(data.Status) === 'failed'
+      : normalizeAlatStatus(norm.Status) === 'failed'
       ? 'charge.failed'
       : 'charge.unknown';
-  const orderId = typeof data.OrderId === 'string' ? data.OrderId : undefined;
-  const customerTxId = typeof data.Customer?.TransactionId === 'string' ? data.Customer.TransactionId : undefined;
+  const orderId = norm.OrderId ?? undefined;
+  const customerTxId = norm.Customer?.TransactionId ?? undefined;
   const transactionRef = orderId ?? customerTxId ?? (alatpayEventId ? String(alatpayEventId) : undefined);
 
   if (!alatpayEventId) {
@@ -559,18 +564,14 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
   let newProcessed = false;
   let failureReason: string | null = null;
   const envelope: AlatpayWebhookEnvelope | null = row.payload as any;
-  const data = envelope?.Value?.Data ?? {};
+  const norm = normalizeAlatpayWebhookEnvelope(envelope ?? {});
 
-  // 1. Extract raw fields
-  const dataId = typeof data.Id === 'string' ? data.Id.trim() : null;
-  const orderIdRaw = typeof data.OrderId === 'string' ? data.OrderId.trim() : null;
-  const customerTxIdRaw = typeof data.Customer?.TransactionId === 'string' ? data.Customer.TransactionId.trim() : null;
-  const sessionIdRaw =
-    typeof data.SessionId === 'string'
-      ? data.SessionId.trim()
-      : typeof (envelope as any)?.Value?.Data?.sessionId === 'string'
-        ? (envelope as any).Value.Data.sessionId.trim()
-        : null;
+  // 1. Extract raw fields (use canonical normalizer — supports both
+  //    Value.Data.Id/Status/OrderId/Customer AND documented lowercase data.id/status/orderId/customer)
+  const dataId = norm.Id;
+  const orderIdRaw = norm.OrderId;
+  const customerTxIdRaw = norm.Customer?.TransactionId ?? null;
+  const sessionIdRaw = norm.SessionId;
   // Final authoritative ALATPAY transaction UUID for /transactions/{id} verify.
   // STRICT: only UUID-v4 shaped values are accepted. WEMA order refs, payk...
   // init/session refs, event identifiers, and short non-UUID strings are all
@@ -584,7 +585,7 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
     selectAlatpayFinalTxId(envelope, customerTxIdUuid) ?? customerTxIdUuid;
 
   // 2. Parse Customer.Metadata safely (object or string JSON)
-  const customerMeta: AlatpayCustomerMetadata | null = parseAlatpayCustomerMetadata(data.Customer?.Metadata ?? null);
+  const customerMeta: AlatpayCustomerMetadata | null = parseAlatpayCustomerMetadata(norm.Customer?.Metadata ?? null);
   const metaTxId = customerMeta?.transaction_id ?? null;
   const metaBellsRef = customerMeta?.bells_payment_reference ?? null;
 
@@ -678,7 +679,7 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
         }
         await prisma.transaction.updateMany({
           where: { id: existing.id, status: 'PENDING' as any },
-          data: { status: 'FAILED' as any, underpaidReason: `alatpay event ${eventType} / ${data.Status ?? 'unknown'}`.slice(0, 190) },
+          data: { status: 'FAILED' as any, underpaidReason: `alatpay event ${eventType} / ${norm.Status ?? 'unknown'}`.slice(0, 190) },
         });
         await prisma.auditLog
           .create({
@@ -689,7 +690,7 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
               userId: existing.userId ?? null,
               newValue: {
                 alatpayEvent: eventType,
-                rawStatus: data.Status ?? null,
+                rawStatus: norm.Status ?? null,
                 finalTxIdPresent: !!finalTxId,
                 orderId: orderIdRaw?.slice(0, 80) ?? null,
               } as any,

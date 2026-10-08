@@ -733,12 +733,70 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect([401, 403]).toContain(res.status);
     });
 
-    it('TR-23.9 Ownership guard: other student cannot download protected receipt (403 or 404 or 410 — never success with wrong owner)', async () => {
-      if (!student2Token || !student1User) return console.warn(SKIP_MSG_AUTH);
-      const res = await request(app)
-        .get(`${API}/students/receipts/1/download`)
+    it('TR-23.9 Ownership guard: student B CANNOT download student A\'s real receipt (NEVER HTTP 200, NEVER returns PDF binary)', async () => {
+      if (!student2Token || !student1User?.id) return console.warn(SKIP_MSG_AUTH);
+
+      const prisma = require('../config/database').default ?? require('../config/database');
+
+      // --- Precondition: insert an actual Receipt + companion Transaction owned by STUDENT A (student1) in the test DB.
+      //     We deliberately use unique non-conflicting identifiers (unique receiptNumber + unique verificationToken)
+      //     so this row never collides with real or other test rows. Cleanup handled after assertions.
+      const uniq = 'TR239-' + Date.now() + '-' + Math.floor(Math.random() * 1e9);
+      const fakeTx = await prisma.transaction.create({
+        data: {
+          userId: Number(student1User.id),
+          type: 'FEE_PAYMENT',
+          gateway: 'ALATPAY',
+          reference: uniq,
+          status: 'SUCCESS',
+          expectedAmount: 1500.0,
+          amount: 1500.0,
+          description: 'TR-23.9 ownership-test receipt owner ' + uniq,
+        },
+        select: { id: true },
+      });
+      const studentAReceipt = await prisma.receipt.create({
+        data: {
+          receiptNumber: 'RCPT-' + uniq,
+          verificationToken: 'vrf-' + uniq,
+          transactionId: Number(fakeTx.id),
+          studentId: Number(student1User.id),
+          paidAmount: 1500.0,
+          totalAmount: 1500.0,
+          paymentChannel: 'ALATPAY',
+          paidAt: new Date(),
+        },
+        select: { id: true, studentId: true },
+      });
+      expect(Number(studentAReceipt.studentId)).toBe(Number(student1User.id));
+
+      // --- ATTEMPT: student B (student2) GET /students/receipts/{studentAId}/download
+      const resStudentB = await request(app)
+        .get(`${API}/students/receipts/${Number(studentAReceipt.id)}/download`)
         .set(auth(student2Token));
-      expect([403, 404, 410, 200]).toContain(res.status);
+
+      // --- GUARD 1: Status MUST NEVER be 200 OK for cross-student receipt access.
+      expect(resStudentB.status).not.toBe(200);
+      // --- GUARD 2: Permitted "not-owner" statuses (403 denied, 404 not-found, 410 voided — all safe)
+      expect([403, 404, 410]).toContain(resStudentB.status);
+      // --- GUARD 3: Response body MUST NOT start with PDF signature (student B never gets A's PDF).
+      const bodyBuf: Buffer | string = resStudentB.body instanceof Buffer ? resStudentB.body : Buffer.from(JSON.stringify(resStudentB.body ?? ''));
+      const firstFive = Buffer.isBuffer(bodyBuf) ? bodyBuf.slice(0, 5).toString('binary') : String(bodyBuf).slice(0, 5);
+      expect(firstFive).not.toBe('%PDF-');
+
+      // --- Sanity: Owner (student A) CAN hit endpoint & reach at least the "before PDF" path
+      //     (we don't wait for full PDF render here; receipt.ts render pipeline tested elsewhere).
+      //     Just assert receipt lookup resolves the correct owner ID.
+      const ownerCheck = await prisma.receipt.findUnique({ where: { id: Number(studentAReceipt.id) }, select: { studentId: true } });
+      expect(Number(ownerCheck?.studentId)).toBe(Number(student1User.id));
+
+      // --- Cleanup
+      try {
+        await prisma.receipt.delete({ where: { id: Number(studentAReceipt.id) } });
+        await prisma.transaction.delete({ where: { id: Number(fakeTx.id) } });
+      } catch {
+        /* ignore cleanup failures */
+      }
     });
   });
 
@@ -796,6 +854,48 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       );
       expect(cooldownRegion).toMatch(/429/);
       expect(cooldownRegion).toMatch(/Please wait a moment before checking again\./);
+    });
+
+    it('TR-24.5b RATE LIMIT INTEGRATION: second reverify call on same PENDING tx returns HTTP 429 within cooldown window.', async () => {
+      if (!student1Token || !student1User?.id) return console.warn(SKIP_MSG_AUTH);
+      const prisma = require('../config/database').default ?? require('../config/database');
+      const uniq = 'TR245B-' + Date.now() + '-' + Math.floor(Math.random() * 1e9);
+      // Create real PENDING ALATPAY tx owned by student1 (no final UUID — returns 202 on first call)
+      const created = await prisma.transaction.create({
+        data: {
+          userId: Number(student1User.id),
+          type: 'FEE_PAYMENT',
+          gateway: 'ALATPAY',
+          reference: uniq,
+          status: 'PENDING',
+          expectedAmount: 1500.0,
+          amount: 0,
+          description: 'TR-24.5b rate-limit test ' + uniq,
+        },
+        select: { id: true, userId: true, status: true },
+      });
+      expect(Number(created.userId)).toBe(Number(student1User.id));
+      try {
+        // First call: should NOT be rate-limited (returns 202 awaiting-callback since no final UUID)
+        const first = await request(app)
+          .post(`${API}/students/payments/${Number(created.id)}/reverify`)
+          .set(auth(student1Token));
+        expect([202, 200, 429]).toContain(first.status);
+        // Second call on same transaction id within 30s cooldown: MUST be HTTP 429
+        const second = await request(app)
+          .post(`${API}/students/payments/${Number(created.id)}/reverify`)
+          .set(auth(student1Token));
+        expect(second.status).toBe(429);
+        expect(second.body?.status).toBe('cooldown');
+        expect(String(second.body?.message ?? '')).toMatch(/Please wait a moment/);
+        expect(Number(second.body?.cooldownMs)).toBeGreaterThanOrEqual(29000);
+      } finally {
+        try {
+          await prisma.transaction.delete({ where: { id: Number(created.id) } });
+        } catch {
+          /* ignore cleanup failures */
+        }
+      }
     });
 
     it('TR-24.6 Missing final ALATPAY UUID returns exact safe message: check-again + contact Bursary. Status != SUCCESS. canRetry=false.', () => {
