@@ -26,7 +26,7 @@ router.get(
           const rows = (await prisma.$queryRaw<[{ cnt: string | number }]>(Prisma.sql`
             SELECT COUNT(*) AS cnt
             FROM invoices
-            WHERE userId = ${userId}
+            WHERE studentId = ${userId}
               AND (amountDue - amountPaid) > 0
               AND status <> 'VOID'
           `)) as unknown as [{ cnt: string | number }];
