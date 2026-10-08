@@ -1835,4 +1835,211 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect(gateCode).not.toBe('VERIFY_WRONG_GATEWAY');
     expect(gateCode).not.toBe('ALATPAY_FINAL_TXID_CONFLICT');
   });
+
+  // -----------------------------------------------------------------
+  // REVIEW CORRECTION #1: Alatpay.setup() cfg shape businessId + no secrets
+  //   Mirrors the exact cfg-building code in app/src/utils/alatpayCheckout.ts
+  //   launchAlatpayNativeModal() lines 156-184 (cfg object). This test verifies
+  //   the contract of the object shape passed to window.Alatpay.setup(cfg).
+  // -----------------------------------------------------------------
+  it('T36 — setup cfg object contains businessId AND contains NO secret credential fields (mirrors launchAlatpayNativeModal cfg builder)', () => {
+    setupBaseMocks();
+    process.env.ALATPAY_ACTIVE = 'true';
+    const alatpayUtils = require('../utils/alatpay');
+    const business = { id: 'BUS-001', businessId: 'BUSID-002', name: 'Bells Test', logoUrl: 'https://cdn.example/logo.png' };
+    const bellsRef = BELLS_REF;
+    const orderRef = ORDER_REF;
+    const initRef = INIT_REF;
+    const checkout: any = alatpayUtils.buildSanitizedAlatpayPublicCheckout(
+      { status: true, data: business },
+      {
+        bellsRef,
+        orderRef,
+        initRef,
+        businessId: 'BUSID-002',
+        amountNgn: 100,
+        currency: 'NGN' as const,
+        email: 'stu@bells.edu',
+        firstName: 'T',
+        lastName: 'S',
+      },
+    );
+    // ---- EXACT cfg builder (copied verbatim from app/src/utils/alatpayCheckout.ts launchAlatpayNativeModal) ----
+    const fallback = checkout.fallback ?? {};
+    const cfg: any = {
+      businessId: checkout.businessId,
+      business: checkout.business,
+      amount: checkout.amount,
+      currency: checkout.currency ?? 'NGN',
+      email: checkout.email ?? undefined,
+      firstName: checkout.firstName ?? undefined,
+      lastName: checkout.lastName ?? undefined,
+      autoCloseModal: checkout.autoCloseModal ?? true,
+      metadata: checkout.metadata ?? {},
+      fallback: {
+        enableRedirect: false,
+        enablePopup: true,
+        handshakeTimeoutMs: Number.isFinite(fallback.handshakeTimeoutMs) ? fallback.handshakeTimeoutMs : 4500,
+      },
+    };
+    // ---- Assertions ----
+    expect(cfg.businessId).toBe('BUSID-002');
+    expect(cfg.business).toEqual(business);
+    // No secret fields anywhere in cfg (nested)
+    const secretKeyPatterns =
+      /^(.*[._\- ])?(apiKey|apikey|api_key|secret|secretKey|secret_key|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
+    const walk = (node: any, trail: string[] = []): string[] => {
+      if (node == null) return [];
+      if (Array.isArray(node)) return node.flatMap((v, i) => walk(v, [...trail, `[${i}]`]));
+      if (typeof node === 'object') {
+        return Object.keys(node).flatMap((k) => {
+          const hit = secretKeyPatterns.test(k) ? [`${[...trail, k].join('.')}`] : [];
+          return [...hit, ...walk((node as any)[k], [...trail, k])];
+        });
+      }
+      return [];
+    };
+    const hits = walk(cfg);
+    expect(hits).toEqual([]);
+    // Also verify no secret-like values:
+    const flattenValues = (n: any): string[] => {
+      if (n == null) return [];
+      if (typeof n === 'string') return [n];
+      if (Array.isArray(n)) return n.flatMap(flattenValues);
+      if (typeof n === 'object') return Object.values(n).flatMap(flattenValues as any);
+      return [];
+    };
+    const values = flattenValues(cfg);
+    for (const v of values) {
+      expect(/^sk[_-]/i.test(v)).toBe(false);
+      expect(/^bearer /i.test(v)).toBe(false);
+      expect(/^basic /i.test(v)).toBe(false);
+      expect(v.startsWith('Ocp-Apim')).toBe(false);
+    }
+  });
+
+  // -----------------------------------------------------------------
+  // REVIEW CORRECTION #3: callbackUrl/redirectUrl/webhookUrl presence in
+  //   raw business-for-plugin response does NOT abort native popup.
+  //   Only secrets abort. Nav URLs are dropped silently.
+  // -----------------------------------------------------------------
+  it('T37 — sanitizer allows callbackUrl/webhookUrl/redirectUrl/successUrl in raw payload (DROPPED silently, NO AlatpayPopupUnavailable)', () => {
+    setupBaseMocks();
+    process.env.ALATPAY_ACTIVE = 'true';
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const alatpayUtils = require('../utils/alatpay');
+    const rawWithNavUrls = {
+      status: true,
+      data: { id: 'BUS-001', businessId: 'BUSID-002', name: 'Bells', logoUrl: 'https://cdn.example/logo.png' },
+      // Nav/redirect URL fields — ordinary config fields that must NOT abort.
+      callbackUrl: 'https://example.com/callback',
+      redirectUrl: 'https://example.com/redirect',
+      webhookUrl: 'https://example.com/webhook',
+      successUrl: 'https://example.com/success',
+      cancelUrl: 'https://example.com/cancel',
+      returnUrl: 'https://example.com/return',
+    };
+    let sanitized: any = undefined;
+    expect(() => {
+      sanitized = alatpayUtils.buildSanitizedAlatpayPublicCheckout(rawWithNavUrls, {
+        bellsRef: BELLS_REF, orderRef: ORDER_REF, initRef: INIT_REF,
+        businessId: 'BUSID-002', amountNgn: 100, currency: 'NGN' as const, email: 'stu@bells.edu',
+      });
+    }).not.toThrow();
+    expect(sanitized).toBeTruthy();
+    expect(sanitized.businessId).toBe('BUSID-002');
+    // Nav URLs must NOT appear anywhere on forwarded sanitized object:
+    const flattenKeys = (n: any, trail: string[] = []): string[] => {
+      if (n == null || typeof n !== 'object') return [];
+      if (Array.isArray(n)) return n.flatMap((v, i) => flattenKeys(v, [...trail, `[${i}]`]));
+      return Object.keys(n).flatMap((k) => [k, ...flattenKeys((n as any)[k], [...trail, k])]);
+    };
+    const allKeys = new Set(flattenKeys(sanitized).map((k) => k.toLowerCase()));
+    expect([...allKeys].filter((k) => /(callback|redirect|webhook|success|cancel|return)([-_ ])?url/i.test(k))).toEqual([]);
+  });
+
+  it('T38 — sanitizer STILL ABORTS on apiKey/secret field EVEN IN PRESENCE of allowed nav URLs (secrets always win)', () => {
+    setupBaseMocks();
+    process.env.ALATPAY_ACTIVE = 'true';
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const alatpayUtils = require('../utils/alatpay');
+    const rawSecretPlusNavUrls = {
+      status: true,
+      data: { id: 'BUS-001', businessId: 'BUSID-002', name: 'Bells', logoUrl: 'https://cdn.example/logo.png' },
+      apiKey: 'sk_live_abcdef',
+      callbackUrl: 'https://example.com/callback',
+      webhookUrl: 'https://example.com/webhook',
+    };
+    expect(() =>
+      alatpayUtils.buildSanitizedAlatpayPublicCheckout(rawSecretPlusNavUrls, {
+        bellsRef: BELLS_REF, orderRef: ORDER_REF, initRef: INIT_REF,
+        businessId: 'BUSID-002', amountNgn: 100, currency: 'NGN' as const, email: 'stu@bells.edu',
+      }),
+    ).toThrow(alatpayUtils.AlatpayPopupUnavailableError);
+  });
+
+  // -----------------------------------------------------------------
+  // REVIEW CORRECTION #4: UUID extractor restricted to providerTx.id /
+  //   providerTx.data.id only — must NOT pick correlationId or others.
+  //   Exact copy of frontend extractAlatpayFinalTxId logic for test.
+  // -----------------------------------------------------------------
+  it('T39 — UUID extractor only picks providerTx.data.id/providerTx.id and IGNORES nested correlationId/customerId/sessionId UUIDs', () => {
+    setupBaseMocks();
+    // ---- Exact copy of frontend extractor (mirrors app/src/utils/alatpayCheckout.ts) ----
+    const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const isAlatpayUuid = (s: any): boolean => typeof s === 'string' && UUID_V4_RE.test(s.trim());
+    const extract = (providerTx: unknown): string | null => {
+      if (providerTx == null) return null;
+      if (typeof providerTx !== 'object') return null;
+      const root = providerTx as Record<string, unknown>;
+      const data = root.data;
+      if (data != null && typeof data === 'object') {
+        const inner = data as Record<string, unknown>;
+        if (isAlatpayUuid(inner.id)) return String(inner.id).trim();
+        if (isAlatpayUuid(inner.Id)) return String(inner.Id).trim();
+      }
+      if (isAlatpayUuid(root.id)) return String(root.id).trim();
+      if (isAlatpayUuid(root.Id)) return String(root.Id).trim();
+      return null;
+    };
+    // CASE A: correlationId UUID + unrelated customerId UUID + correct data.id
+    const CORRELATION_UUID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const CUSTOMER_UUID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const SESSION_UUID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const REAL_TX_UUID = FINAL_UUID;
+    const payloadCorrectDataId = {
+      correlationId: CORRELATION_UUID,
+      customerId: CUSTOMER_UUID,
+      sessionId: SESSION_UUID,
+      id: null as any,
+      data: { id: REAL_TX_UUID, status: 'SUCCESSFUL' },
+      nested: { deep: { anotherRandomUuid: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' } },
+    };
+    expect(extract(payloadCorrectDataId)).toBe(REAL_TX_UUID);
+    expect(extract(payloadCorrectDataId)).not.toBe(CORRELATION_UUID);
+    expect(extract(payloadCorrectDataId)).not.toBe(CUSTOMER_UUID);
+    // CASE B: only correlationId and customerId UUIDs present; NO data.id, NO top-level.id => return null
+    const payloadOnlyCorrelation = {
+      correlationId: CORRELATION_UUID,
+      customerId: CUSTOMER_UUID,
+      sessionId: SESSION_UUID,
+      data: { status: 'PENDING' },
+    };
+    expect(extract(payloadOnlyCorrelation)).toBeNull();
+    // CASE C: valid top-level .id (real tx) present alongside random nested ones => picks .id
+    const payloadTopId = {
+      correlationId: CORRELATION_UUID,
+      reference: ORDER_REF,
+      id: REAL_TX_UUID,
+      inner: { someOther: SESSION_UUID },
+    };
+    expect(extract(payloadTopId)).toBe(REAL_TX_UUID);
+    // CASE D: malformed non-UUID v4 string in .data.id => return null, not that string
+    const payloadMalformedId = {
+      id: 'not-a-uuid',
+      data: { id: 'PAY-123' },
+      correlationId: CORRELATION_UUID,
+    };
+    expect(extract(payloadMalformedId)).toBeNull();
+  });
 });

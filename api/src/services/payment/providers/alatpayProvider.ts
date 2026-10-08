@@ -16,6 +16,7 @@ import {
   serializeAlatpayCustomerMetadata,
   fetchAlatpayBusinessForPlugin,
   buildSanitizedAlatpayPublicCheckout,
+  generateAlatpayPlaceholderRefs,
   AlatpayPopupUnavailableError,
 } from '../../../utils/alatpay';
 
@@ -74,8 +75,88 @@ export class AlatpayProvider implements IPaymentProvider {
       idempotency_key: (opts.metadata as any)?.idempotency_key ?? undefined,
     };
     const metadataJsonString = serializeAlatpayCustomerMetadata(metadataForProvider);
+    const resolveEmail = () => (email ? String(email).trim() : `${opts.reference}@${defaultEmailDomain}`);
+
+    // -------------------------------------------------------------------
+    // POPUP MODE (native JS modal, SINGLE init at SDK level):
+    //   Official WEMA/ALATPay WooCommerce plugin (alatpay_payment_page())
+    //   does NOT call merchant-onboarding/initialize backend before launching
+    //   alatpay.js CDN SDK. It passes static identifiers + order data to
+    //   the browser and lets Alatpay.setup() handle init internally.
+    //   Therefore popup mode MUST NOT perform a redundant initialize HTTP
+    //   call to ALATPay here — that would create an unused payment-link
+    //   session on ALATPay's side (double initialization). We generate
+    //   deterministic local placeholders for correlation only.
+    // -------------------------------------------------------------------
+    if (isAlatpayPopupModeEnabled()) {
+      const refs = generateAlatpayPlaceholderRefs(opts.reference);
+      try {
+        const apiKey = getActiveAlatpaySecretKey();
+        const resolvedBusiness = await fetchAlatpayBusinessForPlugin(
+          businessId,
+          apiKey,
+          breakdown.totalAmount,
+          'NGN',
+          false,
+        );
+        const sanitizedPublic = buildSanitizedAlatpayPublicCheckout(resolvedBusiness, {
+          bellsRef: opts.reference,
+          orderRef: refs.orderReference,
+          initRef: refs.initPaymentReference,
+          businessId,
+          amountNgn: breakdown.totalAmount,
+          currency: 'NGN',
+          email: resolveEmail(),
+          firstName: opts.firstName,
+          lastName: opts.lastName,
+          phone: opts.phone,
+        });
+        const result: InitializeResult = {
+          checkoutUrl: refs.checkoutUrl,
+          authorization_url: refs.checkoutUrl,
+          access_code: refs.sessionId,
+          providerReference: refs.providerReference,
+          sessionId: refs.sessionId,
+          orderReference: refs.orderReference,
+          initPaymentReference: refs.initPaymentReference,
+          feeBreakdown: breakdown,
+          channelsUsed: opts.channels ?? null,
+          raw: {
+            singleInitMode: 'alatpay_native_modal_v1',
+            orderReference: refs.orderReference,
+            internalReference: opts.reference,
+          },
+          alatpayPublicCheckout: sanitizedPublic,
+        };
+        console.info(
+          JSON.stringify({
+            provider: 'ALATPAY',
+            operation: 'initialize',
+            mode: 'native_modal_single_init',
+            outcome: 'success',
+            internalReference: opts.reference,
+            wemaReference,
+            singleInit: 'sdk_handles_init_in_browser',
+            upstreamHttpsInitSkipped: true,
+          }),
+        );
+        return result;
+      } catch (err) {
+        if (err instanceof AlatpayPopupUnavailableError) throw err;
+        const msg = String((err as Error)?.message ?? '').slice(0, 160) || 'Unknown error';
+        throw new AlatpayPopupUnavailableError(
+          'ALATPay native modal could not complete backend preparation. Please retry shortly or use Paystack.',
+          { cause: msg },
+        );
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // LEGACY PAY-LINK MODE (redirect / hosted page):
+    //   Preserves original HTTP initialize call exactly.
+    // -------------------------------------------------------------------
     const body: Record<string, any> = {
-      email: email || `${opts.reference}@${defaultEmailDomain}`,
+      email: resolveEmail(),
       firstName: opts.firstName ?? opts.reference,
       lastName: opts.lastName ?? opts.reference,
       amount: breakdown.totalAmount,
@@ -119,9 +200,6 @@ export class AlatpayProvider implements IPaymentProvider {
       );
       const elapsedMs = Date.now() - t0;
       const data = response?.data?.data ?? response?.data ?? {};
-      // Order matters: ALATPAY returns BOTH paymentUrl (REAL checkout) and redirectUrl (our callback).
-      // Real response structure (per real backend probe):
-      //   response.data = { data: { id, paymentUrl, paymentReference, redirectUrl, metaData }, status:true, message:"Success" }
       const checkoutUrl =
         (data.paymentUrl ||
           data.checkoutUrl ||
@@ -139,6 +217,7 @@ export class AlatpayProvider implements IPaymentProvider {
         JSON.stringify({
           provider: 'ALATPAY',
           operation: 'initialize',
+          mode: 'legacy_paylink',
           outcome: 'success',
           httpStatus: typeof response?.status === 'number' ? response.status : null,
           upstreamStatus: data?.Status ?? response?.data?.Status ?? null,
@@ -161,38 +240,6 @@ export class AlatpayProvider implements IPaymentProvider {
         channelsUsed: opts.channels ?? null,
         raw: response?.data ?? data,
       };
-      if (isAlatpayPopupModeEnabled()) {
-        try {
-          const apiKey = getActiveAlatpaySecretKey();
-          const resolvedBusiness = await fetchAlatpayBusinessForPlugin(
-            businessId,
-            apiKey,
-            breakdown.totalAmount,
-            'NGN',
-            false,
-          );
-          const sanitizedPublic = buildSanitizedAlatpayPublicCheckout(resolvedBusiness, {
-            bellsRef: opts.reference,
-            orderRef: orderId,
-            initRef: (data.paymentReference ?? providerRef) as string,
-            businessId,
-            amountNgn: breakdown.totalAmount,
-            currency: 'NGN',
-            email: body.email as string | undefined,
-            firstName: opts.firstName,
-            lastName: opts.lastName,
-            phone: opts.phone,
-          });
-          resultBase.alatpayPublicCheckout = sanitizedPublic;
-        } catch (err) {
-          if (err instanceof AlatpayPopupUnavailableError) throw err;
-          const msg = String((err as Error)?.message ?? '').slice(0, 160) || 'Unknown error';
-          throw new AlatpayPopupUnavailableError(
-            'ALATPay native modal could not complete backend preparation. Please retry shortly or use Paystack.',
-            { cause: msg },
-          );
-        }
-      }
       return resultBase;
     } catch (error: any) {
       const resp = error?.response;

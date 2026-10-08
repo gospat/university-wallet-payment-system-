@@ -330,43 +330,74 @@ export class AlatpayPopupUnavailableError extends AppError {
   }
 }
 
-const ALATPAY_DENY_KEY_REGEX =
-  /(^|[_\s\-.])(api[_-]?key|apikey|secret|secret[_-]?key|secretkey|token|password|passwd|private[_-]?key|subscription[_-]?key|ocp[-_]apim[-_]subscription[-_]key|authorization|auth|bearer|credential|credentials?|signing[_-]?key|webhook[_-]?secret|client[_-]?secret|callback[_-]?url|callbackurl|redirect[_-]?url|redirecturl|success[_-]?url|successurl|cancel[_-]?url|cancelurl|webhook[_-]?url|webhookurl|return[_-]?url|returnurl)$/i;
+// --- Secret / credential fields  --> ABORT native checkout. ---
+const ALATPAY_SECRET_ABORT_KEY_REGEX =
+  /(^|[_\s\-.])(api[_-]?key|apikey|secret|secret[_-]?key|secretkey|token|password|passwd|private[_-]?key|subscription[_-]?key|ocp[-_]apim[-_]subscription[-_]key|authorization|auth|bearer|credential|credentials?|signing[_-]?key|webhook[_-]?secret|client[_-]?secret)$/i;
 
-const ALATPAY_DENY_VALUE_PREFIXES = [/^(bearer|basic)\s+/i, /^sk[_-]/i];
-const ALATPAY_DENY_VALUE_STARTS_WITH = ['Ocp-Apim'];
+// --- Ordinary provider navigation/configuration URL fields  --> DROP silently, NEVER forward to browser,
+//     but their presence in ALATPay responses MUST NOT abort native checkout. ---
+const ALATPAY_NAVURL_DROP_KEY_REGEX =
+  /(^|[_\s\-.])(callback[_-]?url|callbackurl|redirect[_-]?url|redirecturl|success[_-]?url|successurl|cancel[_-]?url|cancelurl|webhook[_-]?url|webhookurl|return[_-]?url|returnurl|fail[_-]?url|failurl|close[_-]?url|closeurl|click[_-]?url|clickurl)$/i;
 
-function denyKeyMatch(key: string): boolean {
+const ALATPAY_SECRET_VALUE_PREFIXES = [/^(bearer|basic)\s+/i, /^sk[_-]/i];
+const ALATPAY_SECRET_VALUE_STARTS_WITH = ['Ocp-Apim'];
+
+function isSecretAbortKey(key: string): boolean {
   if (!key) return false;
-  return ALATPAY_DENY_KEY_REGEX.test(String(key));
+  return ALATPAY_SECRET_ABORT_KEY_REGEX.test(String(key));
 }
 
-function denyValueMatch(value: unknown): boolean {
+function isNavUrlDropKey(key: string): boolean {
+  if (!key) return false;
+  return ALATPAY_NAVURL_DROP_KEY_REGEX.test(String(key));
+}
+
+function isSecretValue(value: unknown): boolean {
   if (typeof value !== 'string' || !value) return false;
-  for (const re of ALATPAY_DENY_VALUE_PREFIXES) if (re.test(value)) return true;
-  for (const prefix of ALATPAY_DENY_VALUE_STARTS_WITH) if (value.startsWith(prefix)) return true;
+  for (const re of ALATPAY_SECRET_VALUE_PREFIXES) if (re.test(value)) return true;
+  for (const prefix of ALATPAY_SECRET_VALUE_STARTS_WITH) if (value.startsWith(prefix)) return true;
   return false;
 }
 
-function scanRecursivelyForDeniedFields(node: unknown, trail: string[] = []): string | null {
+function scanRecursivelyForSecretFields(node: unknown, trail: string[] = []): string | null {
   if (node === null || node === undefined) return null;
   if (Array.isArray(node)) {
     for (let i = 0; i < node.length; i++) {
-      const hit = scanRecursivelyForDeniedFields(node[i], [...trail, `[${i}]`]);
+      const hit = scanRecursivelyForSecretFields(node[i], [...trail, `[${i}]`]);
       if (hit) return hit;
     }
     return null;
   }
   if (typeof node === 'object') {
     for (const rawKey of Object.keys(node as Record<string, unknown>)) {
-      if (denyKeyMatch(rawKey)) return `key=${rawKey} at ${[...trail, rawKey].join('.')}`;
-      const hit = scanRecursivelyForDeniedFields((node as Record<string, unknown>)[rawKey], [...trail, rawKey]);
+      // Nav-URL keys are dropped silently later by the allowlist picker; they must NOT abort.
+      if (isNavUrlDropKey(rawKey)) continue;
+      if (isSecretAbortKey(rawKey)) return `key=${rawKey} at ${[...trail, rawKey].join('.')}`;
+      const hit = scanRecursivelyForSecretFields((node as Record<string, unknown>)[rawKey], [...trail, rawKey]);
       if (hit) return hit;
     }
     return null;
   }
-  if (denyValueMatch(node)) return `value at ${trail.join('.') || '<root>'} matches credential pattern`;
+  if (isSecretValue(node)) return `value at ${trail.join('.') || '<root>'} matches credential pattern`;
   return null;
+}
+
+export function generateAlatpayPlaceholderRefs(reference: string): {
+  orderReference: string;
+  initPaymentReference: string;
+  sessionId: string | null;
+  checkoutUrl: string | null;
+  providerReference: string;
+} {
+  const ref = reference && String(reference).trim() ? String(reference).trim() : `PAY-${Date.now()}`;
+  const orderReference = `WEMA-${ref}`;
+  return {
+    orderReference,
+    initPaymentReference: orderReference,
+    sessionId: null,
+    checkoutUrl: null,
+    providerReference: orderReference,
+  };
 }
 
 export async function fetchAlatpayBusinessForPlugin(
@@ -404,7 +435,7 @@ export async function fetchAlatpayBusinessForPlugin(
       responseType: 'json',
     });
     const payload = response?.data ?? null;
-    const scan = scanRecursivelyForDeniedFields(payload);
+    const scan = scanRecursivelyForSecretFields(payload);
     if (scan) {
       throw new AlatpayPopupUnavailableError(
         'ALATPay business-for-plugin response contained credential-like fields. Popup checkout mode aborted for safety. Contact ALATPay/WEMA merchant support and request a sanitized business-for-plugin schema, or disable ALATPAY_USE_POPUP_CHECKOUT to use legacy payment-link path.',
@@ -471,7 +502,7 @@ export function buildSanitizedAlatpayPublicCheckout(
   if (!ctx || typeof ctx !== 'object') {
     throw new AlatpayPopupUnavailableError('ALATPay native modal context missing.');
   }
-  const preScan = scanRecursivelyForDeniedFields(rawBusinessResponse);
+  const preScan = scanRecursivelyForSecretFields(rawBusinessResponse);
   if (preScan) {
     throw new AlatpayPopupUnavailableError(
       'ALATPay business-for-plugin response contained credential-like fields before sanitization. Popup checkout mode aborted for safety.',
@@ -549,7 +580,7 @@ export function buildSanitizedAlatpayPublicCheckout(
       handshakeTimeoutMs: 4500,
     },
   };
-  const postScan = scanRecursivelyForDeniedFields(safe);
+  const postScan = scanRecursivelyForSecretFields(safe);
   if (postScan) {
     throw new AlatpayPopupUnavailableError(
       'ALATPay native modal sanitized checkout contained credential-like fields after sanitization. Aborted.',

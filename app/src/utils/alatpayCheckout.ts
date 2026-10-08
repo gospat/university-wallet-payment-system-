@@ -33,32 +33,23 @@ function isWindowAlatpayReady(): boolean {
 
 function extractAlatpayFinalTxId(providerTx: unknown): string | null {
   if (providerTx == null) return null;
-  if (isAlatpayUuid(providerTx)) return (providerTx as string).trim();
-  const seen = new WeakSet<object>();
-  const queue: unknown[] = [providerTx];
-  while (queue.length > 0) {
-    const cur = queue.shift();
-    if (cur == null) continue;
-    if (typeof cur === 'string') {
-      if (isAlatpayUuid(cur)) return cur.trim();
-      continue;
-    }
-    if (typeof cur !== 'object') continue;
-    const obj = cur as object;
-    if (seen.has(obj)) continue;
-    seen.add(obj);
-    if (Array.isArray(obj)) {
-      for (let i = 0; i < obj.length; i++) queue.push((obj as any)[i]);
-      continue;
-    }
-    const keys = Object.keys(obj);
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      const v = (obj as any)[k];
-      if (typeof v === 'string' && isAlatpayUuid(v)) return v.trim();
-      if (v != null && typeof v === 'object') queue.push(v);
-    }
+  // RESTRICTED to the ONLY officially-documented proven final transaction ID locations
+  // from the ALATPay SDK onTransaction callback:
+  //   1. providerTx.data.id (ALATPAY webhook-style Value.Data.Id equivalent)
+  //   2. providerTx.id
+  // Strict UUID-v4 validation applied. If neither contains a valid strict UUID-v4,
+  // return null — we deliberately refuse to pick up arbitrary nested
+  // correlationId, customerId, sessionId or other UUID-looking values.
+  if (typeof providerTx !== 'object') return null;
+  const root = providerTx as Record<string, unknown>;
+  const data = root.data;
+  if (data != null && typeof data === 'object') {
+    const inner = data as Record<string, unknown>;
+    if (isAlatpayUuid(inner.id)) return String(inner.id).trim();
+    if (isAlatpayUuid(inner.Id)) return String(inner.Id).trim();
   }
+  if (isAlatpayUuid(root.id)) return String(root.id).trim();
+  if (isAlatpayUuid(root.Id)) return String(root.Id).trim();
   return null;
 }
 
@@ -164,6 +155,7 @@ export async function launchAlatpayNativeModal(
   }
   const fallback = checkout.fallback ?? {};
   const cfg = {
+    businessId: checkout.businessId,
     business: checkout.business,
     amount: checkout.amount,
     currency: checkout.currency ?? 'NGN',
