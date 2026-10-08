@@ -154,9 +154,8 @@ export async function launchAlatpayNativeModal(
   }
   const fallback = checkout.fallback ?? {};
   const cfg = {
-    publicKey: checkout.publicKey,
+    apiKey: checkout.apiKey,
     businessId: checkout.businessId,
-    business: checkout.business,
     amount: checkout.amount,
     currency: checkout.currency ?? 'NGN',
     email: checkout.email ?? undefined,

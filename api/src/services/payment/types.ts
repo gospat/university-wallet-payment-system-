@@ -15,10 +15,10 @@ export type AlatpayPublicCheckoutMetadata = {
 };
 
 export type AlatpayPublicCheckout = {
+  apiKey: string;
   amount: number;
   currency: 'NGN';
   businessId: string;
-  business: AlatpayPublicBusiness;
   autoCloseModal: true;
   email: string;
   firstName?: string;

@@ -1259,12 +1259,14 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       explicitly typed top-level fields. No unknowns, no spread, no
   //       passthrough of undocumented provider response.
   // -------------------------------------------------------------------------
-  it('T25 — alatpayPublicCheckout minimal schema: business Object.keys = exactly 4, no extra fields', async () => {
+  it('T25 — alatpayPublicCheckout minimal schema: apiKey = publicKey, businessId present, business ABSENT, publicKey ABSENT, NO secrets anywhere', async () => {
     process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const envSpy = jest.requireActual('../utils/alatpay');
+    const publicKeyKnown = envSpy.getAlatpayPublicKey() ?? 'pk_live_FIXTURE_PUBLIC_KEY_12345678';
+    const secretKeyKnown = envSpy.getActiveAlatpaySecretKey ? (() => { try { return envSpy.getActiveAlatpaySecretKey(); } catch { return null; } })() : null;
     setupBaseMocks();
     const alatpayUtils = require('../utils/alatpay');
-    // Helper directly (unit-level):
-    const sanitized = alatpayUtils.buildSanitizedAlatpayPublicCheckout(
+    const sanitized: any = alatpayUtils.buildSanitizedAlatpayPublicCheckout(
       {
         status: true,
         data: {
@@ -1272,7 +1274,6 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
           businessId: 'BUS-BELLS-001',
           name: 'Bells University of Technology',
           logoUrl: 'https://payment.bellsuniversity.edu.ng/branding/logo.png',
-          // Extra fields that the builder MUST drop (not throw):
           extraFieldA: 'must-be-dropped',
           nestedIgnored: { hello: 'world' },
         },
@@ -1289,19 +1290,13 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
         lastName: 'Bola',
       },
     );
-    // 4-field strictness on business object:
-    expect(Object.keys(sanitized.business).sort()).toEqual(['businessId', 'id', 'logoUrl', 'name'].sort());
-    expect(Object.keys(sanitized.business).length).toBe(4);
-    expect(sanitized.business.id).toBe('BUS-123456');
-    expect(sanitized.business.businessId).toBe('BUS-BELLS-001');
-    expect(sanitized.business.name).toBe('Bells University of Technology');
-    expect(sanitized.business.logoUrl).toBe('https://payment.bellsuniversity.edu.ng/branding/logo.png');
-    // Extra fields not copied:
-    expect((sanitized.business as any).extraFieldA).toBeUndefined();
-    expect((sanitized.business as any).nestedIgnored).toBeUndefined();
+    // Working reference shape: business object MUST NOT be present.
+    expect(sanitized).not.toHaveProperty('business');
+    expect(sanitized.business).toBeUndefined();
     // Top-level type shape:
     expect(sanitized.amount).toBe(100);
     expect(sanitized.currency).toBe('NGN');
+    expect(sanitized.businessId).toBe('BUS-BELLS-001');
     expect(sanitized.autoCloseModal).toBe(true);
     expect(sanitized.email).toBe('student@example.com');
     expect(sanitized.firstName).toBe('Ade');
@@ -1312,33 +1307,64 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect(sanitized.fallback.enableRedirect).toBe(false);
     expect(sanitized.fallback.enablePopup).toBe(true);
     expect(sanitized.fallback.handshakeTimeoutMs).toBe(4500);
-    // NO credential fields anywhere except the single intentional top-level PUBLIC publicKey:
-    expect(sanitized).toHaveProperty('publicKey', expect.any(String));
-    expect(typeof sanitized.publicKey).toBe('string');
-    expect(sanitized.publicKey.length).toBeGreaterThanOrEqual(8);
-    // apiKey MUST NOT appear anywhere (browser-safe frontend never sends subscription-key bearing field)
-    expect(sanitized).not.toHaveProperty('apiKey');
-    const hasNestedKey = (node: unknown, depth = 0): boolean => {
-      if (node === null || node === undefined) return false;
-      if (Array.isArray(node)) return node.some((x) => hasNestedKey(x, depth + 1));
+    // Browser-safe credential rules (MIRROR WORKING REFERENCE PORTAL):
+    //   - apiKey: REQUIRED and MUST equal the browser-safe ALATPAY_PUBLIC_KEY value
+    //   - publicKey: ABSENT (not a top-level field the embed app recognises; embed checks apiKey only)
+    expect(sanitized).toHaveProperty('apiKey', expect.any(String));
+    expect(typeof sanitized.apiKey).toBe('string');
+    expect(sanitized.apiKey.length).toBeGreaterThanOrEqual(8);
+    expect(sanitized.apiKey).toBe(publicKeyKnown);
+    expect(sanitized).not.toHaveProperty('publicKey');
+    expect(sanitized).not.toHaveProperty('PUBLIC_KEY');
+    expect(sanitized).not.toHaveProperty('public_key');
+    // Secret-key hardening: apiKey value MUST NOT be (or contain) the secret key.
+    expect(sanitized.apiKey).not.toBe(secretKeyKnown);
+    // Key-name hardening (global disallowed patterns at any depth, EXCEPT top-level apiKey explicit allow):
+    const secretKeyNamePatterns =
+      /^(.*[._\- ])?(secret|secretKey|secret_key|ALATPAY_SECRET_KEY|WEMA_ALATPAY_SECRET_KEY|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
+    const walkKeys = (node: any, trail: string[] = []): string[] => {
+      if (node == null) return [];
+      if (Array.isArray(node)) return node.flatMap((v, i) => walkKeys(v, [...trail, `[${i}]`]));
       if (typeof node === 'object') {
-        const bad = /subscription[_-]?key|secret|secret[_-]?key|webhook[_-]?secret|ocp[_-]?apim|authorization|bearer|auth|password|token|credential|client[_-]?secret|private[_-]?key/i;
-        // At any depth, disallow "apiKey" — the browser must never receive the
-        // subscription-key-carrying field name that triggers q() business-for-plugin.
-        if (/^api[_-]?key$/i.test(String(node !== null && typeof node === 'object' ? '' : ''))) return false;
-        for (const k of Object.keys(node as Record<string, unknown>)) {
-          if (/^api[_-]?key$/i.test(k)) return true;
-          if (bad.test(k)) return true;
-          if (hasNestedKey((node as Record<string, unknown>)[k], depth + 1)) return true;
-        }
+        return Object.keys(node).flatMap((k) => {
+          // Only the single EXACT top-level key name `apiKey` is allowed as the credential field.
+          if (trail.length === 0 && k === 'apiKey') return [];
+          // publicKey disallowed everywhere (we removed it; ensure no regressions).
+          if (/^public[_-]?key$/i.test(k)) return [`${[...trail, k].join('.')}`];
+          // Any other api_key / API_KEY spelling disallowed everywhere.
+          if (/^api[_-]?key$/i.test(k) && !(trail.length === 0 && k === 'apiKey')) return [`${[...trail, k].join('.')}`];
+          const hit = secretKeyNamePatterns.test(k) ? [`${[...trail, k].join('.')}`] : [];
+          return [...hit, ...walkKeys((node as any)[k], [...trail, k])];
+        });
       }
-      return false;
+      return [];
     };
-    expect(hasNestedKey(sanitized, 0)).toBe(false);
+    expect(walkKeys(sanitized)).toEqual([]);
+    // Value-level hardening: no value anywhere equals or contains the secret key (if available).
+    const flattenValues = (n: any): string[] => {
+      if (n == null) return [];
+      if (typeof n === 'string') return [n];
+      if (Array.isArray(n)) return n.flatMap(flattenValues);
+      if (typeof n === 'object') return Object.values(n).flatMap(flattenValues as any);
+      return [];
+    };
+    const allValues = flattenValues(sanitized);
+    for (const v of allValues) {
+      expect(/^sk[_-]/i.test(v)).toBe(false);
+      expect(/^bearer /i.test(v)).toBe(false);
+      expect(/^basic /i.test(v)).toBe(false);
+      expect(v.startsWith('Ocp-Apim')).toBe(false);
+      if (secretKeyKnown) {
+        expect(v).not.toBe(secretKeyKnown);
+        expect(v).not.toContain(secretKeyKnown);
+      }
+    }
     const jsonFlat = JSON.stringify(sanitized);
-    expect(jsonFlat).not.toMatch(/"api[_-]?key"\s*:/i);
+    expect(jsonFlat).not.toMatch(/"public[_-]?key"\s*:/i);
     expect(jsonFlat).not.toMatch(/subscription[_-]?key/i);
-    expect(jsonFlat).not.toMatch(/secret/i);
+    if (secretKeyKnown) {
+      expect(jsonFlat).not.toContain(secretKeyKnown);
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -1864,9 +1890,12 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //   launchAlatpayNativeModal() lines 156-184 (cfg object). This test verifies
   //   the contract of the object shape passed to window.Alatpay.setup(cfg).
   // -----------------------------------------------------------------
-  it('T36 — setup cfg object contains businessId AND contains NO secret credential fields (mirrors launchAlatpayNativeModal cfg builder)', () => {
+  it('T36 — setup cfg object contains apiKey + businessId ONLY with NO secret credential fields (mirrors launchAlatpayNativeModal cfg builder for working reference)', () => {
     setupBaseMocks();
     process.env.ALATPAY_ACTIVE = 'true';
+    const envSpy = jest.requireActual('../utils/alatpay');
+    const publicKeyKnown = envSpy.getAlatpayPublicKey() ?? 'pk_live_FIXTURE_PUBLIC_KEY_12345678';
+    const secretKeyKnown = envSpy.getActiveAlatpaySecretKey ? (() => { try { return envSpy.getActiveAlatpaySecretKey(); } catch { return null; } })() : null;
     const alatpayUtils = require('../utils/alatpay');
     const business = { id: 'BUS-001', businessId: 'BUSID-002', name: 'Bells Test', logoUrl: 'https://cdn.example/logo.png' };
     const bellsRef = BELLS_REF;
@@ -1889,9 +1918,8 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     // ---- EXACT cfg builder (copied verbatim from app/src/utils/alatpayCheckout.ts launchAlatpayNativeModal) ----
     const fallback = checkout.fallback ?? {};
     const cfg: any = {
-      publicKey: checkout.publicKey,
+      apiKey: checkout.apiKey,
       businessId: checkout.businessId,
-      business: checkout.business,
       amount: checkout.amount,
       currency: checkout.currency ?? 'NGN',
       email: checkout.email ?? undefined,
@@ -1908,31 +1936,34 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     };
     // ---- Assertions ----
     expect(cfg.businessId).toBe('BUSID-002');
-    expect(cfg.business).toEqual(business);
-    // publicKey MUST be present as the browser-safe publishable field:
-    expect(cfg).toHaveProperty('publicKey', expect.any(String));
-    expect(typeof cfg.publicKey).toBe('string');
-    expect(cfg.publicKey.length).toBeGreaterThanOrEqual(8);
-    // apiKey MUST NOT be present (carries subscription-key semantics in the browser SDK q())
-    expect(cfg).not.toHaveProperty('apiKey');
-    expect(cfg).not.toHaveProperty('API_KEY');
-    expect(cfg).not.toHaveProperty('api_key');
-    // Phone is optional and forwarded when available (undefined for this test case)
+    // Working reference contract: apiKey MUST be present and equal the publishable public key value.
+    expect(cfg).toHaveProperty('apiKey', expect.any(String));
+    expect(typeof cfg.apiKey).toBe('string');
+    expect(cfg.apiKey.length).toBeGreaterThanOrEqual(8);
+    expect(cfg.apiKey).toBe(publicKeyKnown);
+    // Working reference: publicKey must NOT exist as a top-level field-name on the cfg passed to Alatpay.setup().
+    expect(cfg).not.toHaveProperty('publicKey');
+    expect(cfg).not.toHaveProperty('PUBLIC_KEY');
+    expect(cfg).not.toHaveProperty('public_key');
+    // Working reference: manual business object MUST NOT be supplied — SDK resolves it itself via q() lookup.
+    expect(cfg).not.toHaveProperty('business');
+    // Phone is optional and forwarded when available (undefined for this test case but the key is on the object)
     expect('phone' in cfg).toBe(true);
-    // No secret fields anywhere in cfg (nested) — NOTE: publicKey top-level is the ALLOWED browser-safe exception.
-    // apiKey (any spelling) is NEVER allowed at any depth.
-    const secretKeyPatterns =
-      /^(.*[._\- ])?(secret|secretKey|secret_key|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
+    // apiKey value hardening: must NOT equal or contain the secret key.
+    expect(cfg.apiKey).not.toBe(secretKeyKnown);
+    // Key-name hardening (exact same disallow list as T25):
+    const secretKeyNamePatterns =
+      /^(.*[._\- ])?(secret|secretKey|secret_key|ALATPAY_SECRET_KEY|WEMA_ALATPAY_SECRET_KEY|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
     const walk = (node: any, trail: string[] = []): string[] => {
       if (node == null) return [];
       if (Array.isArray(node)) return node.flatMap((v, i) => walk(v, [...trail, `[${i}]`]));
       if (typeof node === 'object') {
         return Object.keys(node).flatMap((k) => {
-          // publicKey at top-level ONLY → explicit browser-safe allowlist:
-          if (trail.length === 0 && /^publicKey$/i.test(k)) return [];
-          // apiKey at any depth is disallowed (triggers SDK q() browser-side credential path)
-          if (/^api[_-]?key$/i.test(k)) return [`${[...trail, k].join('.')}`];
-          const hit = secretKeyPatterns.test(k) ? [`${[...trail, k].join('.')}`] : [];
+          // Only single EXACT top-level key `apiKey` allowed as credential field.
+          if (trail.length === 0 && k === 'apiKey') return [];
+          if (/^public[_-]?key$/i.test(k)) return [`${[...trail, k].join('.')}`];
+          if (/^api[_-]?key$/i.test(k) && !(trail.length === 0 && k === 'apiKey')) return [`${[...trail, k].join('.')}`];
+          const hit = secretKeyNamePatterns.test(k) ? [`${[...trail, k].join('.')}`] : [];
           return [...hit, ...walk((node as any)[k], [...trail, k])];
         });
       }
@@ -1940,7 +1971,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     };
     const hits = walk(cfg);
     expect(hits).toEqual([]);
-    // Also verify no secret-like values:
+    // Value-level hardening:
     const flattenValues = (n: any): string[] => {
       if (n == null) return [];
       if (typeof n === 'string') return [n];
@@ -1954,6 +1985,15 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
       expect(/^bearer /i.test(v)).toBe(false);
       expect(/^basic /i.test(v)).toBe(false);
       expect(v.startsWith('Ocp-Apim')).toBe(false);
+      if (secretKeyKnown) {
+        expect(v).not.toBe(secretKeyKnown);
+        expect(v).not.toContain(secretKeyKnown);
+      }
+    }
+    const jsonFlat = JSON.stringify(cfg);
+    expect(jsonFlat).not.toMatch(/"public[_-]?key"\s*:/i);
+    if (secretKeyKnown) {
+      expect(jsonFlat).not.toContain(secretKeyKnown);
     }
   });
 
@@ -2080,5 +2120,161 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
       correlationId: CORRELATION_UUID,
     };
     expect(extract(payloadMalformedId)).toBeNull();
+  });
+
+  // -----------------------------------------------------------------
+  // REGRESSION T40: Exact Alatpay.setup(cfg) field-shape contract —
+  //   matches the confirmed-working reference portal implementation exactly.
+  //   REQUIRED (value-level):
+  //     - apiKey      YES  — carries the PUBLIC (publishable) key value
+  //     - businessId  YES
+  //   FORBIDDEN (field-name-level anywhere on cfg):
+  //     - business    NO   — SDK resolves this itself via q() + apiKey+businessId
+  //     - publicKey   NO   — embed app (layer 3) checks apiKey only, no publicKey
+  //     - ANY secret  NO   — ALATPAY_SECRET_KEY value, sk_*, bearer, Ocp-Apim, etc
+  // -----------------------------------------------------------------
+  it('T40 — regression: Alatpay.setup cfg shape = apiKey(public) + businessId ONLY. business/publicKey/secret ALL ABSENT.', () => {
+    setupBaseMocks();
+    process.env.ALATPAY_USE_POPUP_CHECKOUT = 'true';
+    const envSpy = jest.requireActual('../utils/alatpay');
+    const publicKeyKnown = envSpy.getAlatpayPublicKey() ?? 'pk_live_FIXTURE_PUBLIC_KEY_12345678';
+    const secretKeyKnown = envSpy.getActiveAlatpaySecretKey ? (() => { try { return envSpy.getActiveAlatpaySecretKey(); } catch { return null; } })() : null;
+    const alatpayUtils = require('../utils/alatpay');
+    const checkout: any = alatpayUtils.buildSanitizedAlatpayPublicCheckout(
+      {
+        status: true,
+        data: {
+          id: 'BUS-REG-001',
+          businessId: 'BUSID-REG-002',
+          name: 'Bells University Regression',
+          logoUrl: 'https://cdn.example/logo-reg.png',
+        },
+      },
+      {
+        bellsRef: BELLS_REF, orderRef: ORDER_REF, initRef: INIT_REF,
+        businessId: 'BUSID-REG-002', amountNgn: 25000,
+        currency: 'NGN' as const, email: 'regression@bells.edu',
+        firstName: 'Regression', lastName: 'Test', phone: '+2348000000000',
+      },
+    );
+    // ---- Exact mirror of launchAlatpayNativeModal cfg builder (only fields passed to Alatpay.setup): ----
+    const fallback = checkout.fallback ?? {};
+    const cfg: any = {
+      apiKey: checkout.apiKey,
+      businessId: checkout.businessId,
+      amount: checkout.amount,
+      currency: checkout.currency ?? 'NGN',
+      email: checkout.email ?? undefined,
+      firstName: checkout.firstName ?? undefined,
+      lastName: checkout.lastName ?? undefined,
+      phone: checkout.phone ?? undefined,
+      autoCloseModal: checkout.autoCloseModal ?? true,
+      metadata: checkout.metadata ?? {},
+      fallback: {
+        enableRedirect: false,
+        enablePopup: true,
+        handshakeTimeoutMs: Number.isFinite(fallback.handshakeTimeoutMs) ? fallback.handshakeTimeoutMs : 4500,
+      },
+    };
+
+    // ============================================================
+    // 1) REQUIRED PRESENT (positive assertions for contract matches)
+    // ============================================================
+    expect(typeof cfg.apiKey).toBe('string');
+    expect(cfg.apiKey.length).toBeGreaterThanOrEqual(8);
+    expect(cfg.apiKey).toBe(publicKeyKnown);
+    expect(cfg.businessId).toBe('BUSID-REG-002');
+    expect(typeof cfg.amount).toBe('number');
+    expect(cfg.amount).toBe(25000);
+    expect(cfg.currency).toBe('NGN');
+    expect(cfg.email).toBe('regression@bells.edu');
+    expect(cfg.firstName).toBe('Regression');
+    expect(cfg.lastName).toBe('Test');
+    expect(cfg.phone).toBe('+2348000000000');
+    expect(cfg.autoCloseModal).toBe(true);
+    expect(cfg.metadata?.bells_payment_reference).toBe(BELLS_REF);
+    expect(cfg.metadata?.order_reference).toBe(ORDER_REF);
+    expect(cfg.metadata?.init_payment_reference).toBe(INIT_REF);
+    expect(cfg.fallback?.enableRedirect).toBe(false);
+    expect(cfg.fallback?.enablePopup).toBe(true);
+    expect(Number.isFinite(cfg.fallback?.handshakeTimeoutMs)).toBe(true);
+
+    // ============================================================
+    // 2) EXACT FORBIDDEN FIELDS (not even undefined should be enumerated)
+    // ============================================================
+    const cfgKeys = Object.keys(cfg);
+    expect(cfgKeys).not.toContain('business');
+    expect(cfgKeys).not.toContain('publicKey');
+    expect(cfgKeys).not.toContain('PUBLIC_KEY');
+    expect(cfgKeys).not.toContain('public_key');
+    expect(cfg).not.toHaveProperty('business');
+    expect(cfg).not.toHaveProperty('publicKey');
+    expect(cfg).not.toHaveProperty('PUBLIC_KEY');
+    expect(cfg).not.toHaveProperty('public_key');
+
+    // ============================================================
+    // 3) EXACT SET OF TOP-LEVEL KEYS (known fixed list — no unknowns)
+    // ============================================================
+    expect(cfgKeys.sort()).toEqual(
+      [
+        'apiKey', 'businessId', 'amount', 'currency',
+        'email', 'firstName', 'lastName', 'phone',
+        'autoCloseModal', 'metadata', 'fallback',
+      ].sort(),
+    );
+    expect(cfgKeys.length).toBe(11);
+
+    // ============================================================
+    // 4) SECRET HARDNESS (name-level + value-level):
+    // ============================================================
+    const disallowedNames =
+      /^(.*[._\- ])?(secret|secretKey|secret_key|ALATPAY_SECRET_KEY|WEMA_ALATPAY_SECRET_KEY|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
+    const walkNames = (n: any, depth = 0, trail: string[] = []): string[] => {
+      if (n == null) return [];
+      if (Array.isArray(n)) return n.flatMap((v, i) => walkNames(v, depth + 1, [...trail, `[${i}]`]));
+      if (typeof n === 'object') {
+        return Object.keys(n).flatMap((k) => {
+          const isTopLevel = trail.length === 0 && depth === 0;
+          const exactAllowedCredential = isTopLevel && k === 'apiKey';
+          if (exactAllowedCredential) {
+            return walkNames((n as any)[k], depth + 1, [...trail, k]);
+          }
+          const found: string[] = [];
+          if (/^public[_-]?key$/i.test(k)) found.push([...trail, k].join('.'));
+          if (/^api[_-]?key$/i.test(k) && !exactAllowedCredential) found.push([...trail, k].join('.'));
+          if (disallowedNames.test(k)) found.push([...trail, k].join('.'));
+          return [...found, ...walkNames((n as any)[k], depth + 1, [...trail, k])];
+        });
+      }
+      return [];
+    };
+    expect(walkNames(cfg)).toEqual([]);
+
+    // Value-level secret scan (includes: sk_ prefix, Bearer/Basic prefixes, Ocp-Apim prefix, full secret-key equality/containment):
+    const flattenVals = (n: any): string[] => {
+      if (n == null) return [];
+      if (typeof n === 'string') return [n];
+      if (Array.isArray(n)) return n.flatMap(flattenVals);
+      if (typeof n === 'object') return Object.values(n).flatMap(flattenVals as any);
+      return [];
+    };
+    const vals = flattenVals(cfg);
+    for (const v of vals) {
+      expect(/^sk[_-]/i.test(v)).toBe(false);
+      expect(/^bearer\s+/i.test(v)).toBe(false);
+      expect(/^basic\s+/i.test(v)).toBe(false);
+      expect(/^ocp-apim/i.test(v)).toBe(false);
+      if (secretKeyKnown && String(secretKeyKnown).trim()) {
+        expect(v).not.toBe(secretKeyKnown);
+        expect(v.toLowerCase()).not.toContain(String(secretKeyKnown).toLowerCase());
+      }
+    }
+    const flatJson = JSON.stringify(cfg);
+    if (secretKeyKnown) {
+      expect(flatJson).not.toContain(secretKeyKnown);
+    }
+    expect(flatJson).not.toMatch(/WEMA_ALATPAY_SECRET_KEY|ALATPAY_SECRET_KEY/);
+    expect(flatJson).not.toMatch(/"public[_-]?key"\s*:/i);
+    expect(flatJson).not.toMatch(/"business"\s*:\s*\{/i);
   });
 });

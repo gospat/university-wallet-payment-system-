@@ -226,9 +226,8 @@ export type AlatpayPublicCheckoutFallback = {
 };
 
 export type AlatpayPublicCheckout = {
-  readonly publicKey: string;
+  readonly apiKey: string;
   readonly businessId: string;
-  readonly business: AlatpayPublicBusiness;
   readonly amount: number;
   readonly currency: 'NGN';
   readonly autoCloseModal: boolean;

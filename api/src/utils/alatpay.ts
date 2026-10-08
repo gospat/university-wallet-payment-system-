@@ -493,11 +493,10 @@ export type AlatpayPublicCheckoutMetadata = {
 };
 
 export type AlatpayPublicCheckout = {
-  publicKey: string;
+  apiKey: string;
   amount: number;
   currency: 'NGN';
   businessId: string;
-  business: AlatpayPublicBusiness;
   autoCloseModal: true;
   email: string;
   firstName?: string;
@@ -599,11 +598,10 @@ export function buildSanitizedAlatpayPublicCheckout(
       ? String(ctx.email).trim()
       : `${bellsRef}@${getDefaultEmailDomain()}`;
   const safe: AlatpayPublicCheckout = {
-    publicKey: publicKey,
+    apiKey: publicKey,
     amount: amountNgnClean,
     currency: 'NGN',
     businessId: busId,
-    business: { id, businessId: busId, name, logoUrl },
     autoCloseModal: true,
     email: emailClean,
     firstName: ctx.firstName && String(ctx.firstName).trim() ? String(ctx.firstName).trim() : undefined,
@@ -621,7 +619,7 @@ export function buildSanitizedAlatpayPublicCheckout(
     },
   };
   const postScan = scanRecursivelyForSecretFields(safe, [], {
-    allowExactTopLevelKeys: new Set(['publicKey']),
+    allowExactTopLevelKeys: new Set(['apiKey']),
   });
   if (postScan) {
     throw new AlatpayPopupUnavailableError(
