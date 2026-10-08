@@ -112,6 +112,180 @@ router.get(
   verifyPayment,
 );
 
+// ---------- Student-initiated reverification (Task 3) -----------------------
+// Self-service "Check Payment Status" on pending transactions.
+//
+// Security requirements (ALL enforced on the backend; frontend is display-only):
+//   • STRICT ownership: transaction.userId === authenticated student.id
+//     (never allow arbitrary transaction ID enumeration).
+//   • 30-second cooldown per transaction ID (per tx, across tab re-clicks)
+//     + 60/minute per-user rate limit through the shared rate-limit middleware.
+//   • For ALATPAY: allow reverify ONLY if the tx has stored final_transaction_id
+//     (strict v4 UUID). If the provider final UUID was never stored (student
+//     closed the popup before the last SDK postMessage), the response is 409
+//     "provider_final_uuid_unavailable" — the pending status is preserved and
+//     the browser UI directs the student to support for manual lookup.
+//   • For PAYSTACK: allow reverify only with a stored paystackReference.
+//   • verifyPayment (authoritative) performs server-side confirm with the
+//     provider AND applies ownership / expectedTransactionId / amount checks.
+//   • Never trust frontend status. Idempotency and duplicate protections are
+//     provided by verifyPayment (atomic $transaction).
+// ----------------------------------------------------------------------------
+const _reverifyCooldown: Map<string, number> = new Map(); // txId -> unlockAtEpochMs (degraded mode when Redis is unreachable)
+const REVERIFY_COOLDOWN_MS = 30 * 1000;
+const uuidV4Re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ReverifyTxParam = z.object({ transactionId: z.coerce.number().int().positive() });
+router.post(
+  '/payments/:transactionId/reverify',
+  protect,
+  restrictTo(Role.STUDENT),
+  validateParams(ReverifyTxParam),
+  catchAsync(async (req: any, res, next) => {
+    const txId = Number(req.params.transactionId);
+    const userId = Number(req.user!.id);
+    const tx = await prisma.transaction.findUnique({
+      where: { id: txId },
+      select: {
+        id: true, userId: true, reference: true, status: true, gateway: true, invoiceId: true, expectedAmount: true,
+        paystackReference: true,
+        alatpayFinalTransactionId: true,
+        alatpayOrderReference: true,
+        alatpayInitPaymentReference: true,
+        alatpaySessionId: true,
+      },
+    });
+    if (!tx) return next(new AppError('Transaction not found', 404));
+    if (tx.userId !== userId) return next(new AppError('Unauthorized access to this transaction', 403));
+
+    // Fast path for terminal states: still return the current status + invoice
+    // balance, but do not incur a provider call.
+    const TERMINAL: ReadonlySet<string> = new Set(['SUCCESS', 'UNDERPAID', 'OVERPAID', 'REVERSED', 'REFUNDED', 'FAILED']);
+    const isTerminal = TERMINAL.has(String(tx.status));
+    // Cooldown enforcement (redis SET NX EX with degraded in-process map).
+    const cooldownKey = `reverify_cooldown:tx:${txId}`;
+    const now = Date.now();
+    let cooldownBlocked = false;
+    try {
+      const redis = require('../config/redis').createBullmqProducerConnection ?? null;
+      if (typeof redis === 'function') {
+        const cli = redis({ lazyConnect: true });
+        const setNx = await cli.set(cooldownKey, '1', 'EX', Math.ceil(REVERIFY_COOLDOWN_MS / 1000), 'NX');
+        cooldownBlocked = setNx !== 'OK' && setNx !== 1;
+        cli.quit?.().catch(() => {});
+      } else {
+        const existing = _reverifyCooldown.get(String(txId));
+        if (existing && existing > now) cooldownBlocked = true;
+        else _reverifyCooldown.set(String(txId), now + REVERIFY_COOLDOWN_MS);
+      }
+    } catch (_) {
+      const existing = _reverifyCooldown.get(String(txId));
+      if (existing && existing > now) cooldownBlocked = true;
+      else _reverifyCooldown.set(String(txId), now + REVERIFY_COOLDOWN_MS);
+    }
+    if (cooldownBlocked && !isTerminal) {
+      return res.status(429).json({
+        status: 'cooldown',
+        message: 'Please wait a moment before checking again.',
+        cooldownMs: REVERIFY_COOLDOWN_MS,
+      });
+    }
+
+    // Determine provider reference (strict correlation only).
+    let providerReference: string | null = null;
+    let providerMissingReason: string | null = null;
+    if (tx.gateway === 'ALATPAY') {
+      if (tx.alatpayFinalTransactionId && uuidV4Re.test(String(tx.alatpayFinalTransactionId).trim())) {
+        providerReference = String(tx.alatpayFinalTransactionId).trim();
+      } else {
+        providerMissingReason = 'provider_final_uuid_unavailable';
+      }
+    } else if (tx.gateway === 'PAYSTACK') {
+      if (tx.paystackReference && typeof tx.paystackReference === 'string' && String(tx.paystackReference).trim()) {
+        providerReference = String(tx.paystackReference).trim();
+      } else {
+        providerMissingReason = 'paystack_reference_unavailable';
+      }
+    } else {
+      providerMissingReason = 'unsupported_gateway';
+    }
+    if (!isTerminal && providerMissingReason) {
+      return res.status(409).json({
+        status: 'unable_to_confirm',
+        reason: providerMissingReason,
+        message: 'Unable to confirm payment automatically. Please contact Bursary with your payment reference.',
+      });
+    }
+
+    // Run authoritative server-side provider verification (or terminal-state fast-path).
+    let result: any = { verified: false, status: tx.status ?? 'PENDING' };
+    if (isTerminal) {
+      result = { verified: tx.status === 'SUCCESS', status: tx.status };
+    } else {
+      try {
+        result = await PaymentService.verifyPayment(tx.reference, {
+          providerReference: providerReference ?? undefined,
+          expectedTransactionId: tx.id,
+        });
+      } catch (err: any) {
+        return res.status(200).json({
+          status: 'unable_to_confirm',
+          reason: 'provider_unavailable',
+          message: 'Payment provider currently unavailable. Please try again later.',
+          rawStatus: tx.status,
+          supportContact: true,
+        });
+      }
+    }
+
+    // Build response shape (safe for UI).
+    const inv = tx.invoiceId
+      ? await prisma.invoice.findUnique({ where: { id: Number(tx.invoiceId) }, select: { id: true, amountDue: true, amountPaid: true, status: true, invoiceNumber: true } })
+      : null;
+    const balance = inv ? Math.max(0, Number(inv.amountDue) - Number(inv.amountPaid)) : 0;
+    let ui: 'success' | 'pending' | 'failed' | 'unavailable' = 'pending';
+    if (result.status === 'SUCCESS' || tx.status === 'SUCCESS') ui = 'success';
+    else if (tx.status === 'FAILED' || result.status === 'FAILED') ui = 'failed';
+    else if (result.status === 'provider_unavailable') ui = 'unavailable';
+    else ui = 'pending';
+
+    const receipt = ui === 'success' && inv
+      ? await prisma.receipt.findFirst({ where: { transactionId: tx.id, isVoided: false }, select: { id: true, receiptNumber: true, verificationToken: true } })
+      : null;
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        uiState: ui,
+        transaction: {
+          id: tx.id,
+          reference: tx.reference,
+          status: tx.status,
+          gateway: tx.gateway,
+          expectedAmount: Number(tx.expectedAmount || 0),
+        },
+        providerResult: {
+          verified: !!result.verified,
+          status: (result.status as any) ?? 'unknown',
+          reason: (result.reason as any) ?? null,
+        },
+        invoice: inv
+          ? {
+              id: inv.id,
+              invoiceNumber: inv.invoiceNumber,
+              amountDue: Number(inv.amountDue),
+              amountPaid: Number(inv.amountPaid),
+              balance,
+              status: inv.status,
+            }
+          : null,
+        receipt: receipt
+          ? { id: receipt.id, receiptNumber: receipt.receiptNumber, verificationToken: receipt.verificationToken }
+          : null,
+      },
+    });
+  }),
+);
+
 // ---------- Student Fee Catalogue (Browse ALL fees admin has set) ------------
 router.get(
   '/fees/catalogue',

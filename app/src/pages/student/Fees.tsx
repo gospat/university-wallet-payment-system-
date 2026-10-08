@@ -802,6 +802,7 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
         isOpen={drawerOpen}
         onClose={() => { setDrawerOpen(false); setSelectedTxn(null); }}
         transaction={selectedTxn}
+        onStatusChanged={() => { void load(); }}
       />
     </section>
   );
@@ -818,21 +819,21 @@ const InvoiceDetailModal: React.FC<{
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<InvoiceDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [selectedTxn, setSelectedTxn] = useState<any>(null);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!open || !invoiceId) { setData(null); setError(null); return; }
     let alive = true;
-    const run = async () => {
-      setLoading(true); setError(null);
-      try {
-        const r = await studentFeeApi.getInvoice(invoiceId);
-        if (alive) setData(r);
-      } catch (e: any) { if (alive) setError(e?.message ?? 'Invoice not found'); }
-      finally { if (alive) setLoading(false); }
-    };
-    run();
-    return () => { alive = false; };
+    setLoading(true); setError(null);
+    try {
+      const r = await studentFeeApi.getInvoice(invoiceId);
+      if (alive) setData(r);
+    } catch (e: any) { if (alive) setError(e?.message ?? 'Invoice not found'); }
+    finally { if (alive) setLoading(false); }
   }, [open, invoiceId]);
+
+  useEffect(() => { void load(); }, [load]);
 
   const invoice = data?.invoice;
   const pay = data?.pay;
@@ -917,7 +918,7 @@ const InvoiceDetailModal: React.FC<{
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {transactions.map((tx) => (
-                        <tr key={tx.id}>
+                        <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setSelectedTxn(tx); setDrawerOpen(true); }}>
                           <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
                           <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
                           <td className="px-4 py-2 text-right tabular-nums">{formatNgn(tx.amount)}</td>
@@ -933,6 +934,12 @@ const InvoiceDetailModal: React.FC<{
           </>
         )}
       </div>
+      <TxnDetailsDrawer
+        isOpen={drawerOpen}
+        onClose={() => { setDrawerOpen(false); setSelectedTxn(null); }}
+        transaction={selectedTxn}
+        onStatusChanged={() => { void load(); }}
+      />
     </Modal>
   );
 };
@@ -958,24 +965,36 @@ const InvoiceDetailPage: React.FC = () => {
 
   const invoiceId = id ? Number(id) : null;
 
+  const [pageDrawerOpen, setPageDrawerOpen] = useState(false);
+  const [pageSelectedTxn, setPageSelectedTxn] = useState<any>(null);
+
   const fullName = useMemo(() => {
     if (!user) return 'Student';
     return `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || user.email || 'Student';
   }, [user]);
   const brand = i18n.portals.student.dashboardBrand;
 
+  const loadInvoice = useCallback(async () => {
+    if (!invoiceId) { setError(t.notFound); return; }
+    setLoading(true); setError(null);
+    try {
+      const r = await studentFeeApi.getInvoice(invoiceId);
+      setData(r);
+    } catch (e: any) { setError(e?.message ?? t.notFound); }
+    finally { setLoading(false); }
+  }, [invoiceId, t.notFound]);
+
   useEffect(() => {
     if (!invoiceId) { setError(t.notFound); return; }
     let alive = true;
-    const run = async () => {
+    (async () => {
       setLoading(true); setError(null);
       try {
         const r = await studentFeeApi.getInvoice(invoiceId);
         if (alive) setData(r);
       } catch (e: any) { if (alive) setError(e?.message ?? t.notFound); }
       finally { if (alive) setLoading(false); }
-    };
-    run();
+    })();
     return () => { alive = false; };
   }, [invoiceId, t.notFound]);
 
@@ -1146,7 +1165,7 @@ const InvoiceDetailPage: React.FC = () => {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {transactions.map((tx) => (
-                        <tr key={tx.id}>
+                        <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setPageSelectedTxn(tx); setPageDrawerOpen(true); }}>
                           <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
                           <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
                           <td className="px-4 py-2 text-right tabular-nums">{formatNgn(tx.amount)}</td>
@@ -1182,6 +1201,12 @@ const InvoiceDetailPage: React.FC = () => {
             navigate('/student/invoices');
           }
         }}
+      />
+      <TxnDetailsDrawer
+        isOpen={pageDrawerOpen}
+        onClose={() => { setPageDrawerOpen(false); setPageSelectedTxn(null); }}
+        transaction={pageSelectedTxn}
+        onStatusChanged={() => { void loadInvoice(); }}
       />
     </PortalShell>
   );

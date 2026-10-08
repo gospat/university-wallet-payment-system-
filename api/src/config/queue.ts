@@ -24,6 +24,8 @@ export type JobTopic =
   | 'paystack.webhook'
   | 'paystack.refund'
   | 'alatpay.webhook'
+  | 'alatpay.recon'
+  | 'alatpay.recon.schedule'
   | 'receipt.generate'
   | 'receipt.email'
   | 'student.import'
@@ -166,6 +168,8 @@ const TOPIC_DEFAULTS: Record<JobTopic, { concurrency: number; retries: number; a
   'paystack.webhook':    { concurrency: 4, retries: 4, attempts: 5 },
   'paystack.refund':     { concurrency: 2, retries: 4, attempts: 5 },
   'alatpay.webhook':     { concurrency: 4, retries: 4, attempts: 5 },
+  'alatpay.recon':       { concurrency: 2, retries: 3, attempts: 4 },
+  'alatpay.recon.schedule': { concurrency: 1, retries: 0, attempts: 1 },
   'receipt.generate':    { concurrency: 3, retries: 3, attempts: 4 },
   'receipt.email':       { concurrency: 4, retries: 4, attempts: 5 },
   'student.import':      { concurrency: 1, retries: 0, attempts: 1 },

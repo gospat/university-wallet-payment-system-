@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Student fee + invoice API helpers (Task 10.2 frontend)
 // ---------------------------------------------------------------------------
-import api from './api';
+import api, { downloadBlob as _downloadBlob } from './api';
 
 function unwrap<T>(resp: { data?: any }): T {
   return ((resp?.data?.data) as T) ?? ((resp as any)?.data as T);
@@ -315,6 +315,20 @@ export const studentFeeApi = {
     const body: any = {};
     if (typeof opts.partialAmount === 'number') body.partialAmount = opts.partialAmount;
     return api.post(`/students/fees/${feeId}/initiate`, body).then((r) => unwrap(r));
+  },
+  async downloadReceiptPdf(id: number | string): Promise<void> {
+    const realId = Number(id);
+    if (!Number.isFinite(realId) || realId <= 0) throw new Error('Invalid receipt ID');
+    await _downloadBlob(
+      `/students/receipts/${encodeURIComponent(String(realId))}/download`,
+      `Bells-University-Receipt-${String(realId)}.pdf`,
+    );
+  },
+  async reverifyPayment(transactionId: number | string): Promise<any> {
+    const realId = Number(transactionId);
+    if (!Number.isFinite(realId) || realId <= 0) throw new Error('Invalid transaction ID');
+    const r = await api.post(`/students/payments/${encodeURIComponent(String(realId))}/reverify`, {});
+    return unwrap<any>(r);
   },
 };
 

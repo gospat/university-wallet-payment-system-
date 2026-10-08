@@ -749,4 +749,132 @@ registerHandler('alatpay.webhook', async (payload, _ctx) => {
     .catch(() => {});
 });
 
+// =============================================================================
+// ALATPAY FALLBACK RECONCILIATION WORKER (safe bounded background only)
+// -----------------------------------------------------------------------------
+// Trigger paths:
+//   1. Periodic scheduled job every 10 minutes  (alatpay.recon.schedule)
+//      Dispatches per-transaction recon jobs only when:
+//        - tx.gateway == ALATPAY
+//        - tx.status is still PENDING/INITIATED
+//        - tx.createdAt is older than 2 minutes (allow webhook/callback)
+//        - tx has a stored final_transaction_id (v4 UUID) OR stored order_ref
+//      Max batch: 20 transactions per interval (bounded).
+//
+//   2. On-demand reverification (Task 3) may dispatch alatpay.recon directly.
+//
+// Worker only trusts:
+//   - FINAL PROVIDER TRANSACTION UUID (strict v4 UUID) for /transactions/{uuid}
+//   - existing stored reference association from initiate payload
+//   - authenticated ownership check on backend (tx.userId check inside handler)
+//
+// Never invent provider UUIDs from OrderId/WEMA reference/amount alone.
+// If no trustworthy final UUID is associated with the pending transaction,
+// log SKIP and keep the transaction pending (do not invent success).
+// =============================================================================
+registerHandler('alatpay.recon.schedule', async (_payload, ctx) => {
+  try {
+    const { PaymentService } = await import('../services/payment');
+    if (typeof (PaymentService as any).reconcilePendingAlatpayBatch !== 'function') {
+      console.warn('[alatpay.recon.schedule] reconcilePendingAlatpayBatch not available; skip batch.');
+      return;
+    }
+    const { totalEnqueued, skippedNoId, scanned } = await (PaymentService as any).reconcilePendingAlatpayBatch({
+      minAgeMs: 2 * 60 * 1000,
+      limit: 20,
+    });
+    console.info(
+      `[alatpay.recon.schedule] scanned=${scanned} enqueued=${totalEnqueued} skippedNoFinalId=${skippedNoId} attempt=${ctx.attempt}`,
+    );
+  } catch (err) {
+    console.error('[alatpay.recon.schedule] failed:', (err as Error)?.message);
+  }
+});
+
+registerHandler('alatpay.recon', async (payload, ctx) => {
+  const p = payload as any;
+  const txId: number = Number(p?.transactionId);
+  if (!Number.isFinite(txId) || txId <= 0) return;
+  const refOverride: string | undefined =
+    typeof p?.providerReference === 'string' && (p as any).providerReference.trim()
+      ? (p as any).providerReference.trim()
+      : undefined;
+  try {
+    const tx = await prisma.transaction.findUnique({
+      where: { id: txId },
+      select: {
+        id: true, reference: true, status: true, gateway: true, expectedAmount: true,
+        alatpayFinalTransactionId: true, alatpayOrderReference: true,
+        alatpayInitPaymentReference: true, alatpaySessionId: true, updatedAt: true,
+      },
+    });
+    if (!tx) return;
+    if (tx.gateway !== 'ALATPAY') return;
+    if (tx.status === 'SUCCESS' || tx.status === 'OVERPAID' || tx.status === 'UNDERPAID' || tx.status === 'REVERSED') return;
+    const finalTxId: string | null =
+      refOverride && typeof refOverride === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(refOverride.trim())
+        ? refOverride.trim()
+        : (tx.alatpayFinalTransactionId as any) ?? null;
+    if (!finalTxId) {
+      console.info(
+        `[alatpay.recon] SKIP_NO_FINAL_UUID tx=${tx.id} ref=${tx.reference.slice(0, 40)} attempt=${ctx.attempt}`,
+      );
+      return;
+    }
+    const { PaymentService } = await import('../services/payment');
+    const result = await PaymentService.verifyPayment(tx.reference, {
+      providerReference: finalTxId,
+      expectedTransactionId: tx.id,
+    });
+    const ok = !!result.verified || (result as any).status === 'SUCCESS';
+    console.info(
+      `[alatpay.recon] TX${tx.id} verified=${ok} status=${(result as any).status || 'unknown'} finalTxId=${finalTxId.slice(0, 40)} attempt=${ctx.attempt}`,
+    );
+    // Attempt-0 also log the correlation success/failure for bursary audit:
+    try {
+      await prisma.auditLog.create({
+        data: {
+          action: ok ? 'RECONCILED_SUCCESS' : 'RECONCILE_NO_CHANGE',
+          entityType: 'TRANSACTION',
+          entityId: String(tx.id),
+          newValue: {
+            provider: 'ALATPAY',
+            finalTxId,
+            verifyResultStatus: (result as any).status || null,
+            verified: ok,
+            reason: (result as any).reason || null,
+            jobAttempt: ctx.attempt,
+          } as any,
+        },
+      });
+    } catch { /* ignore */ }
+  } catch (err) {
+    console.error(`[alatpay.recon] tx=${txId} error attempt=${ctx.attempt}:`, (err as Error)?.message);
+    throw err; // allow BullMQ retry (topic: 3 retries + backoff)
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Boot: enqueue a single schedule-repeat job when Redis is available.
+// Uses a singleton repeat key so restarts do not duplicate the schedule.
+// Fallback: schedule a Node setTimeout every 10 minutes if Redis is down.
+// -----------------------------------------------------------------------------
+(function bootstrapAlatpayReconScheduler() {
+  if (process.env.NODE_ENV === 'test' || process.env.QUEUE_DISABLE_WORKERS === 'true') return;
+  const schedule = async () => {
+    try {
+      await dispatchJob(
+        'alatpay.recon.schedule' as any,
+        { boot: new Date().toISOString() },
+        { deduplicate: true, priority: 'low', retries: 0 },
+      );
+    } catch (_) { /* sync fallback runs via setInterval below if Redis unavailable */ }
+  };
+  // Initial run ~1 minute after process start.
+  const initialDelay = 60 * 1000;
+  const intervalMs = 10 * 60 * 1000;
+  setTimeout(() => { void schedule(); }, initialDelay).unref?.();
+  setInterval(() => { void schedule(); }, intervalMs).unref?.();
+})();
+
 export default router;

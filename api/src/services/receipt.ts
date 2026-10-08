@@ -50,32 +50,133 @@ function ensureSandboxHomeRedirected() {
 
 function ensureChromeHeadlessShellCopied(): string | null {
   if (_headlessShellCopyPath) return _headlessShellCopyPath;
-  const candidates: Array<string> = [
-    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-154.0.8037.57/chrome-headless-shell-mac-arm64',
-    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-146.0.7680.76/chrome-headless-shell-mac-arm64',
-    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-148.0.7778.97/chrome-headless-shell-mac-arm64',
-    '/Users/gloriousanjorin-adeboye/.cache/puppeteer/chrome-headless-shell/mac_arm-131.0.6778.204/chrome-headless-shell-mac-arm64',
-  ];
-  for (const src of candidates) {
+  // 0. PUPPETEER_EXECUTABLE_PATH override (production host-specific path):
+  const envOverride = process.env.PUPPETEER_EXECUTABLE_PATH ?? (process as any).env?.PUPPETEER_EXECUTABLE_PATH ?? null;
+  if (envOverride && typeof envOverride === 'string' && envOverride.trim()) {
+    try {
+      fs.accessSync(envOverride.trim(), fs.constants.X_OK);
+      _headlessShellCopyPath = envOverride.trim();
+      if (!_headlessShellWarned) {
+        _headlessShellWarned = true;
+        console.info(`[receipt.ts] Using PUPPETEER_EXECUTABLE_PATH=${_headlessShellCopyPath} (env override).`);
+      }
+      return _headlessShellCopyPath;
+    } catch (_) {
+      console.warn(`[receipt.ts] PUPPETEER_EXECUTABLE_PATH="${envOverride}" is not executable; continuing fallback detection.`);
+    }
+  }
+  const platform = process.platform; // darwin (macOS), linux (Ubuntu), win32
+  // 1. Linux/Ubuntu — check common apt-installed Chromium/Chrome executables
+  //    (prefer google-chrome-stable when available, otherwise chromium-browser
+  //     on 20.04/LTS, chromium on 22.04+/jammy, then puppeteer cache path).
+  if (platform === 'linux') {
+    const linuxCandidates: string[] = [
+      '/opt/google/chrome/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/snap/bin/chromium',
+      process.env.HOME ? `${process.env.HOME}/.cache/puppeteer/chrome/linux-129.0.6629.0/chrome-linux64/chrome` : '',
+      process.env.HOME ? `${process.env.HOME}/.cache/puppeteer/chrome-headless-shell/linux-129.0.6629.0/chrome-headless-shell-linux64/chrome-headless-shell` : '',
+    ].filter(Boolean) as string[];
+    for (const bin of linuxCandidates) {
+      try {
+        fs.accessSync(bin, fs.constants.X_OK);
+        _headlessShellCopyPath = bin;
+        if (!_headlessShellWarned) {
+          _headlessShellWarned = true;
+          console.info(`[receipt.ts] Using system Chromium/Chrome at ${bin} (Linux Ubuntu).`);
+        }
+        return bin;
+      } catch (_) { /* try next */ }
+    }
+    // No executable found. Puppeteer will attempt to use its own downloaded
+    // chrome via the puppeteer.launch() default search paths. If that also
+    // fails, the caller will receive a clear 503 error containing install
+    // instructions (see loadPuppeteer / render catch paths).
+    return null;
+  }
+  // 2. Windows — common Chrome install locations.
+  if (platform === 'win32') {
+    const winCandidates: string[] = [
+      `${process.env['ProgramFiles'] ?? 'C:\\Program Files'}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)'}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${process.env['LOCALAPPDATA'] ?? `${process.env['USERPROFILE'] ?? 'C:\\Users\\Default'}\\AppData\\Local`}\\Google\\Chrome\\Application\\chrome.exe`,
+    ];
+    for (const bin of winCandidates) {
+      try {
+        fs.accessSync(bin, fs.constants.X_OK);
+        _headlessShellCopyPath = bin;
+        return bin;
+      } catch (_) { /* try next */ }
+    }
+    return null;
+  }
+  // 3. macOS (darwin): original copy-to-tmp approach with user-specific cache
+  //    paths. However, DO NOT hardcode the developer home directory path.
+  //    Use process.env.HOME to resolve ~/.cache/puppeteer so this works for
+  //    any macOS host, not just the original developer's laptop.
+  const home = process.env.HOME ?? '/Users/';
+  const macBaseCandidates = home ? [
+    `${home}/Library/Caches/puppeteer/chrome-headless-shell`,
+    `${home}/.cache/puppeteer/chrome-headless-shell`,
+    `/Users/Shared/.cache/puppeteer/chrome-headless-shell`,
+  ] : [];
+  // List all mac candidates by globbing cache for known sub-paths, otherwise
+  // fall back to the most recent stable chrome-headless-shell build numbers we
+  // support.
+  const macCandidates: string[] = [];
+  for (const base of macBaseCandidates) {
+    try {
+      const entries = fs.readdirSync(base);
+      for (const arch of entries) {
+        const archDir = `${base}/${arch}`;
+        try {
+          const builds = fs.readdirSync(archDir);
+          for (const build of builds) {
+            const binDir = `${archDir}/${build}`;
+            // mac-arm64 build layout: chrome-headless-shell-mac-arm64/chrome-headless-shell
+            try {
+              const subFiles = fs.readdirSync(binDir);
+              const exe = subFiles.find((f: string) => f === 'chrome-headless-shell' || f.endsWith('/chrome-headless-shell'));
+              if (exe) {
+                const fullBin = `${binDir}/${exe}`;
+                try { fs.accessSync(fullBin, fs.constants.X_OK); macCandidates.push(fullBin); } catch {
+                  // also try the canonical sub-path name:
+                  const canonical = `${binDir}/chrome-headless-shell`;
+                  try { fs.accessSync(canonical, fs.constants.X_OK); macCandidates.push(canonical); } catch { /* skip */ }
+                }
+              } else {
+                const canonical = `${binDir}/chrome-headless-shell`;
+                try { fs.accessSync(canonical, fs.constants.X_OK); macCandidates.push(canonical); } catch { /* skip */ }
+              }
+            } catch { /* not a directory */ }
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* dir missing */ }
+  }
+  for (const src of macCandidates) {
     try {
       const chsDir = fs.mkdtempSync('/tmp/uni-chs-');
       const dst = chsDir + '/chrome-headless-shell';
       fs.cpSync(src, dst, { recursive: true });
       const bin = dst + '/chrome-headless-shell';
       try { fs.chmodSync(bin, 0o755); } catch {}
-      const dylibs = fs.readdirSync(dst).filter(f => f.endsWith('.dylib'));
+      const dylibs = fs.readdirSync(dst).filter((f: string) => f.endsWith('.dylib'));
       for (const d of dylibs) { try { fs.chmodSync(dst + '/' + d, 0o755); } catch {} }
-      try { fs.accessSync(bin, fs.constants.X_OK); } catch (e) {
+      try { fs.accessSync(bin, fs.constants.X_OK); } catch (e: any) {
         try { fs.rmSync(chsDir, { recursive: true, force: true }); } catch {}
         continue;
       }
       _headlessShellCopyPath = bin;
       if (!_headlessShellWarned) {
         _headlessShellWarned = true;
-        console.info(`[receipt.ts] Using chrome-headless-shell at ${bin} (one-time copy to /tmp avoids sandbox EACCES on ~/.cache + no embedded Crashpad).`);
+        console.info(`[receipt.ts] Using chrome-headless-shell at ${bin} (macOS one-time copy to /tmp).`);
       }
       return bin;
-    } catch (_) { /* try next candidate */ }
+    } catch (_) { /* try next */ }
   }
   return null;
 }

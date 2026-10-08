@@ -1348,6 +1348,82 @@ export class PaymentService {
 
     return result;
   }
+
+  // ---------------------------------------------------------------------------
+  // reconcilePendingAlatpayBatch — bounded safe fallback reconciliation.
+  // Scans pending ALATPAY transactions older than minAgeMs (default 2 min).
+  // Only dispatches a per-transaction recon job when there is a stored final
+  // provider transaction UUID (strict v4 UUID match). We deliberately DO NOT
+  // attempt to invent or guess a final UUID from order/session/init refs or
+  // by enumerating ALATPay merchant transactions. This conservative approach
+  // keeps the fallback bounded and trustworthy: if a final UUID was never
+  // stored at initiate (because the popup never completed its last postMessage
+  // or the student closed early), we simply keep that row PENDING — as if the
+  // student never finished the payment flow. Idempotency is preserved via the
+  // BullMQ jobId = alatpay.recon:<transactionId>:<finalUuidHead8> dedup on
+  // dispatch plus the existing verifyPayment internal atomicity.
+  // ---------------------------------------------------------------------------
+  static async reconcilePendingAlatpayBatch(opts: { minAgeMs?: number; limit?: number } = {}): Promise<{
+    scanned: number;
+    totalEnqueued: number;
+    skippedNoId: number;
+    skippedTerminal: number;
+  }> {
+    const minAgeMs = Number(opts.minAgeMs) > 0 ? Number(opts.minAgeMs) : 2 * 60 * 1000;
+    const limit = Math.max(1, Math.min(500, Number(opts.limit) || 20));
+    const cutoff = new Date(Date.now() - minAgeMs);
+    const rows = await prisma.transaction.findMany({
+      where: {
+        gateway: 'ALATPAY' as any,
+        status: { in: ['PENDING', 'INITIATED'] as any },
+        createdAt: { lte: cutoff },
+      },
+      orderBy: [{ updatedAt: 'asc' }],
+      take: limit,
+      select: {
+        id: true, reference: true, status: true, expectedAmount: true,
+        alatpayFinalTransactionId: true, alatpayOrderReference: true,
+        alatpayInitPaymentReference: true, alatpaySessionId: true,
+      },
+    });
+    const { dispatchJob } = await import('../config/queue');
+    const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    let totalEnqueued = 0;
+    let skippedNoId = 0;
+    let skippedTerminal = 0;
+    for (const tx of rows) {
+      const finalTxId =
+        typeof tx.alatpayFinalTransactionId === 'string' && uuidV4.test(tx.alatpayFinalTransactionId.trim())
+          ? tx.alatpayFinalTransactionId.trim()
+          : null;
+      if (!finalTxId) {
+        skippedNoId++;
+        continue;
+      }
+      if (tx.status !== 'PENDING' && (tx.status as any) !== 'INITIATED') {
+        skippedTerminal++;
+        continue;
+      }
+      try {
+        await dispatchJob(
+          'alatpay.recon' as any,
+          { transactionId: tx.id, providerReference: finalTxId, expectedAmount: Number(tx.expectedAmount || 0) },
+          {
+            deduplicate: true,
+            jobId: `alatpay.recon:tx-${tx.id}-${finalTxId.slice(0, 8)}`,
+            priority: 'low',
+            retries: 3,
+          },
+        );
+        totalEnqueued++;
+      } catch {
+        // sync degraded path — dispatchJob sync fallback already runs handler
+        // inline when Redis unavailable; if THAT also throws we silently skip
+        // to next row (BullMQ retries will pick up the tx on next interval).
+      }
+    }
+    return { scanned: rows.length, totalEnqueued, skippedNoId, skippedTerminal };
+  }
 }
 
 export class ConfirmPayloadService {
