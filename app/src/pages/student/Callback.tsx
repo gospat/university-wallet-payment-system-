@@ -5,6 +5,7 @@ import PaymentResult from '../../components/student/PaymentResult';
 import { useAuth } from '../../context/AuthContext';
 import { i18n } from '../../i18n/en';
 import { studentFeeApi } from '../../services/studentFees';
+import { isAlatpayUuid } from '../../types/alatpay';
 import { ArrowLeft, Clock, History, Mail } from 'lucide-react';
 
 const fmt = (n: number) =>
@@ -28,6 +29,18 @@ const CallbackPage: React.FC = () => {
 
   const ref = (refParam || search.get('reference') || search.get('trxref') || search.get('paystackRef') || '').trim();
 
+  // ALATPay final authoritative UUID is carried via ?providerReference query param.
+  // Strictly validate UUID v4 format via isAlatpayUuid before forwarding to backend.
+  // If invalid / missing: providerReferenceOpt = null, fail closed / use legacy path only.
+  const providerReferenceOpt: string | null = useMemo(() => {
+    const raw = search.get('providerReference');
+    if (!raw || typeof raw !== 'string') return null;
+    const t = String(raw).trim();
+    if (!t) return null;
+    if (!isAlatpayUuid(t)) return null;
+    return t;
+  }, [search]);
+
   const [stage, setStage] = useState<Stage>('loading');
   const [outstanding, setOutstanding] = useState<number | null>(null);
   const [invoiceId, setInvoiceId] = useState<number | string | null>(null);
@@ -46,7 +59,10 @@ const CallbackPage: React.FC = () => {
     (async () => {
       setStage('loading');
       try {
-        const r: any = await studentFeeApi.verifyPayment(ref);
+        const r: any = await studentFeeApi.verifyPayment(
+          ref,
+          providerReferenceOpt ? { providerReference: providerReferenceOpt } : undefined,
+        );
         const ok = !!r?.success || r?.status === 'SUCCESS' || r?.data?.status === 'SUCCESS' || r?.verified === true;
         const d = r?.data ?? r;
         if (!cancelled) {
@@ -72,7 +88,7 @@ const CallbackPage: React.FC = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [ref]);
+  }, [ref, providerReferenceOpt]);
 
   const downloadReceipt = async () => {
     const refTarget = receiptRef || ref;

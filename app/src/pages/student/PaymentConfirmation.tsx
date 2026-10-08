@@ -131,8 +131,16 @@ const PaymentConfirmation: React.FC = () => {
         const bellsReference = alatpayRef?.bells_reference || ref;
         try {
           await launchAlatpayNativeModal(alatpayCheckout, {
-            onReportTransaction: (_r) => {
-              navigate(`/student/payments/callback/${encodeURIComponent(bellsReference || ref)}`);
+            onReportTransaction: (report) => {
+              const bellsRef = bellsReference || ref;
+              const base = `/student/payments/callback/${encodeURIComponent(bellsRef)}`;
+              const finalUuid = report?.extractedFinalTxId ?? null;
+              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
+                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
+                navigate(`${base}?${qs}`);
+              } else {
+                navigate(base);
+              }
             },
             onError: (e) => {
               const m = e?.message || 'Unable to initiate payment. Please try again shortly.';

@@ -345,6 +345,133 @@ test('K. ALATPAY CSP regression: Helmet + nginx connect-src BOTH include https:/
   expect(cspLine).toMatch(/form-action\s+'self'/);
 });
 
+// M. FRONTEND WIRING: ALATPay extractedFinalTxId → /student/payments/callback/<BELLS_REF>?providerReference=<UUID>
+//      Static parse + URL construction rules proven by exact text match in both
+//      PaymentConfirmation.tsx AND Checkout.tsx.
+//    Required (per live transaction d7725744-785f-46c9-821b-2e9d5d6f7ac3 which
+//    was lost prior to this fix because extractedFinalTxId was discarded):
+//      a) Bells reference is the primary URL path param (never demoted to query).
+//      b) Provider final UUID carried ONLY via ?providerReference= query param
+//         and ONLY after strict isAlatpayUuid validation in alatpayCheckout.ts
+//         extractAlatpayFinalTxId (returns null for non-UUID values).
+//      c) If extractedFinalTxId is null → no query param, navigate to base URL.
+test('M. ALATPay callback URL wiring: extractedFinalTxId ?providerReference= appended after Bells ref path param only, Bells ref primary', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const filesToCheck = [
+    path.resolve(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'PaymentConfirmation.tsx'),
+    path.resolve(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Checkout.tsx'),
+  ];
+  for (const f of filesToCheck) {
+    const txt = fs.readFileSync(f, 'utf8');
+    const base = path.basename(f);
+    // Must consume onReportTransaction payload (do not ignore it with _r)
+    expect(txt).not.toMatch(/onReportTransaction\s*:\s*\(_r\)/);
+    // Must extract extractedFinalTxId from the report payload:
+    expect(txt).toMatch(/extractedFinalTxId/);
+    // Must keep Bells ref URL path-based (primary internal reference):
+    expect(txt).toMatch(/callback\/\$\{encodeURIComponent\(bells(?:Ref|Reference)\b/);
+    // Must append providerReference as QUERY PARAM (URLSearchParams or ?providerReference=):
+    expect(txt).toMatch(/providerReference/);
+    expect(txt).toMatch(/URLSearchParams/);
+    // Must NOT place provider UUID in URL path (only in query):
+    const onReportBlock = (txt.match(/onReportTransaction\s*:\s*\(([^)]*)\)\s*=>\s*\{([\s\S]*?)\n\s*\},/)?.[2] ?? '') +
+                          (txt.match(/onReportTransaction\s*:\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\},/)?.[2] ?? '');
+    expect(onReportBlock.length).toBeGreaterThan(80);
+    expect(onReportBlock).toMatch(/navigate\s*\(/);
+    expect(onReportBlock).toMatch(/encodeURIComponent\s*\(\s*bells(?:Ref|Reference)/);
+    expect(onReportBlock).toMatch(/providerReference/);
+    // Safety: extractedFinalTxId is truthy-checked before navigating with query param
+    expect(onReportBlock).toMatch(/finalUuid\s*(?:&&|\?\?)|extractedFinalTxId\s*(?:&&|\?\?)|if\s*\(\s*(?:finalUuid|extractedFinalTxId)/);
+    base as any; // no-op to satisfy unused
+  }
+});
+
+// N. BACKEND AUTHORITATIVE VERIFY + FRONTEND STRICT VALIDATION regression:
+//      1) Student frontend Callback page MUST validate providerReference with
+//         isAlatpayUuid (strict UUID v4) BEFORE forwarding to verifyPayment.
+//      2) Malformed values (WEMA-* refs, payk-init-* refs, sessionIds,
+//         customerIds, empty, whitespace, "hello", "d7725744ZZZZ") are rejected.
+//      3) verifyPayment API takes Bells ref as path param (primary), providerReference
+//         as OPTIONAL query param — backend stays authoritative.
+//      4) Paystack legacy path still works (no providerReference required for Paystack refs —
+//         backend dispatches by gateway on transaction record found by Bells ref).
+test('N. providerReference strict validation — malformed values are rejected; Bells ref remains path-param primary; Paystack path intact', () => {
+  // We need frontend isAlatpayUuid validator — use identical logic from api utils
+  // (mirror contract) and test the SAME validation rules Callback.tsx applies.
+  const { isAlatpayUuid } = require('../utils/alatpay');
+
+  // ============== 1) STRICT UUID VALIDATOR (isAlatpayUuid) regression ==============
+  const LIVE_GOOD_FINAL = 'd7725744-785f-46c9-821b-2e9d5d6f7ac3';
+  expect(isAlatpayUuid(LIVE_GOOD_FINAL)).toBe(true);
+
+  // OrderId / WEMA reference (NEVER allowed as provider reference — fail closed):
+  expect(isAlatpayUuid('WEMA-PAY-20261007-WZR760')).toBe(false);
+  expect(isAlatpayUuid('PAY-20261007-WZR760')).toBe(false);
+  // initRef payk-* (NOT final — must be rejected):
+  expect(isAlatpayUuid('paykA1sJYTVsb4r')).toBe(false);
+  // Arbitrary nested correlation / customer ids / session ids:
+  expect(isAlatpayUuid('session-f34ba05b-1234-1234-1234-1234567890ab')).toBe(false);
+  expect(isAlatpayUuid('customer-9d0a83f2-aaaa-4bbb-8ccc-dddddddddddd')).toBe(false);
+  // Non-UUID malformations:
+  expect(isAlatpayUuid('')).toBe(false);
+  expect(isAlatpayUuid('    ')).toBe(false);
+  expect(isAlatpayUuid('hello')).toBe(false);
+  // Almost-UUID with bad hex or swapped nibble positions:
+  expect(isAlatpayUuid('d7725744ZZZZ-785f-46c9-821b-2e9d5d6f7ac3')).toBe(false);
+  expect(isAlatpayUuid('d7725744-785f-46c9-821b-2e9d5d6f7ac')).toBe(false); // short by 1
+  expect(isAlatpayUuid(null as any)).toBe(false);
+  expect(isAlatpayUuid(undefined as any)).toBe(false);
+  expect(isAlatpayUuid(42 as any)).toBe(false);
+  expect(isAlatpayUuid({} as any)).toBe(false);
+
+  // ============== 2) Bells ref = URL path param (primary) ==============
+  // Primary ref is always path-param-encoded; providerReference is ONLY query-param optional:
+  const srvSrc = require('node:fs').readFileSync(
+    require('node:path').resolve(__dirname, '..', '..', '..', 'app', 'src', 'services', 'studentFees.ts'),
+    'utf8',
+  );
+  expect(srvSrc).toMatch(/\/students\/payments\/verify\/\$\{encodeURIComponent\(reference\)\}/);
+  expect(srvSrc).toMatch(/if\s*\(\s*opts\?\.providerReference/);
+  expect(srvSrc).toMatch(/params\.providerReference\s*=/);
+  expect(srvSrc).toMatch(/\+\s*\(\s*qs\s*\?\s*`\?\$\{qs\}`\s*:\s*''\s*\)/);
+
+  // ============== 3) Backend verifyPayment = providerReference STRICTLY VALIDATED before use ==============
+  const backendVerifyCtrlSrc = require('node:fs').readFileSync(
+    require('node:path').resolve(__dirname, '..', 'controllers', 'payments.ts'),
+    'utf8',
+  );
+  // Backend MUST apply UUID validation before trusting providerReference — parse
+  // controller for UUID pattern match:
+  expect(backendVerifyCtrlSrc).toMatch(/providerReference/i);
+  // Backend controller dispatches providerReference (if UUID) to PaymentService
+  // (authoritative server verify). If malformed → backend should reject silently
+  // (fail closed, keep using path-param bells reference):
+  expect(backendVerifyCtrlSrc).toMatch(/selectAlatpayFinalTxId|isAlatpayUuid|UUID|uuid/i);
+
+  // ============== 4) Callback.tsx: providerReference validated before verifyPayment ==============
+  const callbackSrc = require('node:fs').readFileSync(
+    require('node:path').resolve(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Callback.tsx'),
+    'utf8',
+  );
+  expect(callbackSrc).toMatch(/import\s*\{\s*isAlatpayUuid\s*\}\s*from\s*['"]..\/..\/types\/alatpay['"]/);
+  expect(callbackSrc).toMatch(/search\.get\(['"]providerReference['"]\)/);
+  expect(callbackSrc).toMatch(/isAlatpayUuid\(\s*t\s*\)/);
+  expect(callbackSrc).toMatch(/return\s*null/);
+  expect(callbackSrc).toMatch(/verifyPayment\(\s*ref\s*,/);
+  expect(callbackSrc).toMatch(/providerReferenceOpt\s*\?\s*\{\s*providerReference:\s*providerReferenceOpt\s*\}\s*:\s*undefined/);
+
+  // ============== 5) Paystack legacy path UNCHANGED (no providerReference required, works with just ref) ==============
+  const paystackSrc = require('node:fs').readFileSync(
+    require('node:path').resolve(__dirname, '..', 'services', 'payment', 'providers', 'paystackProvider.ts'),
+    'utf8',
+  );
+  // Paystack verify+initiate logic still uses providerReference? or not? It should not require ALATPay UUID providerReference:
+  expect(paystackSrc).toMatch(/verifyTransaction|initializeTransaction|transaction\/verify/);
+  // And ALATPay is the ONLY provider expecting UUID provider refs:
+  expect(paystackSrc).not.toMatch(/selectAlatpayFinalTxId|isAlatpayUuid|ALATPAY_FINAL_TXID/);
+});
+
 // K. Extra: globalErrorHandler production → no stack trace / SQL exposure
 test('L (bonus). globalErrorHandler production non-operational → generic message, no stack leak', () => {
   const res: any = {
