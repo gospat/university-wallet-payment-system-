@@ -186,6 +186,51 @@ export function deriveAlatpayWebhookEventId(
 }
 
 // =============================================================================
+// BullMQ-safe job ID generator for ALATPay webhook dispatches.
+// -----------------------------------------------------------------------------
+// Rationale:
+//   a) BullMQ v5 docs explicitly disallow colons in user-supplied custom jobIds
+//      (underlying Lua / Redis streams key design). alatpayEventId today starts with
+//      "awv1:" (contains colons) and may be safely embedded directly → UNSAFE.
+//   b) A STABLE jobId (per event) alone is UNSAFE for provider retries: BullMQ
+//      retains failed jobs (removeOnFail: 5000). If a previous attempt failed
+//      (Redis transient on dispatch time) and the provider retries with the
+//      same event (returned 503), reusing the same stable jobId would cause
+//      Queue.add to throw JobIdAlreadyExistsError, resulting in dispatch failure
+//      (dead letter) → the event gets stranded isProcessed=false.
+//
+// Job ID format (no colons, per-attempt unique):
+//     alatpay_webhook_<safe_event_id>_<timestamp>_<rand8hex>
+// where:
+//   - safe_event_id = alatpayEventId with all ':' / '=' replaced by '_' / '-'
+//     (still useful for operator log correlation with DB event)
+//   - <timestamp>  = ms epoch (provides monotonic ordering + distinguishes attempts
+//     so each provider retry is a brand new BullMQ job id → no collisions)
+//   - <rand8hex>    = 4-byte hex (breaks ms-collision belt)
+//
+// Dedup safety:
+//   - Database alatpayEventId @unique remains the authoritative dedup key.
+//   - The worker always finds the DB row by payload.alatpayEventId (not by jobId).
+//   - Two parallel dispatches or provider retries → different BullMQ job ids,
+//     but worker checks row.isProcessed before writing anything financial.
+//   - Paystack jobId format is NOT touched (preserved byte-equivalent).
+// =============================================================================
+export function makeAlatpayWebhookJobId(alatpayEventId: string): string {
+  const safeEventId = String(alatpayEventId ?? 'ev').replace(/[:=]/g, '_').replace(/[^A-Za-z0-9_-]/g, '-');
+  const ts = Date.now().toString(36);
+  const nonce = crypto.randomBytes(4).toString('hex');
+  return `alatpay_webhook_${safeEventId}_${ts}_${nonce}`;
+}
+
+// Exported for TR-32 tests: predicate to check if a jobId has no colons and the
+// alphanumeric-safe shape expected by BullMQ.
+export function isBullmqSafeJobId(candidate: string): boolean {
+  if (!candidate || typeof candidate !== 'string') return false;
+  // BullMQ-safe: no colons, no slashes, no spaces. Use conservative set.
+  return /^[A-Za-z0-9_-]+$/.test(candidate);
+}
+
+// =============================================================================
 // WEBHOOK HMAC VERIFICATION — Status: IMPLEMENTED as HMAC-SHA256 + Base64 digest
 // =============================================================================
 // ⚠️  PROVIDER-UNPROVEN PORTION (ISSUE 4 CLARIFICATION):

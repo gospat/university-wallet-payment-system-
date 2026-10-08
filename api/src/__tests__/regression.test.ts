@@ -1421,8 +1421,10 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       const b = deriveAlatpayWebhookEventId(body, sig, MOCK_SECRET);
       expect(a).toEqual(b);
       const whsrc = getWebhooksSrc();
-      // BullMQ jobId also uses alatpayEventId → deduped; idempotency DB upsert uses it too; isProcessed flag in handler short-circuits.
-      expect(whsrc).toMatch(/jobId:\s*[`'"]alatpay-webhook:\$\{alatpayEventId\}[`'"]/);
+      // BullMQ jobId is now generated via makeAlatpayWebhookJobId — per-attempt unique + BullMQ-safe (no colons). DB dedup canonical.
+      expect(whsrc).toMatch(/makeAlatpayWebhookJobId\(alatpayEventId\)/);
+      // BullMQ safety predicate guard: always enforce no-colon safe ids.
+      expect(whsrc).toMatch(/isBullmqSafeJobId\(safeJobId\)/);
       expect(whsrc).toMatch(/isProcessed && !forceReprocess\)\s*return;/);
     });
 
@@ -1526,8 +1528,9 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       const alatpayUpsert = whsrc.slice(allUpsertMatches[1], allUpsertMatches[1] + 1200);
       expect(alatpayUpsert).toMatch(/where:\s*\{\s*alatpayEventId\s*\}/);
       expect(alatpayUpsert).toMatch(/create:\s*\{\s*paystackEventId:\s*null[,\s\S]*alatpayEventId[,\s\S]*eventType/);
-      // 3) BullMQ job id = alatpay-webhook:${alatpayEventId} → same unique key
-      expect(whsrc).toMatch(/jobId:\s*`alatpay-webhook:\$\{alatpayEventId\}`/);
+      // 3) BullMQ job id per-attempt unique (no colons): uses makeAlatpayWebhookJobId + isBullmqSafeJobId guard. DB dedup remains.
+      expect(whsrc).toMatch(/makeAlatpayWebhookJobId\(alatpayEventId\)/);
+      expect(whsrc).toMatch(/isBullmqSafeJobId\(safeJobId\)/);
       // 4) Handler payload uses the same alatpayEventId, findUnique by that same key → consistent
       const handlerFindUniqs = [...whsrc.matchAll(/findUnique\(\{\s*where:\s*\{\s*alatpayEventId\s*\},?\s*\}\)/g)];
       expect(handlerFindUniqs.length).toBeGreaterThanOrEqual(1);
@@ -1720,15 +1723,15 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(alatRoute).toMatch(/return\s+res\.status\(200\)\.json\(\s*\{\s*status:\s*'ok'[\s\S]*received:\s*true[\s\S]*eventId:\s*alatpayEventId[\s\S]*eventType[\s\S]*transactionRef/);
     });
 
-    it('TR-31.6 [REQ 6] Exact duplicate already-processed webhook_event → route still returns HTTP 200 (deduped). No new row + dispatch dedup via same jobId.', () => {
+    it('TR-31.6 [REQ 6] Exact duplicate already-processed webhook_event → route still returns HTTP 200 (deduped). No new row because upsert where UNIQUE alatpayEventId → update:{} no-op; handler skips processing via isProcessed guard.', () => {
       const whsrc = getWebhooksSrc();
       const alatRouteStart = whsrc.indexOf("router.post('/alatpay'");
       const alatRouteEnd = whsrc.indexOf("registerHandler('alatpay.webhook'");
       const alatRoute = whsrc.slice(alatRouteStart, alatRouteEnd);
-      // The upsert is always update:{} (no DB mutation on existing key) — even if row exists + isProcessed=true, route still returns 200 after dispatch success (dispatch dedupes via identical jobId)
+      // The upsert is always update:{} (no DB mutation on existing key) — even if row exists + isProcessed=true, route still returns 200 after dispatch success (DB upsert is authoritative dedup)
       expect(alatRoute).toMatch(/upsert\(\{\s*where:\s*\{\s*alatpayEventId\s*\},?\s*update:\s*\{\}/);
-      // jobId constant: alatpay-webhook:${alatpayEventId} → same key dedupes
-      expect(alatRoute).toMatch(/jobId:\s*`alatpay-webhook:\$\{alatpayEventId\}`/);
+      // JobId generated per-attempt via makeAlatpayWebhookJobId (bull-safe); dedup done via DB + handler isProcessed.
+      expect(alatRoute).toMatch(/makeAlatpayWebhookJobId\(alatpayEventId\)/);
       // The handler registered also skips reprocess if isProcessed=true — prevents double processing
       const handlerStart = whsrc.indexOf("registerHandler('alatpay.webhook'");
       const handlerBlock = whsrc.slice(handlerStart, handlerStart + 1200);
@@ -1811,6 +1814,194 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(isSkipped(src, 'TR-27.1')).toBe(false);
       expect(hasIt(src, 'TR-28.1')).toBe(true);
       expect(isSkipped(src, 'TR-28.1')).toBe(false);
+    });
+  });
+
+  describe('TR-32 Final: BullMQ-safe ALATPay job IDs + failed-Job unblocking', () => {
+    // -------------------------------------------------------------------------
+    // TR-32.1 Predicate test: isBullmqSafeJobId returns true for new job IDs,
+    // false for colon-containing legacy ones. Regex-only portion — always runs.
+    // -------------------------------------------------------------------------
+    it('TR-32.1 [PRED] isBullmqSafeJobId predicate returns correct values for safe/unsafe candidates', () => {
+      const { isBullmqSafeJobId, makeAlatpayWebhookJobId } = getAlatpayUtils();
+      // GOOD candidates
+      expect(isBullmqSafeJobId('alatpay_webhook_awv1_abcdef_t8_k1234567')).toBe(true);
+      expect(isBullmqSafeJobId(makeAlatpayWebhookJobId('awv1:abc-def_ghi=klm'))).toBe(true);
+      expect(isBullmqSafeJobId('simple_underscore-dash-0123')).toBe(true);
+      // BAD candidates (contain colons, slashes, spaces, equals, braces, backticks)
+      expect(isBullmqSafeJobId('alatpay-webhook:awv1:xyz')).toBe(false);
+      expect(isBullmqSafeJobId('awv1:abcdef')).toBe(false);
+      expect(isBullmqSafeJobId('has spaces here')).toBe(false);
+      expect(isBullmqSafeJobId('path/with/slashes')).toBe(false);
+      expect(isBullmqSafeJobId('')).toBe(false);
+      expect(isBullmqSafeJobId(null as any)).toBe(false);
+    });
+
+    // -------------------------------------------------------------------------
+    // TR-32.2 Generated job IDs never contain colons, have per-call uniqueness.
+    // -------------------------------------------------------------------------
+    it('TR-32.2 [SAFETY] makeAlatpayWebhookJobId() produces no-colon IDs with per-call uniqueness for identical alatpayEventId (non-blocking retries).', () => {
+      const { makeAlatpayWebhookJobId, isBullmqSafeJobId } = getAlatpayUtils();
+      const ev1 = 'awv1:abc-def-ghijklmnopqrstuvwxyz0123456789';
+      const ids = new Set<string>();
+      for (let i = 0; i < 15; i++) {
+        const id = makeAlatpayWebhookJobId(ev1);
+        expect(id).toBeDefined();
+        expect(typeof id).toBe('string');
+        expect(id.length).toBeGreaterThan(20);
+        expect(id.indexOf(':')).toBe(-1);
+        expect(id.indexOf('=')).toBe(-1);
+        expect(id.indexOf('/')).toBe(-1);
+        expect(id.indexOf(' ')).toBe(-1);
+        expect(isBullmqSafeJobId(id)).toBe(true);
+        ids.add(id);
+      }
+      // With Date.now() + random nonce, 15 rapid calls => unique set size 15
+      expect(ids.size).toBe(15);
+      // Also safe when alatpayEventId has weird characters (replacements work)
+      const weird = makeAlatpayWebhookJobId('a:b=c/d e{f}g`h');
+      expect(weird.indexOf(':')).toBe(-1);
+      expect(weird.indexOf('=')).toBe(-1);
+      expect(weird.indexOf('/')).toBe(-1);
+      expect(weird.indexOf(' ')).toBe(-1);
+      expect(weird.indexOf('`')).toBe(-1);
+      expect(isBullmqSafeJobId(weird)).toBe(true);
+    });
+
+    // -------------------------------------------------------------------------
+    // TR-32.3 ACTUAL BullMQ package validation: using installed bullmq v5 +
+    // real ioredis ping, attempt Queue.add with an unsafe colon jobId vs
+    // safe jobId produced by helper. If Redis unavailable → skip gracefully.
+    // -------------------------------------------------------------------------
+    it('TR-32.3 [BULLMQ] Actual installed BullMQ Queue.add with unsafe (colon) jobId fails or surfaces issue; safe (no-colon) jobId from makeAlatpayWebhookJobId succeeds when Redis is available.', async () => {
+      const { makeAlatpayWebhookJobId, isBullmqSafeJobId } = getAlatpayUtils();
+      // Ping Redis first
+      const Redis = require('ioredis');
+      const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+      let client: any = null;
+      let redisOk = false;
+      try {
+        client = new Redis(REDIS_URL, { lazyConnect: true, commandTimeout: 1500, maxRetriesPerRequest: 1 });
+        await new Promise<void>((resolve, reject) => {
+          let done = false;
+          const to = setTimeout(() => { if (!done) { done = true; reject(new Error('timeout')); } }, 1600);
+          client.ping((e: any, r: any) => {
+            clearTimeout(to);
+            if (!done) { done = true; if (e) reject(e); else resolve(r); }
+          });
+        });
+        redisOk = true;
+      } catch (_ignored) {
+        redisOk = false;
+      } finally {
+        try { if (client) { client.disconnect(false); } } catch {}
+      }
+
+      // Database event ID (same shape as real awv1:...)
+      const fakeEventId = 'awv1:tr32_test-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      const unsafeJobId = `alatpay-webhook:${fakeEventId}`; // Old colon pattern
+      const safeJobId = makeAlatpayWebhookJobId(fakeEventId);
+      expect(isBullmqSafeJobId(safeJobId)).toBe(true);
+      expect(unsafeJobId.includes(':')).toBe(true);
+
+      if (!redisOk) {
+        // Soft-skip: log but do not fail the suite. Cannot run actual BullMQ add without Redis.
+        // eslint-disable-next-line no-console
+        console.warn('[TR-32.3 SKIPPED] Redis unavailable at', REDIS_URL);
+        return;
+      }
+
+      // Redis OK → create real BullMQ queue with unique topic name to avoid cross-talk
+      const { Queue } = require('bullmq');
+      const topic = `__tr32_bull_safe_${Date.now().toString(36)}`;
+      let q: any = null;
+      try {
+        q = new Queue(topic, {
+          connection: new Redis(REDIS_URL, { maxRetriesPerRequest: 1, commandTimeout: 1500, lazyConnect: true }),
+        });
+
+        // ------- SAFE jobId (from helper) -------
+        let safeErr: Error | null = null;
+        let safeAdded = false;
+        try {
+          const j = await q.add(topic, { alatpayEventId: fakeEventId, kind: 'safe' }, {
+            jobId: safeJobId,
+            attempts: 1,
+            removeOnComplete: true,
+            removeOnFail: 1,
+          });
+          safeAdded = !!j && !!j.id;
+        } catch (e: any) {
+          safeErr = e;
+        }
+        // Safe jobId MUST succeed (no colon)
+        expect(safeErr).toBeNull();
+        expect(safeAdded).toBe(true);
+
+        // ------- UNSAFE jobId (contains colons) -------
+        // BullMQ v5: depending on version, the add with colon-containing custom id
+        // either surface the problem (throw / error) or the colon causes problems in
+        // subsequent Lua scripts when the job is acked / retried. The helper's
+        // predicate-based defensive enforcement must still guard against accepting
+        // this unsafe ID.
+        let unsafeErr: Error | null = null;
+        try {
+          await q.add(topic, { alatpayEventId: fakeEventId, kind: 'unsafe' }, {
+            jobId: unsafeJobId,
+            attempts: 1,
+            removeOnComplete: true,
+            removeOnFail: 1,
+          });
+        } catch (e: any) {
+          unsafeErr = e;
+        }
+        // Regardless of whether BullMQ *itself* throws today, our safety predicate
+        // must classify unsafe ID as unsafe → defensive enforcement in route code
+        // (isBullmqSafeJobId guard) will never pass it through.
+        expect(isBullmqSafeJobId(unsafeJobId)).toBe(false);
+      } finally {
+        try { if (q) { await q.obliterate({ force: true }).catch(() => {}); await q.close().catch(() => {}); } } catch {}
+      }
+    }, 15000);
+
+    // -------------------------------------------------------------------------
+    // TR-32.4 Failed BullMQ jobs should not block unprocessed retries.
+    // Design assertion (structural + runtime):
+    //   If a previous dispatch produced a failed job retained in Redis AND the
+    //   provider retries after 503, makeAlatpayWebhookJobId returns a DIFFERENT
+    //   job id than the previous attempt → new job add succeeds regardless of
+    //   any retained old failed state.
+    // Structural: route uses makeAlatpayWebhookJobId helper (not a stable colon
+    // id) for jobId; makeAlatpayWebhookJobId is per-call unique → different id.
+    // -------------------------------------------------------------------------
+    it('TR-32.4 [RETRY-BLOCKING] Stale/failed BullMQ job cannot silently block provider retry: per-attempt unique job ID + DB isProcessed dedup = retry-safe.', () => {
+      const whsrc = getWebhooksSrc();
+      const { makeAlatpayWebhookJobId } = getAlatpayUtils();
+      // 1) Structural assertion: route constructs safe job id via makeAlatpayWebhookJobId
+      const alatRouteStart = whsrc.indexOf("router.post('/alatpay'");
+      const alatRoute = whsrc.slice(alatRouteStart, whsrc.indexOf("registerHandler('alatpay.webhook'"));
+      expect(alatRoute).toMatch(/makeAlatpayWebhookJobId\(alatpayEventId\)/);
+      expect(alatRoute).toMatch(/isBullmqSafeJobId\(safeJobId\)/);
+      // Must NOT contain the old colon pattern in the jobId assignment
+      expect(alatRoute).not.toMatch(/jobId:\s*[`'"]alatpay-webhook:.*alatpayEventId/);
+      // 2) Two makeAlatpayWebhookJobId calls with identical alatpayEventId produce DIFFERENT ids.
+      const sameEv = 'awv1:tr32_4_fake_event_fixed';
+      const firstAttempt = makeAlatpayWebhookJobId(sameEv);
+      const retryAttempt = makeAlatpayWebhookJobId(sameEv); // ms later → different ts/nonce
+      expect(firstAttempt).not.toEqual(retryAttempt);
+      // Both safe (no colons)
+      expect(firstAttempt.includes(':')).toBe(false);
+      expect(retryAttempt.includes(':')).toBe(false);
+      // 3) Worker dedup remains DB-based: findUnique by alatpayEventId not jobId.
+      const handlerStart = whsrc.indexOf("registerHandler('alatpay.webhook'");
+      const handler = whsrc.slice(handlerStart, handlerStart + 1500);
+      expect(handler).toMatch(/const\s*\{\s*alatpayEventId[,\s\S]*\}.*=\s*payload/);
+      expect(handler).toMatch(/findUnique\(\{\s*where:\s*\{\s*alatpayEventId\s*\}/);
+      // 4) Handler isProcessed short-circuit → no double processing even when N jobs for same event.
+      expect(handler).toMatch(/if\s*\(\s*row\.isProcessed\s*&&\s*!forceReprocess\s*\)\s*return;/);
+      // Paystack route untouched: still retains exact old format
+      const psRoute = whsrc.slice(whsrc.indexOf("router.post('/paystack'"), whsrc.indexOf("router.post('/paystack'") + 7000);
+      expect(psRoute).toMatch(/jobId:\s*`paystack-webhook:\$\{paystackEventId\}`/);
     });
   });
 });

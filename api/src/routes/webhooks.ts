@@ -51,6 +51,8 @@ import {
   AlatpayCustomerMetadata,
   normalizeAlatpayWebhookEnvelope,
   deriveAlatpayWebhookEventId,
+  makeAlatpayWebhookJobId,
+  isBullmqSafeJobId,
   ALATPAY_IDEVENT_ID_SEMANTIC,
   ALATPAY_IDEVENT_ID_SEMANTIC_PROOF,
 } from '../utils/alatpay';
@@ -581,13 +583,34 @@ router.post('/alatpay', async (req: Request, res: Response) => {
 
   // ---------------------------------------------------------------------------
   // Step 5 — Kick off async handling via BullMQ dedup job + return 200 fast.
+  //
+  // BullMQ jobId policy:
+  //   - BullMQ v5 disallows colons in custom job IDs. The DB event id format
+  //     "awv1:{base64url}" contains colons → UNSAFE to embed directly.
+  //   - STABLE jobIds (per event) are also UNSAFE here: BullMQ retains failed
+  //     jobs (removeOnFail: 5000). If a previous dispatch ended in failed job
+  //     state AND the provider retries after 503, reusing the same stable id
+  //     would cause JobIdAlreadyExistsError / dispatch failure, stranding the
+  //     unprocessed event.
+  //   - Therefore: use a per-attempt unique BullMQ-safe jobId with a timestamp
+  //     + random nonce via makeAlatpayWebhookJobId. Database alatpayEventId
+  //     @unique remains the canonical dedup key (worker checks isProcessed
+  //     before any financial action). Two parallel HTTP arrivals → two
+  //     separate BullMQ jobs, but the worker will race + one early-returns,
+  //     so no double credit.
   // ---------------------------------------------------------------------------
   try {
+    let safeJobId = makeAlatpayWebhookJobId(alatpayEventId);
+    if (!isBullmqSafeJobId(safeJobId)) {
+      // Belt: never pass unsafe id to BullMQ. Re-munge deterministically.
+      const buf = Buffer.from(safeJobId, 'utf-8').toString('base64url');
+      safeJobId = 'alatpay_wh_' + Date.now().toString(36) + '_' + buf.slice(0, 40);
+    }
     await dispatchJob(
       'alatpay.webhook',
       { alatpayEventId, eventType, receivedAt: new Date().toISOString() },
       {
-        jobId: `alatpay-webhook:${alatpayEventId}`,
+        jobId: safeJobId,
         deduplicate: true,
         priority: 'high',
         retries: 4,
