@@ -22,6 +22,7 @@ const CHECKOUT_URL = 'https://checkout.alatpay.ng/x/y/z';
 
 let alatAmount = 100;
 let alatStatus = 'SUCCESSFUL';
+let alatFeeAmount = 1.0;
 let alatExtra: any = {};
 let paystackRef = 'PSTK-REF-99';
 let paystackKobo = 10000;
@@ -88,7 +89,7 @@ jest.mock('axios', () => {
             Status: alatStatus,
             Channel: 'BANK_TRANSFER',
             Currency: 'NGN',
-            FeeAmount: 1.0,
+            FeeAmount: alatFeeAmount,
             ...alatExtra,
           },
           Status: true,
@@ -131,6 +132,7 @@ beforeEach(() => {
   jest.restoreAllMocks();
   alatAmount = 100;
   alatStatus = 'SUCCESSFUL';
+  alatFeeAmount = 1.0;
   alatExtra = {};
   paystackRef = 'PSTK-REF-99';
   paystackKobo = 10000;
@@ -2276,5 +2278,341 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect(flatJson).not.toMatch(/WEMA_ALATPAY_SECRET_KEY|ALATPAY_SECRET_KEY/);
     expect(flatJson).not.toMatch(/"public[_-]?key"\s*:/i);
     expect(flatJson).not.toMatch(/"business"\s*:\s*\{/i);
+  });
+
+  // ============================================================
+  // T41 — CUSTOMER-BORNE ALATPAY FEE: gross=150.75, fee=0.75,
+  //       expected=150.00 → effective amount = gross-fee = 150.00
+  //       → SUCCESS, invoice applied for 150 exactly.
+  // ============================================================
+  it('T41 — gross=150.75 fee=0.75 expected=150.00 → SUCCESS with effective 150.00 (gross_minus_fee norm)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 150.75;
+    alatFeeAmount = 0.75;
+    invoiceRows.push({ id: 9001, invoiceNumber: 'INV/2026/00001', studentId: 90, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9042,
+      reference: 'PAY-20261008-HQ13D2',
+      status: 'PENDING',
+      userId: 90,
+      invoiceId: 9001,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      alatpayFinalTransactionId: 'd7725744-785f-46c9-821b-2e9d5d6f7ac3',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-HQ13D2', {
+      providerReference: 'd7725744-785f-46c9-821b-2e9d5d6f7ac3',
+      expectedTransactionId: 9042,
+    });
+    expect(res.verified).toBe(true);
+    const tx = txRows[0];
+    expect(Number(tx.amount).toFixed(2)).toBe('150.00');
+    expect(tx.status).toBe('SUCCESS');
+    const inv = invoiceRows[0];
+    expect(Number(inv.amountPaid).toFixed(2)).toBe('150.00');
+    // Receipt + balanced GL (1 dr/cr pair, 150 each, no 0.75 leak):
+    expect(receiptRows.length).toBe(1);
+    expect(glRows.filter((g) => g.entryType === 'PAYMENT_SUCCESS').length).toBe(2);
+    const dr = glRows
+      .filter((g) => (g.meta as any)?.side === 'DEBIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    const cr = glRows
+      .filter((g) => (g.meta as any)?.side === 'CREDIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    expect(Number(dr.toFixed(2))).toBe(150);
+    expect(Number(cr.toFixed(2))).toBe(150);
+    // Metadata retains raw gross 150.75 + fee 0.75 auditable:
+    const meta = (tx.metadata as any)?.alatpay ?? {};
+    expect(Number(meta.gross_amount_naira).toFixed(2)).toBe('150.75');
+    expect(Number(meta.provider_fee_amount_naira).toFixed(2)).toBe('0.75');
+    expect(meta.normalization_kind).toBe('gross_minus_fee');
+  });
+
+  // ============================================================
+  // T42 — gross already == expected 150 with fee 0.75 →
+  //       normalization kind=exact, effective amount = 150,
+  //       no blind subtraction of fee.
+  // ============================================================
+  it('T42 — gross=150.00 fee=0.75 expected=150.00 → SUCCESS, fee NOT subtracted (exact norm)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 150.00;
+    alatFeeAmount = 0.75;
+    invoiceRows.push({ id: 9002, invoiceNumber: 'INV/2026/00002', studentId: 91, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9043,
+      reference: 'PAY-20261008-EXACT01',
+      status: 'PENDING',
+      userId: 91,
+      invoiceId: 9002,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-EXACT01', { expectedTransactionId: 9043 });
+    expect(res.verified).toBe(true);
+    const tx = txRows[0];
+    expect(Number(tx.amount).toFixed(2)).toBe('150.00');
+    expect(tx.status).toBe('SUCCESS');
+    const inv = invoiceRows[0];
+    expect(Number(inv.amountPaid).toFixed(2)).toBe('150.00');
+    expect(receiptRows.length).toBe(1);
+    const meta = (tx.metadata as any)?.alatpay ?? {};
+    expect(Number(meta.gross_amount_naira).toFixed(2)).toBe('150.00');
+    expect(Number(meta.provider_fee_amount_naira).toFixed(2)).toBe('0.75');
+    expect(meta.normalization_kind).toBe('exact');
+  });
+
+  // ============================================================
+  // T43 — UNDERPAID: gross=149.75, fee=0.75, expected=150.00
+  //       gross-fee=149.00 < 150 → fail closed UNDERPAID
+  // ============================================================
+  it('T43 — gross=149.75 fee=0.75 expected=150.00 → UNDERPAID (fail closed, no ledger/receipt)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 149.75;
+    alatFeeAmount = 0.75;
+    invoiceRows.push({ id: 9003, invoiceNumber: 'INV/2026/00003', studentId: 92, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9044,
+      reference: 'PAY-20261008-UNDER1',
+      status: 'PENDING',
+      userId: 92,
+      invoiceId: 9003,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-UNDER1', { expectedTransactionId: 9044 });
+    expect(res.verified).toBe(false);
+    expect(res.status).toBe('UNDERPAID');
+    expect(txRows[0].status).toBe('UNDERPAID');
+    expect(invoiceRows[0].amountPaid).toBe(0);
+    expect(receiptRows.length).toBe(0);
+    expect(glRows.length).toBe(0);
+  });
+
+  // ============================================================
+  // T44 — OVERPAID: gross=151.75, fee=0.75, expected=150.00
+  //       gross-fee=151.00 > 150 → fail closed OVERPAID
+  // ============================================================
+  it('T44 — gross=151.75 fee=0.75 expected=150.00 → OVERPAID (fail closed, no ledger/receipt)', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 151.75;
+    alatFeeAmount = 0.75;
+    invoiceRows.push({ id: 9004, invoiceNumber: 'INV/2026/00004', studentId: 93, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9045,
+      reference: 'PAY-20261008-OVER1',
+      status: 'PENDING',
+      userId: 93,
+      invoiceId: 9004,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-OVER1', { expectedTransactionId: 9045 });
+    expect(res.verified).toBe(false);
+    expect(res.status).toBe('OVERPAID');
+    expect(txRows[0].status).toBe('OVERPAID');
+    expect(invoiceRows[0].amountPaid).toBe(0);
+    expect(receiptRows.length).toBe(0);
+    expect(glRows.length).toBe(0);
+  });
+
+  // ============================================================
+  // T45 — fee missing / zero → existing exact-match behavior,
+  //       no normalization applied.
+  // ============================================================
+  it('T45 — fee=0 expected=150 gross=150 → exact match, normalization_kind=exact, no subtract', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 150;
+    alatFeeAmount = 0;
+    invoiceRows.push({ id: 9005, invoiceNumber: 'INV/2026/00005', studentId: 94, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9046,
+      reference: 'PAY-20261008-FEE000',
+      status: 'PENDING',
+      userId: 94,
+      invoiceId: 9005,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-FEE000', { expectedTransactionId: 9046 });
+    expect(res.verified).toBe(true);
+    expect(Number(txRows[0].amount).toFixed(2)).toBe('150.00');
+    expect(Number(invoiceRows[0].amountPaid).toFixed(2)).toBe('150.00');
+    expect(receiptRows.length).toBe(1);
+    const meta = (txRows[0].metadata as any)?.alatpay ?? {};
+    expect(meta.normalization_kind).toBe('exact');
+  });
+
+  // ============================================================
+  // T46 — PAYSTACK unchanged: verify path returns paid amount
+  //       from Paystack response exactly; no fee subtraction.
+  // ============================================================
+  it('T46 — Paystack verification byte-equivalent: paid=10000kobo (100.00), no ALATPAY fields present', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    paystackKobo = 10000; // 100.00 NGN
+    paystackSuccess = true;
+    invoiceRows.push({ id: 9006, invoiceNumber: 'INV/2026/00006', studentId: 95, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9047,
+      reference: 'PAY-20261008-PSTK01',
+      status: 'PENDING',
+      userId: 95,
+      invoiceId: 9006,
+      expectedAmount: 100,
+      amount: 0,
+      gateway: 'PAYSTACK',
+      paystackReference: 'PSTK-VERIFY-0001',
+      metadata: { amount: { total: 100, base: 100, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-PSTK01', { expectedTransactionId: 9047 });
+    expect(res.verified).toBe(true);
+    expect(Number(txRows[0].amount).toFixed(2)).toBe('100.00');
+    expect(Number(invoiceRows[0].amountPaid).toFixed(2)).toBe('100.00');
+    expect(receiptRows.length).toBe(1);
+    // Paystack tx has no alatpay gross/fee metadata fields:
+    const payMeta = txRows[0].metadata as any;
+    expect(payMeta?.alatpay).toBeUndefined();
+    expect(payMeta?.paystack).toBeDefined();
+  });
+
+  // ============================================================
+  // T47 — SUCCESS normalized flow produces: exactly 1 receipt,
+  //       invoice applied 150 exactly, balanced GL 150 dr/150 cr,
+  //       no GATEWAY_FEE_EXPENSE (0.75 not in ledger at all).
+  // ============================================================
+  it('T47 — normalized success → 1 receipt, invoice 150.00 applied, balanced GL 150 dr/cr, no 0.75 expense entry', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 150.75;
+    alatFeeAmount = 0.75;
+    invoiceRows.push({ id: 9007, invoiceNumber: 'INV/2026/00007', studentId: 96, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9048,
+      reference: 'PAY-20261008-NORM01',
+      status: 'PENDING',
+      userId: 96,
+      invoiceId: 9007,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    await PaymentService.verifyPayment('PAY-20261008-NORM01', { expectedTransactionId: 9048 });
+    expect(receiptRows.length).toBe(1);
+    expect(Number(invoiceRows[0].amountPaid).toFixed(2)).toBe('150.00');
+    // Only dr/cr for 150. No 0.75 anywhere in GL amounts.
+    const allAmounts = glRows.map((g) => Number(g.amount));
+    const distinct = Array.from(new Set(allAmounts.map((a) => a.toFixed(2))));
+    expect(distinct).toEqual(['150.00']);
+    const dr = glRows
+      .filter((g) => (g.meta as any)?.side === 'DEBIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    const cr = glRows
+      .filter((g) => (g.meta as any)?.side === 'CREDIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    expect(Number(dr.toFixed(2))).toBe(150);
+    expect(Number(cr.toFixed(2))).toBe(150);
+  });
+
+  // ============================================================
+  // T48 — Idempotency for normalized flow: verify ×3 →
+  //       still 1 receipt, 1 GL dr/cr pair, invoice 150 applied
+  //       exactly once.
+  // ============================================================
+  it('T48 — normalized verify ×3 idempotent → 1 receipt, 1 balanced GL pair, invoice 150 applied once', async () => {
+    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    alatAmount = 150.75;
+    alatFeeAmount = 0.75;
+    invoiceRows.push({ id: 9008, invoiceNumber: 'INV/2026/00008', studentId: 97, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9049,
+      reference: 'PAY-20261008-IDEM01',
+      status: 'PENDING',
+      userId: 97,
+      invoiceId: 9008,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    await PaymentService.verifyPayment('PAY-20261008-IDEM01', { expectedTransactionId: 9049 });
+    await PaymentService.verifyPayment('PAY-20261008-IDEM01', { expectedTransactionId: 9049 });
+    await PaymentService.verifyPayment('PAY-20261008-IDEM01', { expectedTransactionId: 9049 });
+    expect(receiptRows.length).toBe(1);
+    expect(Number(invoiceRows[0].amountPaid).toFixed(2)).toBe('150.00');
+    const glSuccess = glRows.filter((g) => g.entryType === 'PAYMENT_SUCCESS');
+    expect(glSuccess.length).toBe(2);
+    const dr = glSuccess
+      .filter((g) => (g.meta as any)?.side === 'DEBIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    const cr = glSuccess
+      .filter((g) => (g.meta as any)?.side === 'CREDIT')
+      .reduce((a, b) => a + Number(b.amount), 0);
+    expect(Number(dr.toFixed(2))).toBe(150);
+    expect(Number(cr.toFixed(2))).toBe(150);
+  });
+
+  // ============================================================
+  // T49 — Metadata audit: raw ALATPay gross 150.75 + fee 0.75
+  //       remain stored separately in alatpay metadata object
+  //       alongside normalized values.
+  // ============================================================
+  it('T49 — metadata retains raw gross 150.75 and provider fee 0.75 alongside normalized effective 150.00', async () => {
+    const { prismaMock, txRows, invoiceRows } = setupBaseMocks();
+    alatAmount = 150.75;
+    alatFeeAmount = 0.75;
+    alatExtra = { Id: 'd7725744-785f-46c9-821b-2e9d5d6f7ac3' };
+    invoiceRows.push({ id: 9009, invoiceNumber: 'INV/2026/00009', studentId: 98, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
+    txRows.push({
+      id: 9050,
+      reference: 'PAY-20261008-META01',
+      status: 'PENDING',
+      userId: 98,
+      invoiceId: 9009,
+      expectedAmount: 150,
+      amount: 0,
+      gateway: 'ALATPAY',
+      alatpayFinalTransactionId: 'd7725744-785f-46c9-821b-2e9d5d6f7ac3',
+      metadata: { amount: { total: 150, base: 150, serviceCharge: 0, gatewayFee: 0 } },
+      updatedAt: new Date(),
+    });
+    const PaymentService = require('../services/payment').PaymentService;
+    const res = await PaymentService.verifyPayment('PAY-20261008-META01', {
+      providerReference: 'd7725744-785f-46c9-821b-2e9d5d6f7ac3',
+      expectedTransactionId: 9050,
+    });
+    expect(res.verified).toBe(true);
+    const tx = txRows[0];
+    const alatMeta = (tx.metadata as any)?.alatpay ?? {};
+    expect(Number(alatMeta.gross_amount_naira).toFixed(2)).toBe('150.75');
+    expect(Number(alatMeta.provider_fee_amount_naira).toFixed(2)).toBe('0.75');
+    expect(Number(alatMeta.paid_naira).toFixed(2)).toBe('150.00');
+    expect(Number(alatMeta.paid_minor)).toBe(15000);
+    expect(alatMeta.normalization_kind).toBe('gross_minus_fee');
+    expect(alatMeta.final_transaction_id).toBe('d7725744-785f-46c9-821b-2e9d5d6f7ac3');
   });
 });

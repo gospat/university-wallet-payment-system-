@@ -343,6 +343,9 @@ export class AlatpayProvider implements IPaymentProvider {
           : TransactionStatus.PENDING;
       const amtNaira = money(payload.Amount ?? payload.amount ?? 0);
       const feeNaira = money(payload.FeeAmount ?? payload.feeAmount ?? 0);
+      const grossNaira = money(
+        payload.Amount ?? payload.amount ?? 0,
+      );
       const channel = (payload.Channel ?? payload.channel ?? null) as string | null;
       const currency = (payload.Currency ?? payload.currency ?? 'NGN') as string;
       const updatedAt = payload.UpdatedAt ?? payload.updatedAt ?? payload.CreatedAt ?? payload.createdAt;
@@ -357,6 +360,8 @@ export class AlatpayProvider implements IPaymentProvider {
         currency,
         providerStatus: rawStatus || normalized,
         expectedGatewayFeeNaira: feeNaira > 0 ? feeNaira : undefined,
+        providerGrossAmountNaira: grossNaira,
+        providerFeeAmountNaira: feeNaira > 0 ? feeNaira : undefined,
         raw: payload,
       };
     } catch (error: any) {

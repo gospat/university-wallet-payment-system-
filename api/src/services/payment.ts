@@ -560,11 +560,14 @@ export class PaymentService {
         id: true, gateway: true, reference: true, paystackReference: true, alatpayReference: true,
         alatpayOrderReference: true, alatpayInitPaymentReference: true, alatpayFinalTransactionId: true,
         alatpayCheckoutUrl: true, alatpaySessionId: true, metadata: true, status: true, updatedAt: true,
+        expectedAmount: true, amount: true,
       },
     });
     const preTx = PaymentService.pickAlatpayBestMatch(preRows, ref);
     if (!preTx) throw new AppError(i18n.errors.payment.transactionNotFound, 404);
     const txGateway: PaymentGateway = preTx.gateway ?? PaymentGateway.ALATPAY;
+    const normalizationExpectedNaira = money(Number(preTx.expectedAmount ?? 0));
+    const normalizationExpectedKobo = Math.round(normalizationExpectedNaira * 100);
     const provider = getPaymentProvider(txGateway);
     // Pass the correct-looking ref to the provider:
     // Split lookup ref vs provider verify ref. Explicit override wins.
@@ -585,12 +588,64 @@ export class PaymentService {
     // 1. Call provider verify (throws AppError on failure).
     const verifyResult = await provider.verify(providerRefToVerify);
     const providerRef = String(verifyResult.providerReference ?? providerRefToVerify);
-    const paidMinor = Number(verifyResult.paidAmountMinor);
-    const paidNaira = Number(verifyResult.paidAmountNaira);
+    let paidMinor = Number(verifyResult.paidAmountMinor);
+    let paidNaira = Number(verifyResult.paidAmountNaira);
     const channel = verifyResult.channel;
     const paidAt = verifyResult.paidAt;
     const providerStatus = String(verifyResult.providerStatus ?? '').toLowerCase();
     const rawPayload = verifyResult.raw ?? {};
+
+    // ============================================================
+    // 1a. ALATPay gross-vs-fee normalization (customer-borne fee).
+    //     Normalization is ONLY applied when ONE of these equations
+    //     matches within the standard 1-kobo tolerance:
+    //       a) providerGrossAmountNaira == expectedAmount
+    //       b) providerGrossAmountNaira - providerFeeAmountNaira == expectedAmount
+    //     If case (b) matches: effective paid amount = gross - fee, so the
+    //     ₦0.75 customer surcharge does NOT create an overpaid state and
+    //     is NOT treated as a university GATEWAY_FEE_EXPENSE. The raw
+    //     gross/fee values remain preserved separately inside metadata
+    //     for audit (metadata.alatpay.gross_amount_naira + fee_amount).
+    //     Otherwise (no equation match) we keep the provider raw amount
+    //     and let the existing underpaid/overpaid fail-closed path run.
+    // ============================================================
+    type AlatpayNormalization = {
+      kind: 'exact' | 'gross_minus_fee' | 'none';
+      grossNaira: number;
+      feeNaira: number;
+      grossMinor: number;
+      feeMinor: number;
+    };
+    let alatpayNormalization: AlatpayNormalization | null = null;
+    if (
+      txGateway === PaymentGateway.ALATPAY &&
+      Number.isFinite(Number(verifyResult.providerGrossAmountNaira))
+    ) {
+      const grossNaira = money(Number(verifyResult.providerGrossAmountNaira));
+      const feeNaira = money(Number(verifyResult.providerFeeAmountNaira ?? 0));
+      const grossMinor = Math.round(grossNaira * 100);
+      const feeMinor = Math.round(feeNaira * 100);
+      // NOTE: we compare against normalizationExpectedKobo computed from
+      // preTx.expectedAmount so normalization is deterministic and does
+      // not require later assignment of outerExpectedKobo.
+      const grossMatchesExpected = Math.abs(grossMinor - normalizationExpectedKobo) <= 1;
+      const grossMinusFeeMinor = grossMinor - feeMinor;
+      const grossMinusFeeMatches = Math.abs(grossMinusFeeMinor - normalizationExpectedKobo) <= 1;
+      if (grossMatchesExpected) {
+        // Do not subtract fee when gross already matches expected (test case #2).
+        alatpayNormalization = { kind: 'exact', grossNaira, feeNaira, grossMinor, feeMinor };
+        paidMinor = grossMinor;
+        paidNaira = grossNaira;
+      } else if (grossMinusFeeMatches && feeMinor >= 0) {
+        // Legitimate customer-borne fee scenario (test case #1).
+        alatpayNormalization = { kind: 'gross_minus_fee', grossNaira, feeNaira, grossMinor, feeMinor };
+        const effectiveMinor = grossMinor - feeMinor;
+        paidMinor = effectiveMinor;
+        paidNaira = money(effectiveMinor / 100);
+      } else {
+        alatpayNormalization = { kind: 'none', grossNaira, feeNaira, grossMinor, feeMinor };
+      }
+    }
 
     // 1b. Handle provider-specific metadata reads (paystack still may pass transaction_id via metadata)
     let transactionId: number | undefined;
@@ -837,6 +892,9 @@ export class PaymentService {
           channel,
           currency: verifyResult.currency ?? 'NGN',
           fee_amount: verifyResult.expectedGatewayFeeNaira ?? null,
+          gross_amount_naira: alatpayNormalization ? alatpayNormalization.grossNaira : null,
+          provider_fee_amount_naira: alatpayNormalization ? alatpayNormalization.feeNaira : (verifyResult.providerFeeAmountNaira ?? null),
+          normalization_kind: alatpayNormalization ? alatpayNormalization.kind : null,
           provider_status: providerStatus,
         };
       }

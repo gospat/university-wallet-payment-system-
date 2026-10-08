@@ -84,6 +84,8 @@ export type VerifyResult = {
   currency: string;
   providerStatus: string;
   expectedGatewayFeeNaira?: number;
+  providerGrossAmountNaira?: number;
+  providerFeeAmountNaira?: number;
   raw: any;
 };
 
