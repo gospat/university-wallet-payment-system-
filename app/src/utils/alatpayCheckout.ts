@@ -95,7 +95,6 @@ export function loadAlatpaySdk(env?: AlatpayCheckoutEnv): Promise<void> {
       script.defer = true;
       script.setAttribute('data-alatpay-sdk-env', effectiveEnv);
       script.setAttribute('data-alatpay-role', 'checkout-sdk');
-      script.crossOrigin = 'anonymous';
       script.referrerPolicy = 'strict-origin-when-cross-origin';
       script.addEventListener('load', () => {
         if (isWindowAlatpayReady()) {
