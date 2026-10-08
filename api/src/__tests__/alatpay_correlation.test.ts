@@ -1312,17 +1312,23 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     expect(sanitized.fallback.enableRedirect).toBe(false);
     expect(sanitized.fallback.enablePopup).toBe(true);
     expect(sanitized.fallback.handshakeTimeoutMs).toBe(4500);
-    // NO credential fields anywhere except the single intentional top-level PUBLIC apiKey:
-    expect(sanitized).toHaveProperty('apiKey', expect.any(String));
-    expect(typeof sanitized.apiKey).toBe('string');
-    expect(sanitized.apiKey.length).toBeGreaterThanOrEqual(8);
+    // NO credential fields anywhere except the single intentional top-level PUBLIC publicKey:
+    expect(sanitized).toHaveProperty('publicKey', expect.any(String));
+    expect(typeof sanitized.publicKey).toBe('string');
+    expect(sanitized.publicKey.length).toBeGreaterThanOrEqual(8);
+    // apiKey MUST NOT appear anywhere (browser-safe frontend never sends subscription-key bearing field)
+    expect(sanitized).not.toHaveProperty('apiKey');
     const hasNestedKey = (node: unknown, depth = 0): boolean => {
       if (node === null || node === undefined) return false;
       if (Array.isArray(node)) return node.some((x) => hasNestedKey(x, depth + 1));
       if (typeof node === 'object') {
-        const bad = /api[_-]?key|subscription[_-]?key|secret|webhook[_-]?secret|ocp[_-]?apim/i;
+        const bad = /subscription[_-]?key|secret|secret[_-]?key|webhook[_-]?secret|ocp[_-]?apim|authorization|bearer|auth|password|token|credential|client[_-]?secret|private[_-]?key/i;
+        // At any depth, disallow "apiKey" — the browser must never receive the
+        // subscription-key-carrying field name that triggers q() business-for-plugin.
+        if (/^api[_-]?key$/i.test(String(node !== null && typeof node === 'object' ? '' : ''))) return false;
         for (const k of Object.keys(node as Record<string, unknown>)) {
-          if (depth > 0 && bad.test(k)) return true;
+          if (/^api[_-]?key$/i.test(k)) return true;
+          if (bad.test(k)) return true;
           if (hasNestedKey((node as Record<string, unknown>)[k], depth + 1)) return true;
         }
       }
@@ -1330,6 +1336,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     };
     expect(hasNestedKey(sanitized, 0)).toBe(false);
     const jsonFlat = JSON.stringify(sanitized);
+    expect(jsonFlat).not.toMatch(/"api[_-]?key"\s*:/i);
     expect(jsonFlat).not.toMatch(/subscription[_-]?key/i);
     expect(jsonFlat).not.toMatch(/secret/i);
   });
@@ -1882,6 +1889,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     // ---- EXACT cfg builder (copied verbatim from app/src/utils/alatpayCheckout.ts launchAlatpayNativeModal) ----
     const fallback = checkout.fallback ?? {};
     const cfg: any = {
+      publicKey: checkout.publicKey,
       businessId: checkout.businessId,
       business: checkout.business,
       amount: checkout.amount,
@@ -1889,6 +1897,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
       email: checkout.email ?? undefined,
       firstName: checkout.firstName ?? undefined,
       lastName: checkout.lastName ?? undefined,
+      phone: checkout.phone ?? undefined,
       autoCloseModal: checkout.autoCloseModal ?? true,
       metadata: checkout.metadata ?? {},
       fallback: {
@@ -1900,14 +1909,29 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     // ---- Assertions ----
     expect(cfg.businessId).toBe('BUSID-002');
     expect(cfg.business).toEqual(business);
-    // No secret fields anywhere in cfg (nested)
+    // publicKey MUST be present as the browser-safe publishable field:
+    expect(cfg).toHaveProperty('publicKey', expect.any(String));
+    expect(typeof cfg.publicKey).toBe('string');
+    expect(cfg.publicKey.length).toBeGreaterThanOrEqual(8);
+    // apiKey MUST NOT be present (carries subscription-key semantics in the browser SDK q())
+    expect(cfg).not.toHaveProperty('apiKey');
+    expect(cfg).not.toHaveProperty('API_KEY');
+    expect(cfg).not.toHaveProperty('api_key');
+    // Phone is optional and forwarded when available (undefined for this test case)
+    expect('phone' in cfg).toBe(true);
+    // No secret fields anywhere in cfg (nested) — NOTE: publicKey top-level is the ALLOWED browser-safe exception.
+    // apiKey (any spelling) is NEVER allowed at any depth.
     const secretKeyPatterns =
-      /^(.*[._\- ])?(apiKey|apikey|api_key|secret|secretKey|secret_key|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
+      /^(.*[._\- ])?(secret|secretKey|secret_key|subscriptionKey|subscription_key|ocp[-_]apim[-_]subscription[-_]key|authorization|bearer|auth|password|token|passwd|privateKey|private_key|webhookSecret|webhook_secret|clientSecret|client_secret|credential|credentials)$/i;
     const walk = (node: any, trail: string[] = []): string[] => {
       if (node == null) return [];
       if (Array.isArray(node)) return node.flatMap((v, i) => walk(v, [...trail, `[${i}]`]));
       if (typeof node === 'object') {
         return Object.keys(node).flatMap((k) => {
+          // publicKey at top-level ONLY → explicit browser-safe allowlist:
+          if (trail.length === 0 && /^publicKey$/i.test(k)) return [];
+          // apiKey at any depth is disallowed (triggers SDK q() browser-side credential path)
+          if (/^api[_-]?key$/i.test(k)) return [`${[...trail, k].join('.')}`];
           const hit = secretKeyPatterns.test(k) ? [`${[...trail, k].join('.')}`] : [];
           return [...hit, ...walk((node as any)[k], [...trail, k])];
         });

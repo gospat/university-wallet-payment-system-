@@ -48,7 +48,7 @@ function constantTimeEqual(a: Buffer, b: Buffer): boolean {
 
 export function getActiveAlatpaySecretKey(): string {
   const mode = process.env.ALATPAY_MODE === 'prod' ? 'prod' : 'sandbox';
-  const simpleKey = process.env.ALATPAY_SECRET_KEY;
+  const simpleKey = process.env.ALATPAY_SECRET_KEY ?? process.env.WEMA_ALATPAY_SECRET_KEY;
   if (simpleKey && String(simpleKey).trim()) {
     return String(simpleKey).trim();
   }
@@ -493,7 +493,7 @@ export type AlatpayPublicCheckoutMetadata = {
 };
 
 export type AlatpayPublicCheckout = {
-  apiKey: string;
+  publicKey: string;
   amount: number;
   currency: 'NGN';
   businessId: string;
@@ -599,7 +599,7 @@ export function buildSanitizedAlatpayPublicCheckout(
       ? String(ctx.email).trim()
       : `${bellsRef}@${getDefaultEmailDomain()}`;
   const safe: AlatpayPublicCheckout = {
-    apiKey: publicKey,
+    publicKey: publicKey,
     amount: amountNgnClean,
     currency: 'NGN',
     businessId: busId,
@@ -621,7 +621,7 @@ export function buildSanitizedAlatpayPublicCheckout(
     },
   };
   const postScan = scanRecursivelyForSecretFields(safe, [], {
-    allowExactTopLevelKeys: new Set(['apiKey']),
+    allowExactTopLevelKeys: new Set(['publicKey']),
   });
   if (postScan) {
     throw new AlatpayPopupUnavailableError(
