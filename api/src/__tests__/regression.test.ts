@@ -2908,6 +2908,82 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(pCatchRegion).not.toMatch(/prisma\.transaction\.update/);
       expect(pCatchRegion).not.toMatch(/TransactionStatus\.(FAILED|SUCCESS)/);
     });
+
+    it('TR-40 TxnDetailsDrawer Rules-of-Hooks: all hooks (useState/useEffect/useMemo) execute UNCONDITIONALLY before the first conditional early return (prevents blank-screen "Rendered more hooks than previous render" during Check Pending Payment open/close)', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const drawerSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'components', 'TxnDetailsDrawer.tsx'), 'utf8');
+      // Remove comments so that hook names in documentation/comments don't inflate counts.
+      // Use a simple string scrubber rather than regex to avoid Node regex engine quirks.
+      const stripLineComments = (s: string): string => {
+        let out = '';
+        let inStr: '"' | "'" | '`' | null = null;
+        let escape = false;
+        let i = 0;
+        while (i < s.length) {
+          const c = s.charAt(i);
+          const n = s.charAt(i + 1);
+          if (inStr) {
+            out += c;
+            if (escape) { escape = false; }
+            else if (c === '\\') { escape = true; }
+            else if (c === inStr) { inStr = null; }
+            i++; continue;
+          }
+          if (c === '"' || c === "'" || c === '`') { inStr = c as '"' | "'" | '`'; out += c; i++; continue; }
+          if (c === '/' && n === '/') {
+            while (i < s.length && s.charAt(i) !== '\n') i++;
+            out += '  ';
+            continue;
+          }
+          if (c === '/' && n === '*') {
+            i += 2;
+            while (i + 1 < s.length && !(s.charAt(i) === '*' && s.charAt(i + 1) === '/')) i++;
+            i += 2;
+            out += '  ';
+            continue;
+          }
+          out += c;
+          i++;
+        }
+        return out;
+      };
+      // Component entry: line containing the actual component arrow function
+      const componentHead = drawerSrc.indexOf('TxnDetailsDrawerProps> = ({ isOpen, onClose, transaction, onStatusChanged }) => {');
+      expect(componentHead).toBeGreaterThan(0);
+      // Early return position (exactly the closed-render null guard)
+      const earlyReturnPos = drawerSrc.indexOf('if (!isOpen) return null;', componentHead);
+      expect(earlyReturnPos).toBeGreaterThan(componentHead);
+      const beforeEarlyReturn = stripLineComments(drawerSrc.slice(componentHead, earlyReturnPos));
+      const afterEarlyReturn = stripLineComments(drawerSrc.slice(earlyReturnPos, earlyReturnPos + 16000));
+      // Hook call detection: a React hook NAME followed by either `<` (TypeScript generic) or `(` (args).
+      // This correctly picks up `useState<ReverifyUi>(...)`, `useEffect(() => {...}, [...])`, `useMemo(() => x, [...])`, etc.
+      const HOOK_NAME_RE = /\b(use(?:State|Effect|Memo|Callback|Ref|Reducer|Context|ImperativeHandle|LayoutEffect|DebugValue|DeferredValue|Transition|Id|SyncExternalStore|InsertionEffect))(?=\s*[<(])/g;
+      const collectHooks = (chunk: string): string[] => {
+        const found: string[] = [];
+        let m: RegExpExecArray | null;
+        HOOK_NAME_RE.lastIndex = 0;
+        while ((m = HOOK_NAME_RE.exec(chunk)) !== null) found.push(m[1]);
+        return found;
+      };
+      const hooksBefore = collectHooks(beforeEarlyReturn);
+      const hooksAfter = collectHooks(afterEarlyReturn);
+      // A. Expected exact hook set before early return (closed + open render both execute these): 3 useState, 3 useEffect, 1 useMemo = 7
+      expect(hooksBefore.filter((h) => h === 'useState')).toHaveLength(3);
+      expect(hooksBefore.filter((h) => h === 'useEffect')).toHaveLength(3);
+      expect(hooksBefore.filter((h) => h === 'useMemo')).toHaveLength(1);
+      expect(hooksBefore).toHaveLength(7);
+      // B. CRITICAL invariant: ZERO hooks AFTER the early return on the closed render path
+      expect(hooksAfter).toHaveLength(0);
+      // C. Explicit position-sensitive regression: `cooldownSecondsLeft = useMemo` only exists BEFORE early return in the original source file (never after)
+      const origBefore = drawerSrc.slice(0, earlyReturnPos);
+      const origAfter = drawerSrc.slice(earlyReturnPos, earlyReturnPos + 16000);
+      expect(origBefore).toMatch(/cooldownSecondsLeft\s*=\s*useMemo\s*\(/);
+      expect(origAfter).not.toMatch(/cooldownSecondsLeft\s*=\s*useMemo\s*\(/);
+      // D. Consumer path (Fees.tsx "Check Pending Payment" → openPendingInDrawer → setPageDrawerOpen(true)) is pure state-setting, no hooks called inside click handlers
+      const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
+      expect(feesSrc).toMatch(/openPendingInDrawer\s*=\s*\(\s*\)\s*=>\s*\{[\s\S]{0,400}setPageDrawerOpen\(\s*true\s*\)/);
+    });
   });
 });
 

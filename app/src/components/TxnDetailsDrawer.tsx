@@ -164,6 +164,21 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
     return () => window.clearInterval(iv);
   }, [reverifyUi.kind, (reverifyUi as any).cooldownMs]);
 
+  // ALL hooks MUST be declared ABOVE any conditional return. Rules-of-Hooks:
+  // the closed (!isOpen) return below must not skip any hook that runs on open.
+  // Hook list so far (must match every render):
+  //   1. useState(reverifyUi)
+  //   2. useState(cooldownTick)
+  //   3. useState(downloadLoading)
+  //   4. useEffect(Escape key listener)
+  //   5. useEffect(reset on isOpen/tx change)
+  //   6. useEffect(cooldown interval)
+  //   7. useMemo(cooldownSecondsLeft)   ← MOVED HERE from after L300
+  const cooldownSecondsLeft = useMemo(() => {
+    if (reverifyUi.kind !== 'cooldown') return 0;
+    return Math.ceil(Math.max(0, cooldownTick) / 1000);
+  }, [reverifyUi, cooldownTick]);
+
   if (!isOpen) return null;
 
   const tx = transaction || {};
@@ -297,11 +312,6 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
       }
     }
   };
-
-  const cooldownSecondsLeft = useMemo(() => {
-    if (reverifyUi.kind !== 'cooldown') return 0;
-    return Math.ceil(Math.max(0, cooldownTick) / 1000);
-  }, [reverifyUi, cooldownTick]);
 
   return (
     <div className="fixed inset-0 z-50">
