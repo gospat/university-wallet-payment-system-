@@ -2732,5 +2732,182 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(region).not.toMatch(/invoice\.update\(\s*\{[\s\S]{0,300}amountPaid:/);
     });
   });
+
+  describe('TR-39 Release-Gate Corrections (nav, pending UX, missing-UUID, age-based presentation)', () => {
+    it('TR-39.A Payment History View + row-click both navigate /student/invoices/:id directly (no InvoiceDetailModal intermediary, no row drawer opened for invoice rows)', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
+      // Canonical navigation constant openInvoice definition
+      expect(feesSrc).toMatch(/openInvoice\s*=\s*\(\s*id:\s*number\s*\)\s*=>\s*navigate\(\s*`\/student\/invoices\/\$\{id\}`\s*\)/);
+      // Row onClick opens invoice (row-level link nav, not drawer)
+      expect(feesSrc).toMatch(/onClick=\{\s*\(\s*\)\s*=>\s*openInvoice\(\s*inv\.id\s*\)/);
+      // View button also opens invoice (same canonical nav) — uses translation key t.view, not literal "View"
+      expect(feesSrc).toMatch(/onClick=\{\s*\(\s*\)\s*=>\s*openInvoice\(\s*inv\.id\s*\)\s*\}[\s\S]{0,800}t\.view[\s\S]{0,80}→/);
+      // No InvoiceDetailModal component declaration remains; no modalInvoiceId state
+      expect(feesSrc).not.toMatch(/InvoiceDetailModal/);
+      expect(feesSrc).not.toMatch(/modalInvoiceId/);
+      // InvoicesPage no longer renders TxnDetailsDrawer at its root (drawer only for transaction rows on invoice detail page)
+      const invoicesDef = feesSrc.indexOf('const InvoicesPage:');
+      const invoicesEnd = feesSrc.indexOf('const BrowseCataloguePage:', invoicesDef);
+      const invoicesRegion = feesSrc.slice(invoicesDef, invoicesEnd > 0 ? invoicesEnd : invoicesDef + 25000);
+      expect(invoicesRegion).not.toMatch(/<TxnDetailsDrawer/);
+    });
+
+    it('TR-39.B Unresolved pending transaction blocks Pay Now and shows Check Pending Payment as primary action; backend canPay requires zero pending rows', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
+      const studentFeeSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'studentFee.ts'), 'utf8');
+      // Blocking pending conditional renders Check Pending Payment — expand window since blockingPanel ternary + wrapper classes sit between
+      expect(feesSrc).toMatch(/blockingPending\s*&&[\s\S]{0,2500}Check Pending Payment/);
+      // Pay Now else branch is not offered as primary when a blocking pending exists
+      expect(feesSrc).toMatch(/blockingPending\s*&&\s*blockingPanel/);
+      // Backend canPay requires pendingTransactions.length === 0 (matches A5.1 pending ceiling)
+      expect(studentFeeSrc).toMatch(/pendingTransactions\.length\s*===\s*0/);
+      // initiatePayment proceedPayment guard blocks on blockingPending too (frontend double guard)
+      expect(feesSrc).toMatch(/proceedPayment\s*=\s*async\s*\(\s*\)\s*=>\s*\{[\s\S]{0,200}!pay\?\.canPay\s*\|\|\s*paying\s*\|\|\s*blockingPending/);
+      // No second payment initiated inside Check Pending Payment button: onClick invokes openPendingInDrawer only
+      expect(feesSrc).toMatch(/openPendingInDrawer\s*=\s*\(\s*\)\s*=>\s*\{[\s\S]{0,300}setPageSelectedTxn\(\s*blockingPending\s*\)/);
+    });
+
+    it('TR-39.C Missing ALATPAY final UUID (HTTP 202 reason=provider_final_uuid_unavailable) renders friendly Confirmation Still Pending without technical wording, and never marks terminal', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const drawerSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'components', 'TxnDetailsDrawer.tsx'), 'utf8');
+      const studentsSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'students.ts'), 'utf8');
+      // Backend returns reason provider_final_uuid_unavailable for missing UUID path
+      expect(studentsSrc).toMatch(/providerMissingReason\s*=\s*['"]provider_final_uuid_unavailable['"]/);
+      expect(studentsSrc).toMatch(/status:\s*['"]pending_confirmation['"]/);
+      expect(studentsSrc).toMatch(/canRetry:\s*false/);
+      // Frontend branches explicitly on that reason string
+      expect(drawerSrc).toMatch(/reason\s*===\s*['"]provider_final_uuid_unavailable['"]\s*\)\s*\{/);
+      // Branch renders kind='conflict' (amber Confirmation Still Pending panel not slate unavailable)
+      expect(drawerSrc).toMatch(/reason\s*===\s*['"]provider_final_uuid_unavailable['"][\s\S]{0,300}kind:\s*['"]conflict['"]/);
+      // Hardcoded friendly message contains "We have not yet received enough information"
+      expect(drawerSrc).toMatch(/We have not yet received enough information from the payment provider to confirm this payment automatically/);
+      // Technical wording is NOT shown to students anywhere in the student-visible rendering JSX (conflict + unavailable panels)
+      // Internal reason stored in reverifyUi state object is for diagnostics only; must never appear in JSX text output
+      const conflictRenderStart = drawerSrc.indexOf(`reverifyUi.kind === 'conflict'`);
+      const conflictRenderEnd = drawerSrc.indexOf(`reverifyUi.kind === 'unavailable'`, conflictRenderStart);
+      const conflictRenderSlice = drawerSrc.slice(
+        conflictRenderStart > 0 ? conflictRenderStart : 0,
+        conflictRenderEnd > 0 ? conflictRenderEnd : (conflictRenderStart > 0 ? conflictRenderStart + 2500 : 2500),
+      );
+      // Also check the unavailable rendering panel does not dump backend raw message or reason text
+      const unavailableRenderStart = conflictRenderEnd;
+      const unavailableRenderEnd = drawerSrc.indexOf('setPageDrawerOpen &&', unavailableRenderStart);
+      const unavailableRenderSlice = drawerSrc.slice(
+        unavailableRenderStart > 0 ? unavailableRenderStart : 0,
+        unavailableRenderEnd > 0 ? unavailableRenderEnd : (unavailableRenderStart > 0 ? unavailableRenderStart + 3000 : 3000),
+      );
+      // Conflict UI visible output: forbidden technical tokens never rendered
+      expect(conflictRenderSlice).not.toMatch(/provider_final_uuid_unavailable/);
+      expect(conflictRenderSlice).not.toMatch(/final UUID/i);
+      expect(conflictRenderSlice).not.toMatch(/provider transaction identifier not recorded/i);
+      expect(conflictRenderSlice).not.toMatch(/not recorded locally/i);
+      expect(conflictRenderSlice).not.toMatch(/correlation/);
+      expect(conflictRenderSlice).not.toMatch(/database/);
+      // Conflict UI visible output: friendly title and message ARE rendered (positive check)
+      expect(conflictRenderSlice).toMatch(/Confirmation Still Pending/);
+      expect(conflictRenderSlice).toMatch(/Do not make another payment/);
+      expect(conflictRenderSlice).toMatch(/contact\s*<b>Bursary<\/b>/);
+      // Unavailable panel never renders raw reason literals to student (only hardcoded friendly text)
+      expect(unavailableRenderSlice).not.toMatch(/provider_final_uuid_unavailable/);
+      expect(unavailableRenderSlice).not.toMatch(/provider_unavailable.*[a-z]/);
+      // Also: backend missing-UUID path does zero prisma writes (pure HTTP 202 return before any update)
+      const startIdx = studentsSrc.indexOf('providerMissingReason');
+      const endIdx = studentsSrc.indexOf('// Run authoritative server-side provider verification', startIdx);
+      const missingUuidRegion = studentsSrc.slice(startIdx, endIdx > 0 ? endIdx : startIdx + 1500);
+      expect(missingUuidRegion).not.toMatch(/prisma\.(transaction|transaction)?\.update/);
+      expect(missingUuidRegion).not.toMatch(/\.create\(/);
+      expect(missingUuidRegion).not.toMatch(/\.upsert\(/);
+      expect(missingUuidRegion).not.toMatch(/TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // No initiate/second payment in drawer when missing UUID: button label remains Check Payment Status
+      expect(drawerSrc).toMatch(/Check Payment Status/);
+    });
+
+    it('TR-39.D Old pending transaction remains financially PENDING and receives derived Confirmation Required/Pending Review/Awaiting Confirmation presentation labels with named threshold constant (AGE != FAILED)', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
+      const drawerSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'components', 'TxnDetailsDrawer.tsx'), 'utf8');
+      const studentFeeSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'studentFee.ts'), 'utf8');
+      // Named threshold constant exposed (not scattered magic numbers)
+      expect(feesSrc).toMatch(/PENDING_REVIEW_THRESHOLD_MINUTES\s*=\s*60\s*\*\s*24/);
+      expect(drawerSrc).toMatch(/DRAWER_PENDING_REVIEW_THRESHOLD_MINUTES\s*=\s*60\s*\*\s*24/);
+      // Uses minutesAge compared against the threshold
+      expect(feesSrc).toMatch(/minutesAge\s*<\s*PENDING_REVIEW_THRESHOLD_MINUTES/);
+      expect(drawerSrc).toMatch(/minutesAge\s*<\s*DRAWER_PENDING_REVIEW_THRESHOLD_MINUTES/);
+      // Labels present: Awaiting Confirmation / Confirmation Required / Pending Review
+      expect(feesSrc).toMatch(/Awaiting Confirmation/);
+      expect(feesSrc).toMatch(/Confirmation Required/);
+      expect(feesSrc).toMatch(/Pending Review/);
+      expect(drawerSrc).toMatch(/Awaiting Confirmation/);
+      expect(drawerSrc).toMatch(/Confirmation Required/);
+      expect(drawerSrc).toMatch(/Pending Review/);
+      // UUID-presence heuristic (simple shape check: 36 chars + 5 segments) used, never DB write
+      expect(feesSrc).toMatch(/finalTxId\.trim\(\)\.length\s*===\s*36[\s\S]{0,60}split\('-'\)\.length\s*===\s*5/);
+      // Age classification is PURE presentation: ZERO prisma writes / ZERO terminal status enums in the helper body region
+      const helperStart = feesSrc.indexOf('const derivePendingPresentation');
+      const helperEnd = feesSrc.indexOf('const StatusCellWithPending', helperStart);
+      const deriveBody = feesSrc.slice(helperStart, helperEnd > 0 ? helperEnd : helperStart + 4000);
+      expect(deriveBody).not.toMatch(/prisma/);
+      expect(deriveBody).not.toMatch(/\.update\(|\.create\(|\.upsert\(|\.delete/);
+      expect(deriveBody).not.toMatch(/TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED|CANCELLED|REFUNDED)/);
+      expect(deriveBody).not.toMatch(/PaymentStatus\.(FAILED|SUCCESS)/);
+      // getInvoiceDetail backend still has no DB write terminalization by age (AGE != FAILED invariant structural proof)
+      const gDef = studentFeeSrc.indexOf('static async getInvoiceDetail');
+      // Use the next static method as sentinel OR fall back to a 30 000 char window since method bodies are large
+      const gNextMethod = [
+        'static async listInvoices',
+        'static async initiatePayment',
+        'static async getStudentTransactions',
+      ]
+        .map((name) => studentFeeSrc.indexOf(name, gDef + 20))
+        .filter((i) => i > 0)
+        .sort((a, b) => a - b)[0];
+      const gBody = studentFeeSrc.slice(gDef, gNextMethod > 0 ? gNextMethod : gDef + 30000);
+      expect(gBody).not.toMatch(/PENDING\s*->\s*FAILED/);
+      expect(gBody).not.toMatch(/\.update\s*\(\s*\{[\s\S]{0,500}status:\s*['"]FAILED['"]/);
+      // Also assert on whole file: blockingPendingTransaction is assigned from pendingTransactions[0] ?? null
+      expect(studentFeeSrc).toMatch(/blockingPendingTransaction\s*:\s*any\s*\|\s*null\s*=\s*pendingTransactions\[0\]\s*\?\?\s*null/);
+    });
+
+    it('TR-39.E Authoritative FAILED only re-enables Pay Now / new attempt; pending rows continue to block initiation; no terminal-state downgrade by UI', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const studentFeeSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'studentFee.ts'), 'utf8');
+      const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
+      // canPay composition includes balance && not cancelled/refunded/reversed && ZERO pending rows
+      expect(studentFeeSrc).toMatch(/canPay:[\s\S]{0,300}balance\s*>\s*0[\s\S]{0,300}status\s*!==\s*['"]CANCELLED['"][\s\S]{0,300}status\s*!==\s*['"]REFUNDED['"][\s\S]{0,300}status\s*!==\s*['"]REVERSED['"][\s\S]{0,300}pendingTransactions\.length\s*===\s*0/);
+      // UI Pay Now branch only offered in the else-of-blockingPending (enlarged window; else has nested canPay ternary before t.payButton)
+      expect(feesSrc).toMatch(/blockingPending\s*&&\s*blockingPanel\s*\?[\s\S]{0,2500}\)\s*:\s*\([\s\S]{0,800}t\.payButton/);
+      // UI proceedPayment short-returns when blockingPending is present
+      expect(feesSrc).toMatch(/proceedPayment[\s\S]{0,120}if\s*\(\s*!pay\?\.canPay\s*\|\|\s*paying\s*\|\|\s*blockingPending\s*\)\s*return;/);
+    });
+
+    it('TR-39.F Provider unavailable / network timeout / unknown state does not unlock duplicate payment, keeps tx preserved, shows Unable to Confirm Right Now friendly fallback', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const drawerSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'components', 'TxnDetailsDrawer.tsx'), 'utf8');
+      const studentsSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'students.ts'), 'utf8');
+      // The general uiState === unavailable fallback still exists (for real network / provider unavailable cases)
+      const unavailableIdx = drawerSrc.indexOf(`uiState === 'unavailable'`);
+      const fallbackSlice = drawerSrc.slice(unavailableIdx, unavailableIdx + 1500);
+      expect(fallbackSlice).toMatch(/else\s*\{\s*setReverifyUi\(\s*\{[\s\S]{0,180}kind:\s*['"]unavailable['"]/);
+      // Fallback shows the general Unable to Confirm Right Now friendly fallback (not raw technical r.message)
+      expect(fallbackSlice).toMatch(/message:\s*['"]We cannot confirm the status right now\. Please try again later\.[ '"]/);
+      // Catch branches: 401/403/404/unexpected all default to kind=unavailable, not failed
+      expect(drawerSrc).toMatch(/catch\s*\(\s*e:\s*any\s*\)\s*\{[\s\S]{0,1000}kind:\s*['"]unavailable['"][\s\S]{0,1000}kind:\s*['"]unavailable['"]/);
+      expect(drawerSrc).not.toMatch(/catch\s*\([\s\S]{0,400}kind:\s*['"]failed['"]/);
+      // Backend provider unavailable catch-path returns JSON with reason provider_unavailable and does not mutate transaction
+      const pCatchIdx = studentsSrc.indexOf('catch (err: any)');
+      const pCatchRegion = studentsSrc.slice(pCatchIdx, pCatchIdx + 700);
+      expect(pCatchRegion).toMatch(/reason:\s*['"]provider_unavailable['"]/);
+      expect(pCatchRegion).not.toMatch(/prisma\.transaction\.update/);
+      expect(pCatchRegion).not.toMatch(/TransactionStatus\.(FAILED|SUCCESS)/);
+    });
+  });
 });
 

@@ -100,6 +100,73 @@ const OriginPill: React.FC<{ origin?: 'CATALOGUE' | 'DIRECT_BILL' | null }> = ({
   return null;
 };
 
+const PENDING_REVIEW_THRESHOLD_MINUTES = 60 * 24;
+type PendingPresentation = {
+  override: false;
+} | {
+  override: true;
+  label: string;
+  pillClass: string;
+  tone: 'sky' | 'amber-light' | 'amber-strong';
+  needsReview: boolean;
+  noUuid: boolean;
+};
+const derivePendingPresentation = (tx: any, nowEpoch = Date.now()): PendingPresentation => {
+  if (!tx) return { override: false };
+  const status = String(tx.status ?? 'UNKNOWN').toUpperCase();
+  if (status !== 'PENDING') return { override: false };
+  const createdAt = Date.parse(String(tx.createdAt ?? tx.transactionDate ?? tx.updatedAt ?? ''));
+  const minutesAge = Number.isFinite(createdAt)
+    ? Math.max(0, Math.floor((nowEpoch - createdAt) / 60000))
+    : 0;
+  const finalTxId = (tx as any).alatpayFinalTransactionId;
+  const hasTrustedFinalUuid =
+    typeof finalTxId === 'string' &&
+    finalTxId.trim().length === 36 &&
+    finalTxId.split('-').length === 5;
+  if (minutesAge < PENDING_REVIEW_THRESHOLD_MINUTES) {
+    return {
+      override: true,
+      label: 'Awaiting Confirmation',
+      pillClass: 'bg-sky-100 text-sky-800 ring-1 ring-sky-200',
+      tone: 'sky',
+      needsReview: false,
+      noUuid: !hasTrustedFinalUuid,
+    };
+  }
+  if (!hasTrustedFinalUuid) {
+    return {
+      override: true,
+      label: 'Confirmation Required',
+      pillClass: 'bg-amber-100 text-amber-900 ring-1 ring-amber-300 font-semibold',
+      tone: 'amber-strong',
+      needsReview: true,
+      noUuid: true,
+    };
+  }
+  return {
+    override: true,
+    label: 'Pending Review',
+    pillClass: 'bg-amber-50 text-amber-800 ring-1 ring-amber-200',
+    tone: 'amber-light',
+    needsReview: true,
+    noUuid: false,
+  };
+};
+const StatusCellWithPending: React.FC<{ tx: any; nowEpoch?: number; }> = ({ tx, nowEpoch }) => {
+  const baseStatus = String(tx?.status ?? 'UNKNOWN').toUpperCase();
+  const derived = derivePendingPresentation(tx, nowEpoch);
+  if (!derived.override) return <StatusPill status={baseStatus} />;
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      <StatusPill status="PENDING" />
+      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${derived.pillClass}`}>
+        {derived.label}
+      </span>
+    </span>
+  );
+};
+
 // ---------------- Sub-page: Browse Catalogue (Make Payment) ----------------
 type BrowseCataloguePageProps = { onNavigateHistory?: () => void };
 const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHistory }) => {
@@ -869,6 +936,42 @@ const InvoiceDetailPage: React.FC = () => {
   const pay = data?.pay;
   const transactions = data?.transactions ?? [];
   const blockingPending = (data as any)?.blockingPendingTransaction ?? null;
+  const blockingPendingDerived = blockingPending ? derivePendingPresentation(blockingPending) : null;
+  const panelTone =
+    blockingPendingDerived && blockingPendingDerived.override === true
+      ? blockingPendingDerived.tone
+      : null;
+  const blockingPanel = (() => {
+    if (!blockingPending) return null;
+    const sky = panelTone === 'sky';
+    const wrapperClass = sky
+      ? 'rounded-lg border border-sky-200 bg-sky-50 p-4'
+      : 'rounded-lg border border-amber-200 bg-amber-50 p-4';
+    const titleClass = sky ? 'text-sm font-semibold text-sky-900' : 'text-sm font-semibold text-amber-900';
+    const bodyClass = sky ? 'text-xs text-sky-800 mt-1' : 'text-xs text-amber-800 mt-1';
+    const btnClass = sky
+      ? 'mt-3 w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2'
+      : 'mt-3 w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2';
+    let title = 'Payment Confirmation Pending';
+    let body =
+      'There is already a payment attempt awaiting confirmation for this invoice. ' +
+      'Please check the status of that payment before starting a new one.';
+    if (blockingPendingDerived && blockingPendingDerived.override === true) {
+      if (blockingPendingDerived.label === 'Awaiting Confirmation') {
+        title = 'Awaiting Confirmation';
+      } else if (blockingPendingDerived.label === 'Confirmation Required') {
+        title = 'Confirmation Required';
+        body =
+          'This payment has been waiting for confirmation for some time and we still need ' +
+          'additional information from the provider. If you completed the payment or were debited, ' +
+          'do not make another payment. Check the status again and, if unchanged, contact the ' +
+          'Bursary with your payment reference for reconciliation.';
+      } else if (blockingPendingDerived.label === 'Pending Review') {
+        title = 'Pending Review';
+      }
+    }
+    return { wrapperClass, titleClass, bodyClass, btnClass, title, body };
+  })();
 
   const openPendingInDrawer = () => {
     if (!blockingPending) return;
@@ -1003,21 +1106,18 @@ const InvoiceDetailPage: React.FC = () => {
                   <StatusPill status={invoice.status} />
                 </div>
                 <div className="pt-3 space-y-3">
-                  {blockingPending ? (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                  {blockingPending && blockingPanel ? (
+                    <div className={blockingPanel.wrapperClass}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
-                          <div className="text-sm font-semibold text-amber-900">Payment Confirmation Pending</div>
-                          <p className="text-xs text-amber-800 mt-1">
-                            There is already a payment attempt awaiting confirmation for this invoice.
-                            Please check the status of that payment before starting a new one.
-                          </p>
+                          <div className={blockingPanel.titleClass}>{blockingPanel.title}</div>
+                          <p className={blockingPanel.bodyClass}>{blockingPanel.body}</p>
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={openPendingInDrawer}
-                        className="mt-3 w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2"
+                        className={blockingPanel.btnClass}
                         aria-label="Check pending payment status for this invoice"
                       >
                         Check Pending Payment
@@ -1103,7 +1203,7 @@ const InvoiceDetailPage: React.FC = () => {
                               ) : null}
                               {__unused_accessibleDisplay === undefined ? null : null}
                             </td>
-                            <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
+                            <td className="px-4 py-2"><StatusCellWithPending tx={tx} /></td>
                             <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
                           </tr>
                         );

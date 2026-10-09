@@ -18,7 +18,7 @@ type ReverifyUi =
   | { kind: 'failed'; message?: string }
   | { kind: 'unavailable'; reason?: string | null; message?: string; supportContact?: boolean }
   | { kind: 'cooldown'; cooldownMs: number; message?: string }
-  | { kind: 'conflict'; reason?: string | null; message?: string };
+  | { kind: 'conflict'; reason?: string | null; message?: string; supportContact?: boolean };
 
 const formatNgn = (n: number | string | null | undefined): string => {
   const v = Number(n ?? 0);
@@ -69,6 +69,58 @@ const statusClass = (status: string): string => {
 const statusLabel = (status: string): string => {
   const labels: Record<string, string> = i18n.statusLabels as any;
   return labels[status] ?? status;
+};
+
+const DRAWER_PENDING_REVIEW_THRESHOLD_MINUTES = 60 * 24;
+type DrawerPendingPresentation =
+  | { override: false }
+  | {
+      override: true;
+      label: string;
+      pillClass: string;
+      tone: 'sky' | 'amber-light' | 'amber-strong';
+      needsReview: boolean;
+      noUuid: boolean;
+    };
+const drawerDerivePendingPresentation = (tx: any, nowEpoch = Date.now()): DrawerPendingPresentation => {
+  if (!tx) return { override: false };
+  const status = String(tx.status ?? 'UNKNOWN').toUpperCase();
+  if (status !== 'PENDING') return { override: false };
+  const createdAt = Date.parse(String(tx.createdAt ?? tx.transactionDate ?? tx.paidAt ?? tx.updatedAt ?? ''));
+  const minutesAge = Number.isFinite(createdAt) ? Math.max(0, Math.floor((nowEpoch - createdAt) / 60000)) : 0;
+  const finalTxId = (tx as any).alatpayFinalTransactionId;
+  const hasTrustedFinalUuid =
+    typeof finalTxId === 'string' &&
+    finalTxId.trim().length === 36 &&
+    finalTxId.split('-').length === 5;
+  if (minutesAge < DRAWER_PENDING_REVIEW_THRESHOLD_MINUTES) {
+    return {
+      override: true,
+      label: 'Awaiting Confirmation',
+      pillClass: 'bg-sky-100 text-sky-800 ring-1 ring-sky-200',
+      tone: 'sky',
+      needsReview: false,
+      noUuid: !hasTrustedFinalUuid,
+    };
+  }
+  if (!hasTrustedFinalUuid) {
+    return {
+      override: true,
+      label: 'Confirmation Required',
+      pillClass: 'bg-amber-100 text-amber-900 ring-1 ring-amber-300 font-semibold',
+      tone: 'amber-strong',
+      needsReview: true,
+      noUuid: true,
+    };
+  }
+  return {
+    override: true,
+    label: 'Pending Review',
+    pillClass: 'bg-amber-50 text-amber-800 ring-1 ring-amber-200',
+    tone: 'amber-light',
+    needsReview: true,
+    noUuid: false,
+  };
 };
 
 const DetailRow: React.FC<{ label: string; value: React.ReactNode; mono?: boolean }> = ({ label, value, mono }) => (
@@ -174,6 +226,7 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
     try {
       const r: any = await studentFeeApi.reverifyPayment(txId);
       const uiState = String(r?.uiState || 'pending').toLowerCase();
+      const reason = String(r?.reason ?? r?.providerResult?.reason ?? '');
       if (uiState === 'success') {
         setReverifyUi({
           kind: 'success',
@@ -188,12 +241,24 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
       } else if (uiState === 'pending') {
         setReverifyUi({ kind: 'pending', message: 'Confirmation is still in progress. Please check again in a few minutes.' });
       } else if (uiState === 'unavailable') {
-        setReverifyUi({
-          kind: 'unavailable',
-          reason: r?.providerResult?.reason ?? r?.reason ?? 'provider_unavailable',
-          message: r?.message ?? 'We cannot confirm the status right now. Please try again later.',
-          supportContact: !!r?.supportContact,
-        });
+        if (reason === 'provider_final_uuid_unavailable') {
+          setReverifyUi({
+            kind: 'conflict',
+            reason: 'provider_final_uuid_unavailable',
+            message:
+              'We have not yet received enough information from the payment provider to confirm this payment automatically. ' +
+              'If you completed the payment or were debited, please do not make another payment. Please check again later. ' +
+              'If the status remains unchanged, contact the Bursary with your payment reference for reconciliation.',
+            supportContact: true,
+          });
+        } else {
+          setReverifyUi({
+            kind: 'unavailable',
+            reason: r?.providerResult?.reason ?? r?.reason ?? 'provider_unavailable',
+            message: 'We cannot confirm the status right now. Please try again later.',
+            supportContact: !!r?.supportContact,
+          });
+        }
       } else {
         setReverifyUi({
           kind: 'unavailable',
@@ -300,8 +365,21 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
 
           <div className="flex items-start justify-between py-3 border-b border-gray-100 gap-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-gray-500 shrink-0 w-36">Status</span>
-            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${statusClass(status)}`}>
-              {statusLabel(status)}
+            <span className="flex flex-wrap justify-end items-center gap-1.5 max-w-[60%]">
+              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${statusClass(status)}`}>
+                {statusLabel(status)}
+              </span>
+              {(() => {
+                const derived = drawerDerivePendingPresentation(tx);
+                if (derived.override) {
+                  return (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] ${derived.pillClass}`}>
+                      {derived.label}
+                    </span>
+                  );
+                }
+                return null;
+              })()}
             </span>
           </div>
 
