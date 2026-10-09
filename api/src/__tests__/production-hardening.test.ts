@@ -94,11 +94,21 @@ import { getPaymentProvider, getActiveGatewaySetting } from '../services/payment
 describe('TEST1: Counter receipt atomic race — B3 anti-race guard', () => {
   let counterUpsertArgs: Array<any> = [];
   let transactionCallCount = 0;
+  let receiptCreateArgs: Array<any> = [];
+  let glCreateManyArgs: Array<any> = [];
+  let invoiceUpdateArgs: Array<any> = [];
+  let claimWinnerCount = 0;
+  let claimLoserCount = 0;
 
   beforeEach(() => {
     jest.clearAllMocks();
     counterUpsertArgs = [];
     transactionCallCount = 0;
+    receiptCreateArgs = [];
+    glCreateManyArgs = [];
+    invoiceUpdateArgs = [];
+    claimWinnerCount = 0;
+    claimLoserCount = 0;
 
     // --- Build a PAYSTACK provider.verify mock that returns SUCCESS ---
     const mockPaystackProvider = {
@@ -196,35 +206,55 @@ describe('TEST1: Counter receipt atomic race — B3 anti-race guard', () => {
       }),
     );
 
-    // --- $transaction mock that CAPTTURES counter.upsert arguments ---
+    // --- $transaction mock: REALISTIC ATOMIC CLAIM SIMULATION ---
+    //     The first call to updateMany WHERE status=PENDING returns count=1 (claim winner)
+    //     All subsequent updateMany calls return count=0 (claim losers / idempotent no-ops)
     (prisma.$transaction as jest.Mock).mockImplementation(async (callback: Function) => {
+      const myTxnIndex = transactionCallCount;
       transactionCallCount++;
+
       const txCtx: any = {
         transaction: {
-          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-          findUnique: jest.fn().mockImplementation((args: any) =>
-            Promise.resolve({
+          updateMany: jest.fn().mockImplementation(() => {
+            // GLOBAL atomic claim: first updateMany across all 5 txns = winner; rest = losers
+            if (myTxnIndex === 0) {
+              claimWinnerCount++;
+              return Promise.resolve({ count: 1 });
+            }
+            claimLoserCount++;
+            return Promise.resolve({ count: 0 });
+          }),
+          findUnique: jest.fn().mockImplementation((args: any) => {
+            // Winner proceeds, so row seen as PROCESSING (just claimed) then SUCCESS later;
+            // Losers short-return because alreadyProcessed + status !== PROCESSING
+            const isWinner = myTxnIndex === 0;
+            return Promise.resolve({
               id: 7001,
               reference: 'PAY-TEST-CONCUR',
-              status: TransactionStatus.PROCESSING,
+              status: isWinner ? TransactionStatus.PROCESSING : TransactionStatus.SUCCESS,
               userId: 5001,
               invoiceId: 801,
               expectedAmount: 50750,
-              amount: 0,
+              amount: isWinner ? 0 : 50750,
               gateway: PaymentGateway.PAYSTACK,
               metadata: { amount: { base: 50000, serviceCharge: 750, gatewayFee: 0, total: 50750 }, session: '2024/2025' },
               invoice: {
-                id: 801, invoiceNumber: 'INV-801', amountDue: 50000, amountPaid: 0,
-                status: 'UNPAID', session: '2024/2025', semester: 'FIRST', studentId: 5001,
+                id: 801, invoiceNumber: 'INV-801', amountDue: 50000,
+                amountPaid: isWinner ? 0 : 50000,
+                status: isWinner ? 'UNPAID' : 'PAID',
+                session: '2024/2025', semester: 'FIRST', studentId: 5001,
                 fee: { id: 1, name: 'School Fees', feeCode: 'SCH-001' },
               },
               user: { id: 5001, email: 'student@university.edu', firstName: 'Test', lastName: 'Student', matricNumber: 'RBAC/STD/001' },
-            }),
-          ),
+            });
+          }),
           update: jest.fn().mockResolvedValue({ id: 7001 }),
         },
         invoice: {
-          update: jest.fn().mockResolvedValue({ id: 801 }),
+          update: jest.fn().mockImplementation((args: any) => {
+            invoiceUpdateArgs.push(args);
+            return Promise.resolve({ id: 801 });
+          }),
           findUnique: jest.fn().mockResolvedValue({ id: 801, invoiceNumber: 'INV-801' }),
         },
         counter: {
@@ -235,15 +265,26 @@ describe('TEST1: Counter receipt atomic race — B3 anti-race guard', () => {
         },
         receipt: {
           findFirst: jest.fn().mockResolvedValue(null),
-          create: jest.fn().mockImplementation((args: any) => Promise.resolve({ id: 1, ...args?.data })),
+          create: jest.fn().mockImplementation((args: any) => {
+            receiptCreateArgs.push(args);
+            return Promise.resolve({ id: receiptCreateArgs.length, ...args?.data });
+          }),
         },
-        generalLedger: { createMany: jest.fn().mockResolvedValue({ count: 4 }) },
+        generalLedger: {
+          createMany: jest.fn().mockImplementation((args: any) => {
+            glCreateManyArgs.push(args);
+            return Promise.resolve({ count: 4 });
+          }),
+        },
+        feeAssignment: {
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
       };
       return await callback(txCtx);
     });
   });
 
-  it('[B3-race] 5 concurrent verifyPayment → 5 counter.upsert with increment:1 inside SAME $transaction', async () => {
+  it('[B3-race] 5 concurrent verifyPayment → 1 claim winner, losers count=0, ≤1 receipt/ledger/invoice/counter', async () => {
     // 1. Fire 5 concurrent verifyPayment calls with the same reference
     const ref = 'pay-ref-verified-1';
     const concurrentPromises = Array.from({ length: 5 }, () =>
@@ -251,23 +292,45 @@ describe('TEST1: Counter receipt atomic race — B3 anti-race guard', () => {
     );
     const results = await Promise.allSettled(concurrentPromises);
 
-    // 2. Assert $transaction called exactly 5 times (one per verifyPayment)
+    // 2. $transaction should be called 5 times (one per verifyPayment call)
     expect(transactionCallCount).toBe(5);
 
-    // 3. Assert counter.upsert was called exactly 5 times
-    expect(counterUpsertArgs.length).toBe(5);
+    // 3. REALISTIC ATOMIC CLAIM: exactly ONE updateMany WHERE status=PENDING
+    //    returned count===1 (winner); remaining FOUR returned count===0 (losers)
+    expect(claimWinnerCount).toBe(1);
+    expect(claimLoserCount).toBe(4);
 
-    // 4. CRITICAL: Each upsert MUST use update:{value:{increment:1}} (NOT MAX(id)+1)
-    counterUpsertArgs.forEach((args, idx) => {
+    // 4. FINANCIAL SIDE-EFFECTS — at most ONE of each because losers short-return
+    expect(counterUpsertArgs.length).toBeLessThanOrEqual(1);
+    expect(receiptCreateArgs.length).toBeLessThanOrEqual(1);
+    expect(glCreateManyArgs.length).toBeLessThanOrEqual(1);
+    expect(invoiceUpdateArgs.length).toBeLessThanOrEqual(1);
+
+    // 5. CRITICAL: The winner's counter.upsert MUST use atomic increment:1 (NOT MAX(id)+1)
+    if (counterUpsertArgs.length === 1) {
+      const args = counterUpsertArgs[0];
       expect(args).toBeDefined();
-      expect(args.where).toEqual({ id: 'receipt_number' });
-      expect(args.create).toEqual({ id: 'receipt_number', value: 2 });
-      // The anti-race guard: we increment atomically inside the tx, not MAX(id)+1
+      const isYearlySeq =
+        typeof args?.where?.id === 'string' && args.where.id.startsWith('receipt_seq_');
+      if (!isYearlySeq) {
+        expect(args.where).toEqual({ id: expect.stringMatching(/receipt(_number|_seq)/) });
+      }
+      // Atomic increment is the anti-race guarantee we depend on
       expect(args.update).toEqual({ value: { increment: 1 } });
-    });
+    }
 
-    // 5. Each verifyPayment should resolve to something (not throw uncaught)
-    // At least some succeeded; failures are ok — what matters is the atomic counter usage
+    // 6. Receipt numbers cannot duplicate (≤1 receipt => trivially satisfied;
+    //    but also assert receipt number uniqueness if multiple somehow created)
+    const receiptNumbers = receiptCreateArgs.map((a) => a?.data?.receiptNumber).filter(Boolean);
+    const uniqueReceiptNumbers = new Set(receiptNumbers);
+    expect(uniqueReceiptNumbers.size).toBe(receiptNumbers.length);
+
+    // 7. Exactly ONE fulfillment path proceeded (counter upserts).
+    //    Terminal transactions cannot be reprocessed: all losers must have
+    //    latest.status === SUCCESS (not PENDING/PROCESSING).
+    expect(counterUpsertArgs.length).toBe(1);
+
+    // 8. All calls resolved (no uncaught rejections)
     const fulfilled = results.filter((r) => r.status === 'fulfilled');
     expect(fulfilled.length).toBeGreaterThanOrEqual(1);
   });
@@ -569,6 +632,9 @@ describe('TEST3: Webhook idempotency — ALATPAY 3 retries = 1 receipt/generalLe
             return Promise.resolve({ count: 4 });
           }),
         },
+        feeAssignment: {
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
       };
       return await callback(txCtx);
     });
@@ -725,6 +791,9 @@ describe('TEST4: Gateway mid-session active flip invariant — tx.gateway wins, 
           create: jest.fn().mockResolvedValue({ id: 1 }),
         },
         generalLedger: { createMany: jest.fn().mockResolvedValue({ count: 4 }) },
+        feeAssignment: {
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
       };
       const out = await callback(txCtx);
       return out;

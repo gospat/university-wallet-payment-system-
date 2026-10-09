@@ -20,6 +20,7 @@ jest.mock('../config/database', () => ({
     },
     receipt: { create: jest.fn() },
     generalLedger: { create: jest.fn() },
+    auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
     rolePermission: { findMany: jest.fn() },
     $transaction: jest.fn((cb) => cb({
       transaction: {
@@ -185,6 +186,10 @@ function resetMocks() {
   (prisma.transaction.count as jest.Mock).mockReset();
   (prisma.receipt.create as jest.Mock).mockReset();
   (prisma.generalLedger.create as jest.Mock).mockReset();
+  if ((prisma as any).auditLog && typeof (prisma as any).auditLog.create === 'function') {
+    ((prisma as any).auditLog.create as jest.Mock).mockReset();
+    ((prisma as any).auditLog.create as jest.Mock).mockResolvedValue({ id: 1 });
+  }
   const m = requireAll();
   m.providerInitialize.mockReset();
   m.providerVerify.mockReset();
@@ -557,6 +562,123 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
     });
     // Zero FAILED writes until classification abstraction is signed-off and added.
     expect(failedWrites.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------
+  // Scenario #12: Secret redaction — provider.initialize throws with
+  // crafted secrets in err.message/code/name/headers/URL/cookie values;
+  // none leak into sanitizedMessage / safeCode / errorClass / metadata
+  // / description / audit payload.
+  // -------------------------------------------------------------------
+  it('#12 Diagnostic redaction — injected secrets into err.message/code/name/Authorization/API key/webhook secret/token URL/cookie → NONE appear in stored metadata/safeCode/errorClass/description/audit payload.', async () => {
+    // --- Build the set of injected SECRET tokens (ALL MUST be absent from stored data) ---
+    const INJECTED_SECRETS: Record<string, string> = {
+      BEARER_TOKEN: 'sk_test_abcDEFghiJKLmnoPQRstuVWXyz0123456789abcd',
+      AUTHORIZATION_HEADER: 'Authorization: Bearer pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA123456789',
+      API_KEY_INLINE: 'apikey=sk-5kfJ7Gm9P8lZxQw2eR4tY6uU8iI9oO0pP',
+      WEBHOOK_SECRET: 'webhook_secret=whsec_VryIm5VerySecretValueHere1234567890abcdef',
+      URL_TOKEN_PARAM: 'https://api.example.com/callback?token=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.SENSITIVESIGNEDCONTENT&key=abc&signature=zzzzVerySecretValueShouldNeverBeLogged0123456789ABCDEFabcdef',
+      COOKIE_HEADER: 'Cookie: sessionid=aW5qZWN0aW9udG9rZW52YWx1ZTEyMzQ1Ng; jwt=eyJraWQiOiIxMjMifQ.SECRETPAYLOAD.SIG; csrf=csrf_token_very_secret_abcdef1234567890',
+      ERR_CODE_INLINE: 'mycode_ALATPAY_SECRETKEY_97e46f40xxxxxxxxxxxxxxxxxxxxb383df5a',
+      ERR_NAME_INLINE: 'MaliciousName_alapaySecretKey_97e46f40_REDACT_ME_PLEASE_b383df5a_END',
+    };
+    const SECRET_LITERALS = Object.values(INJECTED_SECRETS);
+
+    // --- Craft a malicious-looking error object with EVERYTHING injected ---
+    const allSecretsJoined = Object.entries(INJECTED_SECRETS).map(([k, v]) => `${k}=${v}`).join(' ; ');
+    const evilError: any = new Error(allSecretsJoined);
+    evilError.code = INJECTED_SECRETS.ERR_CODE_INLINE;
+    evilError.name = INJECTED_SECRETS.ERR_NAME_INLINE;
+    evilError.statusCode = 500;
+    evilError.response = {
+      status: 502,
+      headers: {
+        'set-cookie': 'another_secret=abcdefghijklmnop_this_should_be_redacted_1234567890ABCDEF',
+      },
+      data: {
+        rawProviderError: 'raw contains sk_test_ProviderSecretKeyShouldBeRedactedABCDEF123456 also api_key=veryVeryLongSecretValue1234567890abcdefghij',
+      },
+    };
+    SECRET_LITERALS.push('sk_test_ProviderSecretKeyShouldBeRedactedABCDEF123456');
+    SECRET_LITERALS.push('veryVeryLongSecretValue1234567890abcdefghij');
+    SECRET_LITERALS.push('another_secret=abcdefghijklmnop_this_should_be_redacted_1234567890ABCDEF');
+
+    // --- Wire up base and make initialize throw the evil error ---
+    const m = setupBase(PaymentGateway.ALATPAY);
+    m.providerInitialize.mockRejectedValue(evilError);
+
+    // --- Act: trigger initiate and expect to throw ---
+    let threw: any = null;
+    try {
+      await PaymentService.initiatePayment(MOCK_STUDENT.id, { invoiceId: MOCK_INVOICE.id });
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).not.toBeNull();
+
+    // --- Helper: recursively collect all strings from a value into a flat Set ---
+    const allStringValues = (v: any, out: Set<string> = new Set()): Set<string> => {
+      if (v == null) return out;
+      if (typeof v === 'string') { out.add(v); return out; }
+      if (Array.isArray(v)) { v.forEach((x) => allStringValues(x, out)); return out; }
+      if (typeof v === 'object') { Object.values(v).forEach((x) => allStringValues(x, out)); return out; }
+      return out;
+    };
+
+    // --- Collect ALL persisted strings across: transaction.update data (metadata,description,status) + auditLog.create payloads ---
+    const persistedStrings: Set<string> = new Set();
+    (prisma.transaction.update as jest.Mock).mock.calls.forEach((call) => {
+      const data = call[1]?.data ?? call[0]?.data ?? {};
+      allStringValues(data, persistedStrings);
+    });
+    if ((prisma as any).auditLog && typeof (prisma as any).auditLog.create === 'function') {
+      ((prisma as any).auditLog.create as jest.Mock).mock.calls.forEach((call) => {
+        const auditData = call[1]?.data ?? call[0]?.data ?? {};
+        allStringValues(auditData, persistedStrings);
+      });
+    }
+
+    // --- Aggregate: EVERY string joined so we can substring-check each secret literal ---
+    const joinedAll = Array.from(persistedStrings).join('\n');
+
+    // --- CRITICAL ASSERTIONS: not a single secret literal may appear anywhere ---
+    for (const lit of SECRET_LITERALS) {
+      expect(joinedAll).not.toContain(lit);
+    }
+
+    // --- Also assert explicit field-level safe-code invariant: safeCode must be either allowlisted network token OR HTTP_XXX OR UNKNOWN_PROVIDER_ERROR ---
+    const ALLOWED_SAFE_CODES = new Set([
+      'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ESOCKETTIMEDOUT',
+      'UNKNOWN_PROVIDER_ERROR',
+      'HTTP_400', 'HTTP_401', 'HTTP_403', 'HTTP_404', 'HTTP_408', 'HTTP_409', 'HTTP_429',
+      'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504',
+    ]);
+    const ANY_TRANSACTION_UPDATE = (prisma.transaction.update as jest.Mock).mock.calls.find((call) => {
+      const meta = (call[1]?.data ?? call[0]?.data ?? {})?.metadata as any;
+      return meta && typeof meta === 'object' && meta.initiateTransportFailed;
+    });
+    expect(ANY_TRANSACTION_UPDATE).toBeDefined();
+    const diag = ((ANY_TRANSACTION_UPDATE![1] ?? ANY_TRANSACTION_UPDATE![0]).data as any).metadata.initiateTransportFailed;
+    expect(diag).toBeDefined();
+    expect(typeof diag.safeCode).toBe('string');
+    expect(ALLOWED_SAFE_CODES.has(diag.safeCode) || /^HTTP_\d{3}$/.test(diag.safeCode)).toBe(true);
+
+    // --- errorClass must be allowlisted known value OR ControlledError fallback ---
+    const ALLOWED_ERROR_CLASSES = new Set([
+      'Error', 'AppError',
+      'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError', 'AggregateError',
+      'AxiosError', 'FetchError', 'AbortError', 'TimeoutError',
+      'PrismaClientKnownRequestError', 'PrismaClientUnknownRequestError', 'PrismaClientValidationError',
+      'PrismaClientInitializationError', 'PrismaClientRustPanicError',
+      'ControlledError',
+    ]);
+    expect(ALLOWED_ERROR_CLASSES.has(diag.errorClass)).toBe(true);
+
+    // --- sanitizedMessage MUST contain [REDACTED] because we gave it lots of stuff to redact ---
+    expect(typeof diag.sanitizedMessage).toBe('string');
+    expect(diag.sanitizedMessage.length).toBeGreaterThan(0);
+    expect(diag.sanitizedMessage.length).toBeLessThanOrEqual(200);
+    expect(diag.sanitizedMessage).toContain('[REDACTED]');
   });
 
   // -------------------------------------------------------------------

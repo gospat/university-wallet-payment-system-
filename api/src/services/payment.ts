@@ -151,6 +151,24 @@ const SECRET_PATTERNS = [
   /cookie:?\s*[^\n]{8,}/gi,
 ];
 
+const NETWORK_CODE_ALLOWLIST = new Set<string>([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED',
+  'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
+  'EPIPE', 'ESOCKETTIMEDOUT',
+]);
+
+const ERROR_CLASS_ALLOWLIST = new Set<string>([
+  'Error', 'AppError',
+  'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'EvalError', 'URIError', 'AggregateError',
+  'AxiosError', 'FetchError', 'AbortError', 'TimeoutError',
+  'PrismaClientKnownRequestError',
+  'PrismaClientUnknownRequestError',
+  'PrismaClientValidationError',
+  'PrismaClientInitializationError',
+  'PrismaClientRustPanicError',
+]);
+
 const SAFE_FRIENDLY_TOKENS = new Map<string, string>();
 SAFE_FRIENDLY_TOKENS.set('ECONNRESET', 'network-connection-reset');
 SAFE_FRIENDLY_TOKENS.set('ECONNREFUSED', 'network-connection-refused');
@@ -161,33 +179,74 @@ SAFE_FRIENDLY_TOKENS.set('EAI_AGAIN', 'network-dns-temporary-failure');
 SAFE_FRIENDLY_TOKENS.set('EPIPE', 'network-broken-pipe');
 SAFE_FRIENDLY_TOKENS.set('ESOCKETTIMEDOUT', 'network-socket-timeout');
 
+const UNKNOWN_SAFE_CODE = 'UNKNOWN_PROVIDER_ERROR';
+const UNKNOWN_ERROR_CLASS = 'ControlledError';
+
+function sanitizeStringForDiagnostic(input: any): string {
+  if (input === null || input === undefined) return '';
+  let s = typeof input === 'string' ? input : String(input);
+  s = s.slice(0, 240);
+  for (const re of SECRET_PATTERNS) {
+    s = s.replace(re, '[REDACTED]');
+  }
+  s = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  return s;
+}
+
 function safeDiagnosticFromError(err: any, provider: PaymentGateway | null): SafeDiagnostic {
-  const name: string =
+  const nameRaw: string =
     (err && (err.name ?? err.constructor?.name)) ?? 'Error';
-  const codeRaw: any = (err && (err.code ?? err.statusCode ?? err.httpCode ?? err.status ?? null));
+  const errorClassSanitized = sanitizeStringForDiagnostic(nameRaw).trim();
+  const errorClass =
+    ERROR_CLASS_ALLOWLIST.has(errorClassSanitized)
+      ? errorClassSanitized
+      : UNKNOWN_ERROR_CLASS;
+
+  const codeStrRaw: string | null =
+    typeof err?.code === 'string' ? err.code : null;
+  const codeNum: number | null =
+    typeof err?.code === 'number' && Number.isFinite(err.code) && err.code >= 100 && err.code < 600
+      ? err.code
+      : null;
   const httpCode: number | null =
-    typeof codeRaw === 'number' && Number.isFinite(codeRaw) && codeRaw >= 100 && codeRaw < 600 ? codeRaw : null;
-  const errCodeStr: string | null =
-    typeof (err && err.code) === 'string' && (err as any).code.length <= 64 ? (err as any).code : null;
-  const safeCode: string | null = errCodeStr ?? (httpCode ? `HTTP_${httpCode}` : null);
+    codeNum
+      ?? (typeof err?.statusCode === 'number' && Number.isFinite(err.statusCode) && err.statusCode >= 100 && err.statusCode < 600 ? err.statusCode : null)
+      ?? (typeof err?.httpCode === 'number' && Number.isFinite(err.httpCode) && err.httpCode >= 100 && err.httpCode < 600 ? err.httpCode : null)
+      ?? (typeof err?.status === 'number' && Number.isFinite(err.status) && err.status >= 100 && err.status < 600 ? err.status : null);
+
+  let safeCode: string | null = null;
+  if (codeStrRaw !== null && NETWORK_CODE_ALLOWLIST.has(codeStrRaw)) {
+    safeCode = codeStrRaw;
+  } else if (httpCode !== null) {
+    safeCode = `HTTP_${httpCode}`;
+  } else if (codeStrRaw !== null && /^\d{3}$/.test(codeStrRaw)) {
+    const n = Number(codeStrRaw);
+    if (n >= 100 && n < 600) safeCode = `HTTP_${n}`;
+  }
+  if (safeCode === null) {
+    safeCode = UNKNOWN_SAFE_CODE;
+  }
+
   const rawMessage = typeof (err && (err.message ?? String(err))) === 'string'
-    ? String((err as any).message ?? err)
+    ? String(err.message ?? err)
     : 'unknown';
   let msg = rawMessage.slice(0, 220);
   for (const re of SECRET_PATTERNS) {
     msg = msg.replace(re, '[REDACTED]');
   }
   msg = msg.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-  if (SAFE_FRIENDLY_TOKENS.has(String(errCodeStr))) {
-    msg = `${SAFE_FRIENDLY_TOKENS.get(String(errCodeStr))} — ${msg}`;
-  }
+  const token =
+    (codeStrRaw && NETWORK_CODE_ALLOWLIST.has(codeStrRaw) && SAFE_FRIENDLY_TOKENS.has(codeStrRaw))
+      ? SAFE_FRIENDLY_TOKENS.get(codeStrRaw)!
+      : null;
+  if (token) msg = `${token} — ${msg}`;
   const sanitizedMessage = msg.slice(0, 180) || 'diagnostic redacted';
   return {
     at: new Date().toISOString(),
     provider,
-    errorClass: String(name || 'Error').slice(0, 80),
+    errorClass: errorClass.slice(0, 64) || UNKNOWN_ERROR_CLASS,
     httpCode,
-    safeCode,
+    safeCode: safeCode.slice(0, 64) || UNKNOWN_SAFE_CODE,
     sanitizedMessage,
   };
 }
