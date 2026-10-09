@@ -33,10 +33,53 @@ import { SystemSettingsService } from './systemSettings';
 import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerFactory';
 import { gatewayLabel, VerifyPaymentOptions, PaymentBreakdown, AlatpayPublicCheckout } from './payment/types';
 import { parseAlatpayCustomerMetadata, makeAlatpayWebhookJobId, isBullmqSafeJobId } from '../utils/alatpay';
+import { getRedis } from '../config/redis';
 
 type ReqLike = any;
 
 const JSON_DB_NULL = Prisma.JsonNull;
+
+// Task-4 deduplication: initiatePayment lock per (studentId, invoiceId).
+// Uses Redis SET NX EX with best-effort; falls back to in-process Map if Redis
+// unavailable or command throws. Locks short (3s) because it's just there to
+// serialize parallel Pay-Now double-clicks / tab races / page refreshes that
+// would otherwise both pass the pending-count guard before any row persists.
+const INITIATE_LOCK_TTL_SEC = Number(process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE) || (process.env.NODE_ENV === 'test' ? 0 : 3);
+const _fallbackInitiateLocks = new Map<string, number>();
+
+/** ONLY to be used by Jest tests to reset the in-process degraded dedup lock map between test runs. */
+export function _testResetInitiateLocks() {
+  _fallbackInitiateLocks.clear();
+}
+
+async function acquireInitiateDedupeLock(studentId: number, invoiceId: number): Promise<boolean> {
+  const key = `initiates:lock:${studentId}:${invoiceId}`;
+  const expireAtMs = Date.now() + (INITIATE_LOCK_TTL_SEC > 0 ? INITIATE_LOCK_TTL_SEC : 1) * 1000;
+  // Redis path
+  try {
+    const r = getRedis();
+    if (r && typeof r.call === 'function' && INITIATE_LOCK_TTL_SEC > 0) {
+      const result: any = await r.call('SET', key, String(Date.now()), 'NX', 'EX', INITIATE_LOCK_TTL_SEC);
+      if (result === 'OK' || result === 'SET' || result === true || result === 1) return true;
+      return false;
+    }
+  } catch {
+    /* fall through to degraded in-process map */
+  }
+  // In-process degraded path.
+  // In NODE_ENV=test with explicit TTL override = 0 (Jest default), the degraded
+  // lock is deliberately disabled. This lets idempotency tests directly exercise
+  // the DB-level PENDING-age + ceiling guards (425 / 409) without contention from
+  // the short-TTL concurrency lock. Production always has INITIATE_LOCK_TTL_SEC > 0.
+  if (INITIATE_LOCK_TTL_SEC === 0) return true;
+  const now = Date.now();
+  for (const [k, v] of _fallbackInitiateLocks.entries()) {
+    if (v < now) _fallbackInitiateLocks.delete(k);
+  }
+  if (_fallbackInitiateLocks.has(key)) return false;
+  _fallbackInitiateLocks.set(key, expireAtMs);
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Zod schemas
@@ -117,57 +160,125 @@ export class PaymentService {
     const balance = money(Number(inv.amountDue) - Number(inv.amountPaid));
     if (balance <= 0) throw new AppError(i18n.errors.invoice.alreadyPaid, 409);
 
+    // Resolve active gateway UP-FRONT so pending-age policy can branch correctly
+    // for ALATPAY vs Paystack. This also is needed so the A5.1 stale logic below
+    // never writes a terminal status from elapsed time alone.
+    const activeGateway = await getActiveGatewaySetting();
+
+    // Task-4: concurrent double-click / tab / refresh race protection. Serialize
+    // all initiation attempts for the same (student, invoice) using a short
+    // Redis/in-process lock. Otherwise two parallel requests can both see
+    // count=0 and create two PENDING provider transactions. A 429 is returned
+    // for the losing request instead of a duplicate.
+    const lockOk = await acquireInitiateDedupeLock(studentId, inv.id);
+    if (!lockOk) {
+      throw new AppError(
+        'Another payment initiation request is currently in progress for this invoice. Please wait a moment and try again.',
+        429,
+      );
+    }
+
     // A5.1 Idempotency guard (FR-A7): check for recent PENDING rows on this invoice
+    //
+    // CRITICAL FINANCIAL SAFETY (per issue with production transaction #40):
+    //   An unresolved PENDING row MUST NEVER be automatically transitioned to FAILED
+    //   (or any other terminal financial status) merely because of elapsed time /
+    //   browser timeout / popup closure / missing webhook / missing final UUID.
+    //   UNKNOWN is not FAILED. NO CALLBACK is not FAILED. TIMEOUT is not FAILED.
+    //   RETRY is not FAILED.
+    //
+    // Policy:
+    //   * recent pending (< FIVE_MINUTES_MS) -> block with 425 regardless of gateway.
+    //   * older unresolved PAYSTACK pending -> retain legacy PENDING->FAILED with
+    //     description=client-reinit-timeout. Paystack pending references can usually
+    //     be re-verified client-side later; this path is the preexisting behavior and
+    //     was not flagged in incident. Not broadened to ALATPAY.
+    //   * older unresolved ALATPAY (or gateway unknown / null) pending -> BLOCK
+    //     initiation entirely with a 409 student-facing status message. DO NOT write
+    //     FAILED. DO NOT create a second PENDING provider transaction. The student
+    //     must wait for the existing attempt to be reconciled (requires stored
+    //     alatpayFinalTransactionId that only the provider can supply / verify).
+    //
+    // Additional duplicate ceiling (Task 4): regardless of age, if the same
+    // invoice/student already has 2+ unresolved PENDING rows total, block
+    // initiation until at least one clears; this prevents runaway accumulation of
+    // duplicate provider sessions (accidental double-click / tab / refresh storms).
     const FIVE_MINUTES_MS = 5 * 60 * 1000;
-    const existingPending = await prisma.transaction.findFirst({
-      where: {
-        invoiceId: inv.id,
-        status: TransactionStatus.PENDING,
-        userId: studentId,
-      },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true, createdAt: true, status: true },
-    });
+    const MAX_UNRESOLVED_PENDING_PER_INVOICE = 2;
+    const [existingPending, pendingCount] = await Promise.all([
+      prisma.transaction.findFirst({
+        where: {
+          invoiceId: inv.id,
+          status: TransactionStatus.PENDING,
+          userId: studentId,
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, createdAt: true, status: true, gateway: true, alatpayFinalTransactionId: true },
+      }),
+      prisma.transaction.count({
+        where: {
+          invoiceId: inv.id,
+          status: TransactionStatus.PENDING,
+          userId: studentId,
+        },
+      }),
+    ]);
+    if (pendingCount >= MAX_UNRESOLVED_PENDING_PER_INVOICE) {
+      throw new AppError(
+        'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
+        409,
+      );
+    }
     if (existingPending) {
       const createdAtTime = existingPending.createdAt.getTime();
       const nowTime = Date.now();
       const ageMs = nowTime - createdAtTime;
+      const pendingGateway = (existingPending as any).gateway as string | null;
+      const hasTrustedAlatpayFinalUuid = Boolean((existingPending as any).alatpayFinalTransactionId) && /^[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12}$/.test(String((existingPending as any).alatpayFinalTransactionId));
       if (ageMs < FIVE_MINUTES_MS) {
         throw new AppError(
           'Payment already in progress. Please wait 5 minutes before retrying or check status.',
           425,
         );
       }
+      // Older than 5 minutes. Policy depends on the PERSISTED gateway of that
+      // attempt, NOT the currently-active system gateway (historical determinism).
+      const isAlatpayUnresolved =
+        pendingGateway === PaymentGateway.ALATPAY ||
+        (pendingGateway == null && activeGateway === PaymentGateway.ALATPAY);
+      if (isAlatpayUnresolved && !hasTrustedAlatpayFinalUuid) {
+        // DO NOT write FAILED. Block initiation. Preserve original PENDING row
+        // untouched so scheduler reconciliation can still succeed if/when the
+        // provider's UUID is eventually captured / delivered.
+        throw new AppError(
+          'A previous ALATPay payment attempt is still awaiting confirmation and has not been authoritatively failed. Please verify that attempt using its transaction reference, or contact support. Another payment will not be started automatically because the final provider transaction identifier is not yet recorded.',
+          409,
+        );
+      }
+      // Legacy path: Paystack PENDING that has aged past 5 minutes. Re-transition
+      // to FAILED so another attempt can be made (unchanged Paystack behavior).
       await prisma.transaction.update({
         where: { id: existingPending.id },
         data: { status: TransactionStatus.FAILED, description: 'client-reinit-timeout' },
       });
     }
+  // 3. Partial amount clamp
+  let payable = balance;
+  if (payload.partialAmount !== undefined && payload.partialAmount !== null) {
+    const pa = money(Number(payload.partialAmount));
+    if (pa <= 0) throw new AppError(i18n.errors.payment.invalidPartialAmount, 400);
+    payable = pa > balance ? balance : pa;
+  }
 
-    // 3. Partial amount clamp
-    let payable = balance;
-    if (payload.partialAmount !== undefined && payload.partialAmount !== null) {
-      const pa = money(Number(payload.partialAmount));
-      if (pa <= 0) throw new AppError(i18n.errors.payment.invalidPartialAmount, 400);
-      payable = pa > balance ? balance : pa;
-    }
+  // 4. Service charge breakdown — charge comes ON TOP of payable so the
+  //    university always receives exactly payable to STUDENT_RECEIVABLE.
+  const breakdown = computePaymentBreakdown(payable);
+  const expectedAmount = breakdown.totalAmount;
+  const provider = getPaymentProvider(activeGateway);
 
-    // 4. Service charge breakdown — charge comes ON TOP of payable so the
-    //    university always receives exactly `payable` to STUDENT_RECEIVABLE.
-    const breakdown = computePaymentBreakdown(payable);
-    const expectedAmount = breakdown.totalAmount;
-
-    // 5. Resolve active gateway BEFORE creating the pending Transaction.
-    //    (CRITICAL AUDIT REQUIREMENT: the gateway must be written explicitly on the
-    //    initial row so failed provider initializations retain the CORRECT
-    //    persisted gateway (PaymentGateway default(PAYSTACK)-would never silently
-    //    inherit the provider ref fields.
-    const activeGateway = await getActiveGatewaySetting();
-    const provider = getPaymentProvider(activeGateway);
-
-    // 6. Create reference & pending Transaction — with gateway explicitly set.
-    const paymentRef = generatePaymentReference();
-    const txRow = await prisma.transaction.create({
+  // 6. Create reference & pending Transaction — with gateway explicitly set.
+  const paymentRef = generatePaymentReference();
+  const txRow = await prisma.transaction.create({
       data: {
         reference: paymentRef,
         userId: studentId,

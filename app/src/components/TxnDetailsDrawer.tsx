@@ -123,10 +123,17 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
   const paystackReference = tx.paystackReference || tx.paystackRef || tx.gatewayRef || null;
   const channel = tx.paystackChannel || tx.channel || tx.paymentChannel || null;
   const status = String(tx.status || 'UNKNOWN').toUpperCase();
-  const amount = tx.amount ?? tx.paidAmount ?? tx.balance ?? tx.amountDue ?? 0;
-  const transactionId = Number(tx.id ?? (tx as any).transactionId);
-
   const isTerminal = ['SUCCESS', 'PAID', 'UNDERPAID', 'OVERPAID', 'REVERSED', 'REFUNDED', 'FAILED', 'CANCELLED'].includes(status);
+  const rawAmount = Number(tx.amount ?? 0);
+  const expectedAmount = Number(tx.expectedAmount ?? tx.paidAmount ?? 0);
+  let amount = rawAmount;
+  if (typeof (tx as any).displayAmount === 'number' && !Number.isNaN((tx as any).displayAmount)) {
+    amount = (tx as any).displayAmount;
+  } else if (amount <= 0 && ['PENDING', 'FAILED'].includes(status) && expectedAmount > 0) {
+    amount = expectedAmount;
+  }
+  const amountIsAttempt =
+    amount !== rawAmount && ['PENDING', 'FAILED'].includes(status);
   const isLikelyTransaction =
     typeof (tx as any).gateway === 'string' ||
     typeof (tx as any).channel === 'string' ||
@@ -139,7 +146,8 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
     typeof (tx as any).fee !== 'undefined' ||
     typeof (tx as any).amountDue !== 'undefined' ||
     typeof (tx as any).balance !== 'undefined';
-  const canShowReverify = !isTerminal && !isLikelyInvoice && isLikelyTransaction && Number.isFinite(transactionId) && transactionId > 0;
+  const txId = Number((tx as any).id ?? (tx as any).transactionId ?? NaN);
+  const canShowReverify = !isTerminal && !isLikelyInvoice && isLikelyTransaction && Number.isFinite(txId) && txId > 0;
 
   const handleDownload = async () => {
     const rid = receiptId ?? tx.receipt?.id ?? null;
@@ -160,11 +168,11 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
   };
 
   const handleReverify = async () => {
-    if (!Number.isFinite(transactionId) || transactionId <= 0) return;
+    if (!Number.isFinite(txId) || txId <= 0) return;
     if (reverifyUi.kind === 'loading' || reverifyUi.kind === 'cooldown') return;
     setReverifyUi({ kind: 'loading' });
     try {
-      const r: any = await studentFeeApi.reverifyPayment(transactionId);
+      const r: any = await studentFeeApi.reverifyPayment(txId);
       const uiState = String(r?.uiState || 'pending').toLowerCase();
       if (uiState === 'success') {
         setReverifyUi({
@@ -299,7 +307,12 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
 
           <div className="flex items-start justify-between py-3 gap-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-gray-500 shrink-0 w-36">Amount (NGN)</span>
-            <span className="text-base font-black text-gray-900 tabular-nums">{formatNgn(amount)}</span>
+            <div className="text-right">
+              <span className="text-base font-black text-gray-900 tabular-nums">{formatNgn(amount)}</span>
+              {amountIsAttempt ? (
+                <div className="text-[10px] leading-none text-gray-500 mt-1">attempted amount (not yet confirmed)</div>
+              ) : null}
+            </div>
           </div>
 
           {canShowReverify && (

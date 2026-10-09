@@ -1,4 +1,4 @@
-import { PaymentService } from '../services/payment';
+import { PaymentService, _testResetInitiateLocks } from '../services/payment';
 import prisma from '../config/database';
 import * as PaystackModule from '../services/paystack';
 import { TransactionStatus, Role, PaymentGateway } from '@prisma/client';
@@ -8,7 +8,7 @@ jest.mock('../config/database', () => ({
   default: {
     user: { findFirst: jest.fn() },
     invoice: { findFirst: jest.fn() },
-    transaction: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
+    transaction: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
     rolePermission: { findMany: jest.fn() },
     $transaction: jest.fn(),
   },
@@ -105,6 +105,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
   }
 
   beforeEach(() => {
+    _testResetInitiateLocks();
     resetMocks();
     (prisma.user.findFirst as jest.Mock).mockResolvedValue(MOCK_STUDENT);
     (prisma.invoice.findFirst as jest.Mock).mockResolvedValue(MOCK_INVOICE);

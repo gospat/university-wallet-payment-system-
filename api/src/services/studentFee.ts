@@ -230,14 +230,17 @@ export class StudentFeesService {
             reference: true,
             gateway: true,
             amount: true,
+            expectedAmount: true,
             status: true,
             paystackChannel: true,
             paystackReference: true,
             alatpayReference: true,
+            alatpayFinalTransactionId: true,
             alatpaySessionId: true,
             type: true,
             description: true,
             createdAt: true,
+            updatedAt: true,
           },
           orderBy: { createdAt: 'desc' },
           take: 50,
@@ -263,24 +266,45 @@ export class StudentFeesService {
     };
     // Map raw Transaction fields (per schema.prisma model) into the shape
     // the frontend expects (channel / paymentReference / transactionDate).
-    const mappedTransactions = ((row as any).transactions ?? []).map((tx: any) => ({
-      id: tx.id,
-      reference: tx.reference,
-      gateway: tx.gateway,
-      // channel: frontend history drawer + list render this
-      channel: tx.paystackChannel || (tx.gateway ? String(tx.gateway).toLowerCase() : null),
-      amount: Number(tx.amount),
-      status: tx.status,
-      // paymentReference: used as a human-readable reference alias
-      paymentReference: tx.reference,
-      paystackReference: tx.paystackReference ?? null,
-      alatpayReference: tx.alatpayReference ?? null,
-      // transactionDate: used in history table (falls back to createdAt on FE too)
-      transactionDate: tx.createdAt,
-      type: tx.type,
-      description: tx.description ?? null,
-      createdAt: tx.createdAt,
-    }));
+    const mappedTransactions = ((row as any).transactions ?? []).map((tx: any) => {
+      const status = String(tx.status ?? 'UNKNOWN').toUpperCase();
+      // Presentation-only amount rule:
+      //   - SUCCESS / UNDERPAID / OVERPAID / REVERSED: use authoritative amount
+      //   - PENDING / FAILED: amount is typically 0 because the provider never
+      //     (or not yet) moved money. Show expectedAmount (the amount the
+      //     student *attempted* to pay) instead. NEVER mutate DB values here.
+      let displayAmount = Number(tx.amount ?? 0);
+      const isAttemptOnly = ['PENDING', 'FAILED'].includes(status);
+      if (isAttemptOnly) {
+        const expected = Number(tx.expectedAmount ?? 0);
+        // If FAILED has an authoritative amount > 0 (Paystack declined with
+        // captured amount or manual corrected amount), prefer it. Otherwise
+        // (amount == 0, e.g. no callback happened at all), use expectedAmount.
+        if (displayAmount <= 0 && expected > 0) displayAmount = expected;
+      }
+      return {
+        id: tx.id,
+        reference: tx.reference,
+        gateway: tx.gateway,
+        // channel: frontend history drawer + list render this
+        channel: tx.paystackChannel || (tx.gateway ? String(tx.gateway).toLowerCase() : null),
+        amount: Number(tx.amount),
+        expectedAmount: Number(tx.expectedAmount ?? 0),
+        displayAmount,
+        status: tx.status,
+        // paymentReference: used as a human-readable reference alias
+        paymentReference: tx.reference,
+        paystackReference: tx.paystackReference ?? null,
+        alatpayReference: tx.alatpayReference ?? null,
+        alatpayFinalTransactionId: tx.alatpayFinalTransactionId ?? null,
+        // transactionDate: used in history table (falls back to createdAt on FE too)
+        transactionDate: tx.createdAt,
+        type: tx.type,
+        description: tx.description ?? null,
+        createdAt: tx.createdAt,
+        updatedAt: tx.updatedAt,
+      };
+    });
     return {
       invoice: {
         id: row.id,

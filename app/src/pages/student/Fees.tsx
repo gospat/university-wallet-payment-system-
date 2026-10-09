@@ -917,15 +917,31 @@ const InvoiceDetailModal: React.FC<{
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {transactions.map((tx) => (
-                        <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setSelectedTxn(tx); setDrawerOpen(true); }}>
-                          <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
-                          <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
-                          <td className="px-4 py-2 text-right tabular-nums">{formatNgn(tx.amount)}</td>
-                          <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
-                          <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
-                        </tr>
-                      ))}
+                      {transactions.map((tx) => {
+                        const status = String(tx.status ?? 'UNKNOWN').toUpperCase();
+                        const rawAmount = Number(tx.amount ?? 0);
+                        const expected = Number((tx as any).expectedAmount ?? 0);
+                        const displayAmount =
+                          typeof (tx as any).displayAmount === 'number' && !Number.isNaN((tx as any).displayAmount)
+                            ? (tx as any).displayAmount
+                            : (rawAmount <= 0 && ['PENDING', 'FAILED'].includes(status) && expected > 0)
+                              ? expected
+                              : rawAmount;
+                        return (
+                          <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setSelectedTxn(tx); setDrawerOpen(true); }}>
+                            <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
+                            <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
+                            <td className="px-4 py-2 text-right tabular-nums">
+                              <span className="text-gray-900">{formatNgn(displayAmount)}</span>
+                              {['PENDING', 'FAILED'].includes(status) && expected > 0 && rawAmount !== displayAmount ? (
+                                <div className="text-[10px] leading-none text-gray-500 mt-0.5">attempted</div>
+                              ) : null}
+                            </td>
+                            <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
+                            <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1164,15 +1180,31 @@ const InvoiceDetailPage: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {transactions.map((tx) => (
-                        <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setPageSelectedTxn(tx); setPageDrawerOpen(true); }}>
-                          <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
-                          <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
-                          <td className="px-4 py-2 text-right tabular-nums">{formatNgn(tx.amount)}</td>
-                          <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
-                          <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
-                        </tr>
-                      ))}
+                      {transactions.map((tx) => {
+                        const status = String(tx.status ?? 'UNKNOWN').toUpperCase();
+                        const rawAmount = Number(tx.amount ?? 0);
+                        const expected = Number((tx as any).expectedAmount ?? 0);
+                        const displayAmount =
+                          typeof (tx as any).displayAmount === 'number' && !Number.isNaN((tx as any).displayAmount)
+                            ? (tx as any).displayAmount
+                            : (rawAmount <= 0 && ['PENDING', 'FAILED'].includes(status) && expected > 0)
+                              ? expected
+                              : rawAmount;
+                        return (
+                          <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setPageSelectedTxn(tx); setPageDrawerOpen(true); }}>
+                            <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
+                            <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
+                            <td className="px-4 py-2 text-right tabular-nums">
+                              <span className="text-gray-900">{formatNgn(displayAmount)}</span>
+                              {['PENDING', 'FAILED'].includes(status) && expected > 0 && rawAmount !== displayAmount ? (
+                                <div className="text-[10px] leading-none text-gray-500 mt-0.5">attempted</div>
+                              ) : null}
+                            </td>
+                            <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
+                            <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
