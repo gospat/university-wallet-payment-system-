@@ -158,7 +158,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
     ).rejects.toMatchObject({ statusCode: 425, message: expect.stringContaining('Payment already in progress') });
   });
 
-  it('[idempotency-reinit] PENDING row older than 5 min is CANCELLED, new init proceeds', async () => {
+  it('[idempotency-reinit] PENDING row older than 5 min — PENDING preserved, 409 block, ZERO terminal FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED writes', async () => {
     (prisma.transaction.findFirst as jest.Mock).mockImplementation((args: any) => {
       const where = args?.where ?? {};
       if (where.status === TransactionStatus.PENDING && where.invoiceId === 501) {
@@ -166,21 +166,44 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
           id: 9010,
           createdAt: new Date(Date.now() - 10 * 60 * 1000),
           status: TransactionStatus.PENDING,
+          gateway: 'PAYSTACK',
         });
       }
       return Promise.resolve(null);
     });
+    (prisma.transaction.count as jest.Mock).mockResolvedValue(1);
 
     const callArgs = { invoiceId: 501 };
-    const result = await PaymentService.initiatePayment(MOCK_STUDENT.id, callArgs as any);
+    let threw: any = null;
+    try {
+      await PaymentService.initiatePayment(MOCK_STUDENT.id, callArgs as any);
+    } catch (e) {
+      threw = e;
+    }
 
-    expect(prisma.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 9010 },
-        data: expect.objectContaining({ status: 'FAILED', description: 'client-reinit-timeout' }),
-      }),
-    );
-    expect(result).toBeDefined();
-    expect(result.payment_reference || result.authorization_url).toBeTruthy();
+    expect(threw).toBeInstanceOf(Error);
+    const statusCode = (threw as any).statusCode ?? (threw as any).httpCode ?? (threw as any).code ?? (threw as any).status;
+    expect(statusCode).toBe(409);
+
+    const terminalWrites = (prisma.transaction.update as jest.Mock).mock.calls.filter((call) => {
+      const data = ((call?.[1]?.data ?? call?.[0]?.data) as any) ?? {};
+      return [
+        TransactionStatus.FAILED,
+        TransactionStatus.SUCCESS,
+        TransactionStatus.UNDERPAID,
+        TransactionStatus.OVERPAID,
+        TransactionStatus.REVERSED,
+      ].includes(data.status);
+    });
+    expect(terminalWrites.length).toBe(0);
+
+    const reinitFailedWrites = (prisma.transaction.update as jest.Mock).mock.calls.filter((call) => {
+      const data = ((call?.[1]?.data ?? call?.[0]?.data) as any) ?? {};
+      return String(data.description ?? '').includes('client-reinit-timeout');
+    });
+    expect(reinitFailedWrites.length).toBe(0);
+
+    expect(PaystackModule.PaystackService.initializeTransaction).not.toHaveBeenCalled();
+    expect(prisma.transaction.create).toHaveBeenCalledTimes(0);
   });
 });

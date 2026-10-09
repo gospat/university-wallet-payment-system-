@@ -12,7 +12,13 @@ jest.mock('../config/database', () => ({
   default: {
     user: { findFirst: jest.fn() },
     invoice: { findFirst: jest.fn() },
-    transaction: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
+    transaction: {
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
+    },
     feeAssignment: { findMany: jest.fn(), updateMany: jest.fn() },
     $transaction: jest.fn(),
   },
@@ -63,8 +69,11 @@ function resetMocks() {
   (prisma.user.findFirst as jest.Mock).mockReset();
   (prisma.invoice.findFirst as jest.Mock).mockReset();
   (prisma.transaction.findFirst as jest.Mock).mockReset();
+  (prisma.transaction.findMany as jest.Mock).mockReset();
   (prisma.transaction.create as jest.Mock).mockReset();
   (prisma.transaction.update as jest.Mock).mockReset();
+  (prisma.transaction.count as jest.Mock).mockReset();
+  (prisma.transaction.count as jest.Mock).mockResolvedValue(0);
   (prisma.feeAssignment.findMany as jest.Mock).mockReset();
   (prisma.feeAssignment.updateMany as jest.Mock).mockReset();
   (PaystackModule.PaystackService.initializeTransaction as jest.Mock).mockReset();
@@ -119,7 +128,7 @@ beforeEach(() => {
 });
 
 // A. ALATPAY success → gateway ALATPAY persisted
-test('A. activeGateway=ALATPAY + init success: transaction.gateway = ALATPAY on CREATE (not default PAYSTACK)', async () => {
+test('A. activeGateway=ALATPAY + init success: transaction.gateway = ALATPAY on CREATE + update; no underpaidReason on happy path', async () => {
   mockProvider(PaymentGateway.ALATPAY);
   await PaymentService.initiatePayment(1001, { invoiceId: 501 });
 
@@ -129,12 +138,16 @@ test('A. activeGateway=ALATPAY + init success: transaction.gateway = ALATPAY on 
   expect(createArgs.data.userId).toBe(1001);
 
   // Provider init success → update ALSO writes gateway (defensive idempotent)
-  const updArgs = (prisma.transaction.update as jest.Mock).mock.calls[0][0];
-  expect(updArgs.data.gateway).toBe(PaymentGateway.ALATPAY);
+  const updateCalls = (prisma.transaction.update as jest.Mock).mock.calls;
+  expect(updateCalls.length).toBeGreaterThanOrEqual(1);
+  const updArgs = updateCalls[updateCalls.length - 1]?.[0] ?? updateCalls[updateCalls.length - 1]?.[1] ?? {};
+  expect(updArgs.data?.gateway).toBe(PaymentGateway.ALATPAY);
+  // Happy path init: no underpaidReason (financially-semantic column reserved for actual underpayment)
+  expect(updArgs.data).not.toHaveProperty('underpaidReason');
 });
 
-// B. ALATPAY failure → gateway still ALATPAY, status FAILED
-test('B. activeGateway=ALATPAY + init failure: transaction.gateway = ALATPAY + status FAILED (never inherited PAYSTACK default)', async () => {
+// B. ALATPAY failure → gateway still ALATPAY, PENDING preserved, no terminal write, safe diagnostics + non-terminal audit
+test('B. activeGateway=ALATPAY + ambiguous init failure: PENDING preserved, gateway=ALATPAY written, safe diagnostics, NO terminal FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED', async () => {
   const initErr = new Error('ALATPAY sandbox 403: test merchant profile not activated');
   mockProvider(PaymentGateway.ALATPAY, { initThrows: initErr });
 
@@ -145,27 +158,55 @@ test('B. activeGateway=ALATPAY + init failure: transaction.gateway = ALATPAY + s
   // Critical assertion: CREATE wrote gateway explicitly = ALATPAY
   const createArgs = (prisma.transaction.create as jest.Mock).mock.calls[0][0];
   expect(createArgs.data.gateway).toBe(PaymentGateway.ALATPAY);
+  expect(createArgs.data.status).toBe(TransactionStatus.PENDING);
 
-  // Catch FAILED update ALSO wrote gateway explicitly
-  const updCall = (prisma.transaction.update as jest.Mock).mock.calls.find(
-    (c: any) => c[0]?.data?.status === TransactionStatus.FAILED,
-  );
-  expect(updCall).toBeDefined();
-  expect(updCall[0].data.gateway).toBe(PaymentGateway.ALATPAY);
-  expect(updCall[0].data.status).toBe(TransactionStatus.FAILED);
+  // Catch update ALSO writes gateway (defensive idempotent) but NEVER terminal status
+  const updateCalls = (prisma.transaction.update as jest.Mock).mock.calls;
+  expect(updateCalls.length).toBeGreaterThanOrEqual(1);
+  const lastUpd = updateCalls[updateCalls.length - 1]?.[0] ?? updateCalls[updateCalls.length - 1]?.[1] ?? {};
+  const anyTerminalWrite = updateCalls.some((c: any) => {
+    const data = c?.[0]?.data ?? c?.[1]?.data ?? {};
+    return [
+      TransactionStatus.FAILED,
+      TransactionStatus.SUCCESS,
+      TransactionStatus.UNDERPAID,
+      TransactionStatus.OVERPAID,
+      TransactionStatus.REVERSED,
+    ].includes(data.status);
+  });
+  expect(anyTerminalWrite).toBe(false);
+  expect(lastUpd.data?.gateway).toBe(PaymentGateway.ALATPAY);
+
+  // Diagnostics stored in safe shape, underpaidReason never written
+  const meta = lastUpd.data?.metadata ?? {};
+  const diag = meta.initiateTransportFailed;
+  expect(diag).toBeDefined();
+  expect(diag).toHaveProperty('at');
+  expect(diag).toHaveProperty('provider');
+  expect(diag).toHaveProperty('errorClass');
+  expect(diag).toHaveProperty('sanitizedMessage');
+  expect(typeof diag.sanitizedMessage).toBe('string');
+  expect(diag.provider).toBe(PaymentGateway.ALATPAY);
+  expect(lastUpd.data).not.toHaveProperty('underpaidReason');
 });
 
 // C. PAYSTACK success → gateway PAYSTACK
-test('C. activeGateway=PAYSTACK + init success: transaction.gateway = PAYSTACK on CREATE', async () => {
+test('C. activeGateway=PAYSTACK + init success: transaction.gateway = PAYSTACK on CREATE + update (idempotent)', async () => {
   mockProvider(PaymentGateway.PAYSTACK);
   await PaymentService.initiatePayment(1001, { invoiceId: 501 });
 
   const createArgs = (prisma.transaction.create as jest.Mock).mock.calls[0][0];
   expect(createArgs.data.gateway).toBe(PaymentGateway.PAYSTACK);
+  expect(createArgs.data.status).toBe(TransactionStatus.PENDING);
+
+  const updateCalls = (prisma.transaction.update as jest.Mock).mock.calls;
+  expect(updateCalls.length).toBeGreaterThanOrEqual(1);
+  const lastUpd = updateCalls[updateCalls.length - 1]?.[0] ?? updateCalls[updateCalls.length - 1]?.[1] ?? {};
+  expect(lastUpd.data?.gateway).toBe(PaymentGateway.PAYSTACK);
 });
 
-// D. PAYSTACK failure → gateway still PAYSTACK, status FAILED
-test('D. activeGateway=PAYSTACK + init failure: transaction.gateway = PAYSTACK + status FAILED', async () => {
+// D. PAYSTACK failure → gateway still PAYSTACK, PENDING preserved, safe diagnostics, no terminal write
+test('D. activeGateway=PAYSTACK + ambiguous init failure: PENDING preserved, gateway=PAYSTACK written, safe diagnostics, NO terminal FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED', async () => {
   const initErr = new Error('Paystack: Secret key is invalid');
   mockProvider(PaymentGateway.PAYSTACK, { initThrows: initErr });
   await expect(
@@ -174,28 +215,69 @@ test('D. activeGateway=PAYSTACK + init failure: transaction.gateway = PAYSTACK +
 
   const createArgs = (prisma.transaction.create as jest.Mock).mock.calls[0][0];
   expect(createArgs.data.gateway).toBe(PaymentGateway.PAYSTACK);
-  const updCall = (prisma.transaction.update as jest.Mock).mock.calls.find(
-    (c: any) => c[0]?.data?.status === TransactionStatus.FAILED,
-  );
-  expect(updCall).toBeDefined();
-  expect(updCall[0].data.gateway).toBe(PaymentGateway.PAYSTACK);
-  expect(updCall[0].data.status).toBe(TransactionStatus.FAILED);
+  expect(createArgs.data.status).toBe(TransactionStatus.PENDING);
+
+  const updateCalls = (prisma.transaction.update as jest.Mock).mock.calls;
+  expect(updateCalls.length).toBeGreaterThanOrEqual(1);
+  const lastUpd = updateCalls[updateCalls.length - 1]?.[0] ?? updateCalls[updateCalls.length - 1]?.[1] ?? {};
+  const anyTerminalWrite = updateCalls.some((c: any) => {
+    const data = c?.[0]?.data ?? c?.[1]?.data ?? {};
+    return [
+      TransactionStatus.FAILED,
+      TransactionStatus.SUCCESS,
+      TransactionStatus.UNDERPAID,
+      TransactionStatus.OVERPAID,
+      TransactionStatus.REVERSED,
+    ].includes(data.status);
+  });
+  expect(anyTerminalWrite).toBe(false);
+  expect(lastUpd.data?.gateway).toBe(PaymentGateway.PAYSTACK);
+
+  const meta = lastUpd.data?.metadata ?? {};
+  const diag = meta.initiateTransportFailed;
+  expect(diag).toBeDefined();
+  expect(diag).toHaveProperty('at');
+  expect(diag).toHaveProperty('provider');
+  expect(diag).toHaveProperty('errorClass');
+  expect(diag).toHaveProperty('sanitizedMessage');
+  expect(typeof diag.sanitizedMessage).toBe('string');
+  expect(diag.provider).toBe(PaymentGateway.PAYSTACK);
+  expect(lastUpd.data).not.toHaveProperty('underpaidReason');
 });
 
-// E. Failure path: no receipt, no invoice totals touched
-test('E. any init failure: NO receipt.create, NO prisma.invoice.update; ONLY prisma.transaction.update FAILED', async () => {
+// E. Failure path: no receipt, no invoice totals touched, safe diagnostics present
+test('E. any ambiguous init failure: PENDING preserved, NO receipt.create, NO prisma.invoice.update, NO terminal write; initiateTransportFailed safe diagnostics present', async () => {
   mockProvider(PaymentGateway.PAYSTACK, { initThrows: new Error('fail') });
   await expect(
     PaymentService.initiatePayment(1001, { invoiceId: 501 }),
   ).rejects.toThrow();
 
-  // Verify NO prisma methods outside transaction CRUD + find were called
-  // prisma is mocked with explicit methods — count them
+  // Verify NO terminal status writes
   const updateMock = prisma.transaction.update as jest.Mock;
-  const failedUpdate = updateMock.mock.calls.find(
-    (c: any) => c[0]?.data?.status === TransactionStatus.FAILED,
-  );
-  expect(failedUpdate).toBeDefined();
+  const anyTerminalUpdate = updateMock.mock.calls.find((c: any) => {
+    const data = c?.[0]?.data ?? c?.[1]?.data ?? {};
+    return [
+      TransactionStatus.FAILED,
+      TransactionStatus.SUCCESS,
+      TransactionStatus.UNDERPAID,
+      TransactionStatus.OVERPAID,
+      TransactionStatus.REVERSED,
+    ].includes(data.status);
+  });
+  expect(anyTerminalUpdate).toBeUndefined();
+
+  // Verify initiateTransportFailed diagnostic metadata present (catch block wrote it)
+  const diagUpdate = updateMock.mock.calls.find((c: any) => {
+    const data = c?.[0]?.data ?? c?.[1]?.data ?? {};
+    return typeof data?.metadata?.initiateTransportFailed !== 'undefined';
+  });
+  expect(diagUpdate).toBeDefined();
+  const diagData = (diagUpdate?.[0]?.data ?? diagUpdate?.[1]?.data ?? {}).metadata.initiateTransportFailed;
+  expect(diagData).toHaveProperty('at');
+  expect(diagData).toHaveProperty('provider');
+  expect(diagData).toHaveProperty('errorClass');
+  expect(diagData).toHaveProperty('sanitizedMessage');
+
   // Specifically: invoice updates are NEVER called (no amountPaid bump)
   // Our mocked prisma.invoice.findFirst was called 1 time to fetch invoice.
   // There is NO prisma.invoice.update in our mock — if code tried calling it, it'd throw.

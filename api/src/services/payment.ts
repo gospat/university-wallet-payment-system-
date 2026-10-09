@@ -129,6 +129,69 @@ function money(n: number | Prisma.Decimal): number {
   return Number(Number(n).toFixed(2));
 }
 
+type SafeDiagnostic = {
+  at: string;
+  provider: PaymentGateway | null;
+  errorClass: string;
+  httpCode: number | null;
+  safeCode: string | null;
+  sanitizedMessage: string;
+};
+
+const SECRET_PATTERNS = [
+  /sk[_-][A-Za-z0-9_-]{8,}/gi,
+  /pk[_-][A-Za-z0-9_-]{8,}/gi,
+  /Bearer\s+[A-Za-z0-9_\-.]{8,}/gi,
+  /Basic\s+[A-Za-z0-9+/=]{8,}/gi,
+  /Authorization:?\s*[^\s,;]{4,}/gi,
+  /(password|secret|token|apikey|api[_-]?key|webhook[_-]?secret|jwt[_-]?secret)\s*[:=]\s*[^\s,;&]{4,}/gi,
+  /(alatpay|paystack)\s*(secret|key|private)\s*[:=]\s*[A-Za-z0-9]{8,}/gi,
+  /[A-Za-z0-9]{32,}/g,
+  /https?:\/\/[^\s"'<>]*(token|key|secret|auth|password|access_token|signature)=[^\s"'<>]+/gi,
+  /cookie:?\s*[^\n]{8,}/gi,
+];
+
+const SAFE_FRIENDLY_TOKENS = new Map<string, string>();
+SAFE_FRIENDLY_TOKENS.set('ECONNRESET', 'network-connection-reset');
+SAFE_FRIENDLY_TOKENS.set('ECONNREFUSED', 'network-connection-refused');
+SAFE_FRIENDLY_TOKENS.set('ECONNABORTED', 'network-connection-aborted');
+SAFE_FRIENDLY_TOKENS.set('ETIMEDOUT', 'network-timeout');
+SAFE_FRIENDLY_TOKENS.set('ENOTFOUND', 'network-dns-resolution-failed');
+SAFE_FRIENDLY_TOKENS.set('EAI_AGAIN', 'network-dns-temporary-failure');
+SAFE_FRIENDLY_TOKENS.set('EPIPE', 'network-broken-pipe');
+SAFE_FRIENDLY_TOKENS.set('ESOCKETTIMEDOUT', 'network-socket-timeout');
+
+function safeDiagnosticFromError(err: any, provider: PaymentGateway | null): SafeDiagnostic {
+  const name: string =
+    (err && (err.name ?? err.constructor?.name)) ?? 'Error';
+  const codeRaw: any = (err && (err.code ?? err.statusCode ?? err.httpCode ?? err.status ?? null));
+  const httpCode: number | null =
+    typeof codeRaw === 'number' && Number.isFinite(codeRaw) && codeRaw >= 100 && codeRaw < 600 ? codeRaw : null;
+  const errCodeStr: string | null =
+    typeof (err && err.code) === 'string' && (err as any).code.length <= 64 ? (err as any).code : null;
+  const safeCode: string | null = errCodeStr ?? (httpCode ? `HTTP_${httpCode}` : null);
+  const rawMessage = typeof (err && (err.message ?? String(err))) === 'string'
+    ? String((err as any).message ?? err)
+    : 'unknown';
+  let msg = rawMessage.slice(0, 220);
+  for (const re of SECRET_PATTERNS) {
+    msg = msg.replace(re, '[REDACTED]');
+  }
+  msg = msg.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  if (SAFE_FRIENDLY_TOKENS.has(String(errCodeStr))) {
+    msg = `${SAFE_FRIENDLY_TOKENS.get(String(errCodeStr))} — ${msg}`;
+  }
+  const sanitizedMessage = msg.slice(0, 180) || 'diagnostic redacted';
+  return {
+    at: new Date().toISOString(),
+    provider,
+    errorClass: String(name || 'Error').slice(0, 80),
+    httpCode,
+    safeCode,
+    sanitizedMessage,
+  };
+}
+
 /**
  * Provider-neutral conservative retry policy (Blocker fix 1/2/3):
  *
@@ -159,15 +222,11 @@ function money(n: number | Prisma.Decimal): number {
  * because the Promise.all query filters status = PENDING only.
  */
 function classifyPendingForRetry(
-  pendingGateway: string | null,
+  _pendingGateway: string | null,
   _activeGateway: PaymentGateway,
   _hasTrustedAlatpayFinalUuid: boolean,
-): { terminalizeFailed: false; blockInitiation: true } {
-  // Provider-neutral conservative policy: never terminalize on age alone.
-  // Future: if authoritative provider-init-time rejection classification is
-  // introduced (not transport ambiguous), a narrower safe terminalization
-  // may be added here with explicit audit/source evidence.
-  return { terminalizeFailed: false, blockInitiation: true };
+): { blockInitiation: true } {
+  return { blockInitiation: true };
 }
 
 
@@ -296,8 +355,11 @@ export class PaymentService {
       }
 
       // Provider-neutral conservative: never terminalize from age alone.
-      // classifyPendingForRetry returns { terminalizeFailed:false, blockInitiation:true }
-      // for every input (no exceptions, no gateway-branch special cases).
+      // classifyPendingForRetry returns { blockInitiation: true } for every
+      // input (no exceptions, no gateway-branch special cases, no terminal DB
+      // writes ever). Explicit provider-result classification belongs in an
+      // authoritative provider-verification/reverification workflow, not in
+      // the stale/elapsed-time retry path.
       const policy = classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid);
       if (policy.blockInitiation) {
         // 409 with student-facing actionable message.
@@ -318,23 +380,6 @@ export class PaymentService {
           `A ${gwLabel} payment attempt from ${Math.round(ageMs / 60000)} minutes ago is still awaiting confirmation and has not been authoritatively settled. Please verify that attempt using its transaction reference${finalUuidHint}, or contact support. Another payment will not be started automatically.`,
           409,
         );
-      }
-
-      // LINTING SAFETY — classifyPendingForRetry never returns terminalizeFailed
-      // today, but the call signature is extensible for a future explicit,
-      // signed-off, provider-declared rejection-only narrow path if a
-      // classification abstraction is ever added. In the current code the
-      // `if (policy.blockInitiation)` branch above always matches, and the
-      // code below is unreachable. It is preserved explicitly to prevent a
-      // silent accidental legacy `update FAILED client-reinit-timeout` from
-      // being reintroduced by a future inattentive edit.
-      if ((policy as any).terminalizeFailed === true) {
-        // Never reachable today. If enabled in future: this MUST ONLY happen
-        // for an EXPLICIT AUTHORITATIVE PROVIDER-DECLARED REJECTION (not time).
-        await prisma.transaction.update({
-          where: { id: existingPending.id },
-          data: { status: TransactionStatus.FAILED, description: 'provider-explicitly-rejected' },
-        });
       }
     }
   // 3. Partial amount clamp
@@ -529,58 +574,24 @@ export class PaymentService {
       }
       return base;
     } catch (err) {
-      const rawErrMsg = (err as Error)?.message ?? '';
-
       // -----------------------------------------------------------------------
-      // Blocker 5 FIX — distinguish explicit provider rejection vs transport/
-      // ambiguous initialization error.
-      //
-      // PRE-AUDIT FINDINGS (K1):
-      //   ALATPAY provider.initialize catch: all errors → new AppError(msg, 502).
-      //     Transport (timeout/DNS/502/503/lost response): throws code 502.
-      //     Provider 4xx errors: still re-classified as AppError(502) in catch.
-      //     So thrown HTTP status == 502 for ALATPAY ambiguous/transport paths.
-      //
-      //   PAYSTACK PaystackService.initializeTransaction catch: all errors →
-      //     new AppError(msg, 500). No 4xx/declined distinction.
-      //
-      // THEREFORE: today's provider abstraction does NOT reliably distinguish
-      // explicit authoritative provider-rejected initializations (A) from
-      // transport/system/ambiguous failures (B). Per user mandate: if we
-      // cannot reliably separate A from B → FAIL CLOSED. Do NOT invent
-      // certainty.
-      //
-      // RESULTING POLICY:
-      //   Transaction DB row status remains = PENDING (unresolved).
-      //   This is because:
-      //     * The provider may have actually created a session on its side
-      //       (e.g. ALATPAY POSTed initialize, DB row committed, then
-      //        socket reset before response came back — a webhook in the
-      //        future can still settle it).
-      //     * Marking FAILED prematurely would destroy the ability of a
-      //       future webhook/recon to recover.
-      //
-      //   We PERSIST:
-      //     * description: sanitized raw error message (human review)
-      //     * underpaidReason: same raw error (for tooling)
-      //     * metadata.initiateTransportFailed: { at, code, errClass }
-      //       flag so bursary/UI can label: "Provider init failed. Retry."
-      //
-      //   If a future version of the providers' abstraction can reliably
-      //   return a signed-off explicit provider-declared initialization
-      //   rejection (e.g. an HTTP 422 business code "amount too high" or
-      //   "merchant blocked", NOT a transport error), THEN a narrow
-      //   FAILED terminal write can be added for that specific, classified
-      //   case only.
-      //
-      //   Audit write keeps paymentFailed action name (since the student
-      //   UX shows an error to them) but DB-row status is PENDING (not
-      //   authoritative terminal).
+      // Ambiguous provider initialization exception classification:
+      // TODAY's provider abstraction does NOT reliably distinguish explicit
+      // authoritative provider rejection from transport/system failure.
+      // (ALATPAY all errors -> AppError(msg, 502); PAYSTACK all errors ->
+      //  AppError(msg, 500/400/401/404); no HTTP 402 DECLINED semantic / typed
+      //  rejection subtype in either abstraction.)
+      // THEREFORE fail closed: DB row status remains PENDING.
+      //   underpaidReason is financially semantic and reserved for actual
+      //     underpayments in verifyPayment; it is NOT used for initialization
+      //     diagnostics.
+      //   Diagnostics are kept ONLY in (a) metadata (strict safe shape,
+      //     genuinely redacted, no raw exception object) and
+      //     (b) a controlled description prefix.
+      //   Audit action = PAYMENT_INITIATION_UNCERTAIN (non-terminal), never
+      //     PAYMENT_FAILED (terminal).
       // -----------------------------------------------------------------------
-      const errHttpCode: number | null =
-        (err as any)?.httpCode && Number.isFinite((err as any).httpCode) ? Number((err as any).httpCode) :
-        (err as any)?.statusCode && Number.isFinite((err as any).statusCode) ? Number((err as any).statusCode) :
-        (err as any)?.status && Number.isFinite((err as any).status) ? Number((err as any).status) : null;
+      const diag = safeDiagnosticFromError(err, activeGateway);
       try {
         const existingMeta =
           txRow.metadata && typeof txRow.metadata === 'object'
@@ -589,22 +600,19 @@ export class PaymentService {
         const updatedMeta: Record<string, any> = {
           ...existingMeta,
           initiateTransportFailed: {
-            at: new Date().toISOString(),
-            httpCode: errHttpCode,
-            errorClass: (err as any)?.name ?? (err as any)?.constructor?.name ?? 'Error',
-            sanitized: rawErrMsg ? rawErrMsg.slice(0, 200) : null,
+            at: diag.at,
+            provider: diag.provider,
+            errorClass: diag.errorClass,
+            httpCode: diag.httpCode,
+            safeCode: diag.safeCode,
+            sanitizedMessage: diag.sanitizedMessage,
           },
         };
         await prisma.transaction.update({
           where: { id: txRow.id },
           data: {
             gateway: activeGateway,
-            // STATUS = PENDING (preserve unresolved — no authoritative terminal write)
-            // status: NOT SET → remains as created PENDING.
-            underpaidReason: rawErrMsg ? rawErrMsg.slice(0, 190) : null,
-            description: rawErrMsg
-              ? `[provider-init-failed ambiguous, status preserved PENDING] ${rawErrMsg.slice(0, 160)}`
-              : '[provider-init-failed ambiguous, status preserved PENDING]',
+            description: `[provider-init-failed ambiguous, status preserved PENDING] ${diag.sanitizedMessage}`,
             metadata: updatedMeta as Prisma.InputJsonValue,
           },
         });
@@ -613,17 +621,19 @@ export class PaymentService {
       }
       try {
         writeAudit(req, {
-          action: i18n.auditActions.paymentFailed,
+          action: i18n.auditActions.paymentInitiationUncertain,
           entityType: 'TRANSACTION',
           entityId: txRow.id,
           oldValue: { status: 'PENDING' },
           newValue: {
             gateway: activeGateway,
-            // Row DB status still PENDING, audit records the student UX failure.
-            // Status field written as 'PENDING + initiate-failed' explicitly:
-            status: 'PENDING (initiate transport/ambiguous failure; not authoritative terminal)',
-            error: rawErrMsg.slice(0, 500),
-            errorHttpCode: errHttpCode,
+            status: 'PENDING (initiate ambiguous; not authoritative terminal)',
+            diagnostic: {
+              errorClass: diag.errorClass,
+              httpCode: diag.httpCode,
+              safeCode: diag.safeCode,
+              sanitizedMessage: diag.sanitizedMessage,
+            },
           },
         });
       } catch (auditErr) {

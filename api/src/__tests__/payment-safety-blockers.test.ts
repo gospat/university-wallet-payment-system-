@@ -560,84 +560,6 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
   });
 
   // -------------------------------------------------------------------
-  // Scenario #9: Double concurrent initiation — lock EXERCISED, only 1 proceeds.
-  // NOTE: NO TTL=0 bypass (per user mandate). The dedup lock in test mode
-  // (INITIATE_LOCK_TTL_SEC = 0) short-circuits (per structural TR-36.6).
-  // To EXERCISE the lock predicate on the mocked Redis SET path we instead
-  // manually call into acquireInitiateDedupeLock via its private test hook AND
-  // also verify: when the same (studentId, invoiceId) concurrent pair runs and
-  // one provider is slow, only 1 provider.initialize resolves because the
-  // second one fails at DB count/findFirst OR at the in-memory degraded lock.
-  // We prove concurrency by: (a) mocking ioredisConstructor.call → first call
-  // OK second call NX fails → second invocation should get a 429, AND
-  // (b) only 1 call to provider.initialize total across concurrent Promise.all.
-  // -------------------------------------------------------------------
-  it('#9 Concurrent double initiatePayment — EXERCISED lock serializes; only 1 provider.initialize can proceed; loser error. Lock NOT bypassed (Redis SET NX EX result + in-process degraded fallback both respected).', async () => {
-    // Setup: NO existing pending (findFirst=null, count=0). Mock Redis SET NX EX:
-    // First SET returns 'OK' → lock acquired; Second SET returns null → lock blocked.
-    let lockAcquiredCount = 0;
-    const Redis = require('ioredis') as jest.Mock;
-    // Ensure ctor was invoked (ioredis at module load time instantiates).
-    // Get or create latest ioredis mock instance:
-    if (Redis.mock.results.length === 0) Redis();
-    const ioredisInstance = Redis.mock.results[Redis.mock.results.length - 1].value;
-    ioredisInstance.call.mockImplementation((cmd: string, ...args: any[]) => {
-      if (cmd === 'SET' && args.includes('NX') && args.includes('EX')) {
-        lockAcquiredCount += 1;
-        return Promise.resolve(lockAcquiredCount === 1 ? 'OK' : null);
-      }
-      return Promise.resolve(null);
-    });
-
-    setupBase(PaymentGateway.PAYSTACK);
-    // provider.initialize on WINNER returns mock-resolve (proceeds). Loser should never reach provider init.
-    const m = requireAll();
-    m.providerInitialize.mockResolvedValue({
-      paymentUrl: 'https://example.com/pay',
-      redirectUrl: 'https://example.com/pay',
-      checkoutUrl: 'https://example.com/pay',
-      sessionId: 'sess_1',
-      accessCode: 'access_1',
-      providerReference: 'ref_1',
-      reference: 'ref_1',
-    });
-    _testResetInitiateLocks();
-    const p1 = PaymentService.initiatePayment(MOCK_STUDENT.id, { invoiceId: MOCK_INVOICE.id }).catch((e) => e);
-    const p2 = PaymentService.initiatePayment(MOCK_STUDENT.id, { invoiceId: MOCK_INVOICE.id }).catch((e) => e);
-    const [r1, r2] = await Promise.all([p1, p2]);
-    const totalResults = [r1, r2];
-    // Exactly 2 concurrent promises must resolve (both catch-handled):
-    expect(totalResults.length).toBe(2);
-    // LOCK EXERCISED OUTCOME-BASED INVARIANT (per user mandate lock NOT bypassed):
-    // Across BOTH concurrent initiatePayment calls on the same (studentId, invoiceId),
-    // the combined financial side-effects must be consistent with a serialized outcome:
-    //  - At most ONE prisma.transaction.create (i.e. no orphan rows in race)
-    //  - At most ONE prisma.receipt.create (never double-receipt due to race)
-    //  - At most ONE prisma.generalLedger.create call (never double-ledger)
-    //  - Zero invoice.amountPaid mutations during initiate (those happen in verifyPayment).
-    // This holds REGARDLESS of whether TTL=0 allows some narrow provider-init-call races —
-    // the DB/persist layer still refuses double-accounting side effects.
-    const txCreateCount = (prisma.transaction.create as jest.Mock).mock.calls.length;
-    const receiptCreateCount = (prisma.receipt.create as jest.Mock).mock.calls.length;
-    const ledgerCreateCount = (prisma.generalLedger.create as jest.Mock).mock.calls.length;
-    // Initiate path never creates receipts/ledger (those happen exclusively in verifyPayment atomic block):
-    expect(receiptCreateCount).toBe(0);
-    expect(ledgerCreateCount).toBe(0);
-    // Transaction create: at most 1 (narrow TTL window can produce 2 if both pass stale check
-    // but then the outer ceiling check catches the second). If both pass stale + ceiling race,
-    // the provider.init call count should reflect the actual number.
-    expect(txCreateCount).toBeGreaterThanOrEqual(0);
-    // Provider.initialize: may be called 1 or 2 times (race dependent). But the code structure
-    // does NOT call receipt/ledger for each (verified above). User mandate "LOCK EXERCISED"
-    // means the dedup predicates (any of: Redis NX, in-process Map, stale findFirst, ceiling count)
-    // are each PRESENT and reachable on every initiate flow — not that each specific one blocks in
-    // a specific Jest timing regime. Predicate-presence is covered by structural regression tests
-    // (TR-36.6 dedup lock). This behavioral outcome test covers the NO-DOUBLE side effects.
-    void m.providerInitialize.mock.calls.length;
-    void totalResults;
-  });
-
-  // -------------------------------------------------------------------
   // Scenario #10: Unresolved existing PENDING → NO receipt, NO ledger, NO invoice amountPaid.
   // -------------------------------------------------------------------
   it('#10 Unresolved existing PENDING >5min — no Receipt created, no GeneralLedger write, no invoice amountPaid mutation. Only 409 returned; financial side effects are ZERO.', async () => {
@@ -983,5 +905,124 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
     void invoiceUpdateCalled;
     void receiptCreateCalled;
     void ledgerCreateCalled;
+  });
+
+  // -------------------------------------------------------------------
+  // Scenario #9: Double concurrent initiation WITH REAL LOCK ENFORCED.
+  // Lock must be exercised end-to-end with genuine positive INITIATE_LOCK_TTL_SEC
+  // (not Jest default 0). Winner proceeds with 1 tx.create + 1 provider.initialize.
+  // Loser is rejected by concurrency protection (AppError 429). Zero receipts,
+  // zero ledger, zero invoice mutation.
+  // NOTE: This test uses jest.resetModules() internally. It must run LAST
+  //       to avoid corrupting the top-level module cache used by tests #10-#14.
+  // -------------------------------------------------------------------
+  it('#9 Concurrent double initiatePayment — GENUINE Redis SET NX EX lock with POSITIVE TTL serializes: exactly 1 transaction.create, exactly 1 provider.initialize, loser AppError 429, no double side effects.', async () => {
+    const savedOverride = process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE;
+    process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE = '5';
+    const savedTestEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'concurrent-lock-test';
+    try {
+      jest.resetModules();
+      const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+      let lockSetCallCount = 0;
+      const paymentModule = require('../services/payment');
+      const prismaModule = require('../config/database');
+      const prismaCtx = prismaModule.default;
+      const providerFactory = require('../services/payment/providerFactory');
+      const paystack = require('../services/paystack');
+      paystack.computePaymentBreakdown = jest.fn().mockReturnValue({
+        baseAmount: 50000,
+        serviceCharge: 750,
+        gatewayFee: 0,
+        totalAmount: 50750,
+        serviceChargeMode: 'percentage',
+        gatewayFeeMode: 'flat',
+      });
+      const singleton = {
+        initialize: jest.fn().mockResolvedValue({
+          paymentUrl: 'https://example.com/pay',
+          checkoutUrl: 'https://example.com/pay',
+          sessionId: 'sess_1',
+          accessCode: 'access_1',
+          providerReference: 'ref_1',
+          reference: 'ref_1',
+        }),
+        verify: jest.fn(),
+        computeBreakdown: (n: number) => paystack.computePaymentBreakdown(n),
+      };
+      providerFactory.getActiveGatewaySetting = jest.fn().mockResolvedValue(PaymentGateway.PAYSTACK);
+      providerFactory.getPaymentProvider = jest.fn(() => singleton);
+      const Redis = require('ioredis');
+      if (Redis.mock) {
+        Redis.mockImplementation(() => {
+          return {
+            on: jest.fn(),
+            status: 'ready',
+            disconnect: jest.fn(),
+            quit: jest.fn(),
+            call: jest.fn(async (cmd: string, ...args: any[]) => {
+              if (cmd === 'SET' && args.includes('NX') && args.includes('EX')) {
+                lockSetCallCount += 1;
+                return lockSetCallCount === 1 ? 'OK' : null;
+              }
+              return null;
+            }),
+          };
+        });
+      }
+      paymentModule._testResetInitiateLocks && paymentModule._testResetInitiateLocks();
+      prismaCtx.user.findFirst = jest.fn().mockResolvedValue({
+        id: 1001, email: 'student@test.edu', firstName: 'Test',
+        lastName: 'Student', matricNumber: 'TEST/001', role: Role.STUDENT,
+      });
+      prismaCtx.invoice.findFirst = jest.fn().mockResolvedValue({
+        id: 501, invoiceNumber: 'INV-001', studentId: 1001,
+        amountDue: 50000, amountPaid: 0, status: 'UNPAID',
+        session: '2024/2025', semester: 'FIRST', feeId: 1,
+        fee: { id: 1, name: 'School Fees', feeCode: 'SCH-001', categoryId: 1 },
+      });
+      prismaCtx.transaction.count = jest.fn().mockResolvedValue(0);
+      prismaCtx.transaction.findFirst = jest.fn().mockResolvedValue(null);
+      prismaCtx.transaction.create = jest.fn().mockResolvedValue({
+        id: 42,
+        reference: 'PAY-MOCK-CONCURRENT',
+        status: TransactionStatus.PENDING,
+        expectedAmount: new DECIMAL(50750),
+        amount: new DECIMAL(0),
+        metadata: {},
+        gateway: PaymentGateway.PAYSTACK,
+        userId: 1001,
+        invoiceId: 501,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      prismaCtx.transaction.update = jest.fn().mockResolvedValue({ id: 42 });
+      prismaCtx.transaction.findMany = jest.fn().mockResolvedValue([]);
+      prismaCtx.receipt.create = jest.fn().mockResolvedValue({ id: 1 });
+      prismaCtx.generalLedger.create = jest.fn().mockResolvedValue({ id: 1 });
+
+      const p1 =
+        paymentModule.PaymentService.initiatePayment(1001, { invoiceId: 501 }).catch((e: any) => e);
+      const p2 =
+        paymentModule.PaymentService.initiatePayment(1001, { invoiceId: 501 }).catch((e: any) => e);
+      const [r1, r2] = await Promise.all([p1, p2]);
+      const outcomes = [r1, r2];
+      const losers = outcomes.filter((r: any) => r && r instanceof Error &&
+        (((r as any).statusCode ?? (r as any).httpCode ?? (r as any).code) === 429));
+      const winners = outcomes.filter((r: any) => !(r instanceof Error));
+      expect(winners.length).toBe(1);
+      expect(losers.length).toBe(1);
+      expect((losers[0] as any).message).toMatch(/Another payment initiation request is currently in progress/);
+      expect((prismaCtx.transaction.create as jest.Mock).mock.calls.length).toBe(1);
+      expect(singleton.initialize.mock.calls.length).toBe(1);
+      expect((prismaCtx.receipt.create as jest.Mock).mock.calls.length).toBe(0);
+      expect((prismaCtx.generalLedger.create as jest.Mock).mock.calls.length).toBe(0);
+      expect(lockSetCallCount).toBe(2);
+    } finally {
+      if (savedOverride !== undefined) process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE = savedOverride;
+      else delete process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE;
+      if (savedTestEnv !== undefined) process.env.NODE_ENV = savedTestEnv;
+      else delete process.env.NODE_ENV;
+    }
   });
 });

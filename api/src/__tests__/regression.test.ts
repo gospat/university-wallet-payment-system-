@@ -2368,15 +2368,19 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(initiateSlice).toBeTruthy();
       const p = initiateSlice!;
       // 1. Provider-neutral classifyPendingForRetry helper is declared, takes all
-      //    combinations and returns { terminalizeFailed: false, blockInitiation: true }.
+      //    combinations and returns { blockInitiation: true }.
+      //    It MUST NOT expose terminalizeFailed — explicit rejection handling
+      //    belongs in an authoritative provider-result workflow, not stale retry.
       const helper = p.indexOf('function classifyPendingForRetry(');
-      const helperSig = p.indexOf('pendingGateway: string | null', helper);
-      const helperReturns = p.indexOf('terminalizeFailed: false', helper);
+      const helperSig = p.indexOf('_pendingGateway: string | null', helper);
       const helperBlock = p.indexOf('blockInitiation: true', helper);
       expect(helper).toBeGreaterThan(0);
       expect(helperSig).toBeGreaterThan(helper);
-      expect(helperReturns).toBeGreaterThan(helper);
       expect(helperBlock).toBeGreaterThan(helper);
+      //    Dead terminalizeFailed return key MUST NOT appear:
+      const helperEnd = p.indexOf('}', helper);
+      const helperDecl = p.slice(helper, helperEnd + 2);
+      expect(helperDecl.indexOf('terminalizeFailed')).toBe(-1);
       // 2. Inside classifyPendingForRetry there is NO branching on pendingGateway
       //    activeGateway hasTrustedAlatpayFinalUuid to decide terminalizeFailed.
       //    Meaning: no ALATPAY vs PAYSTACK special-case to write FAILED on age.
@@ -2398,18 +2402,19 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(msgAwaitConfirmation).toBeLessThan(throw409InBlock + 600);
       // 4. After the throw 409 message (age-based block), there is NO reachable
       //    prisma.transaction.update writing FAILED terminal status in the
-      //    stale age check path. (Only linting-safety unreachable branch.)
-      //    Legacy client-reinit-timeout FAILED write string DOES NOT exist.
+      //    stale age check path. Legacy client-reinit-timeout FAILED write
+      //    string DOES NOT exist. And the lint-safety dead branch (including
+      //    its guard) has been completely removed — there are ZERO terminal
+      //    writes capable of being introduced here silently.
       const staleRegionA = p.slice(msgAwaitConfirmation - 200, p.indexOf('// 3. Partial amount clamp'));
-      // client-reinit-timeout may appear as a comment (lint guard) but MUST NOT appear as DB description write.
+      // client-reinit-timeout may appear as a comment but MUST NOT appear as DB description write.
       expect(staleRegionA).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
-      // No TransactionStatus.FAILED outside the guarded lint-safety unreachable dead branch:
-      //    The only FAILED write string is: description: 'provider-explicitly-rejected'
-      //    It is guarded by `if ((policy as any).terminalizeFailed === true)` and helper always returns false.
-      const lintGuard = staleRegionA.indexOf("(policy as any).terminalizeFailed === true");
-      const failedWrite = staleRegionA.indexOf("status: TransactionStatus.FAILED, description: 'provider-explicitly-rejected'");
-      // Either no FAILED write at all, or it's AFTER the lint-safety guard (unreachable):
-      expect(failedWrite === -1 || (lintGuard > 0 && failedWrite > lintGuard)).toBe(true);
+      // STRICT: ZERO terminal-status writes (FAILED / SUCCESS / UNDERPAID / OVERPAID / REVERSED)
+      // anywhere in staleRegionA — including any previously allowed lint-safety
+      // dead branches. The stale/retry region is pure 425/409 and throws:
+      expect(staleRegionA).not.toMatch(/:\s*TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // Cast guard pattern `(policy as any).terminalizeFailed` must also be absent.
+      expect(staleRegionA).not.toMatch(/\(policy\s+as\s+any\)\.terminalizeFailed/);
       // 5. hasTrustedAlatpayFinalUuid uses the single shared helper isAlatpayUuid
       const uuidUsage = p.indexOf('hasTrustedAlatpayFinalUuid = isAlatpayUuid(');
       expect(uuidUsage).toBeGreaterThan(0);
@@ -2424,7 +2429,7 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(staleRegionA).not.toMatch(/:\s*TransactionStatus\.SUCCESS/);
     });
 
-    it('TR-36.3 Provider initialize transport/ambiguous error preserves unresolved PENDING (no authoritative FAILED) — fail closed per Blocker 5 audit. DB row stays PENDING, error stored in description + initiateTransportFailed metadata flag for review.', () => {
+    it('TR-36.3 Provider initialize transport/ambiguous error preserves unresolved PENDING (no authoritative FAILED) — fail closed per Blocker 5 audit. DB row stays PENDING, error stored in description + initiateTransportFailed metadata flag for review; underpaidReason financially-semantic column is NEVER written during initialization.', () => {
       expect(initiateSlice).toBeTruthy();
       const p = initiateSlice!;
       const provInit = p.indexOf('provider.initialize(');
@@ -2432,21 +2437,32 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(provInit).toBeGreaterThan(0);
       expect(catchAt).toBeGreaterThan(provInit);
       // Blocker-5 classification comment exists in catch region:
-      const bl5 = p.indexOf('Blocker 5 FIX', catchAt);
+      const bl5 = p.indexOf('Ambiguous provider initialization exception classification:', catchAt);
       expect(bl5).toBeGreaterThan(catchAt);
-      const noStatus = p.indexOf("// STATUS = PENDING (preserve unresolved — no authoritative terminal write)", bl5);
+      const noStatus = p.indexOf('DB row status remains PENDING', bl5);
       expect(noStatus).toBeGreaterThan(bl5);
       // There is NO status: TransactionStatus.FAILED setting in the catch region.
       const catchRegion = p.slice(catchAt, catchAt + 5000);
       expect(catchRegion).not.toMatch(/status:\s*TransactionStatus\.FAILED/);
-      // Initiate metadata flag is persisted:
-      expect(catchRegion).toMatch(/initiateTransportFailed:/);
+      // underpaidReason financial field MUST NOT be touched in init catch:
+      expect(catchRegion).not.toMatch(/underpaidReason:/);
+      // safeDiagnosticFromError helper is used in catch region, not raw truncation:
+      expect(catchRegion).toMatch(/safeDiagnosticFromError\(/);
+      expect(catchRegion).not.toMatch(/rawErrMsg\s*[?.]?\s*\.slice\(\s*0\s*,\s*\d+\s*\)/);
+      // Initiate metadata flag is persisted with strict safe shape:
+      expect(catchRegion).toMatch(/initiateTransportFailed:\s*\{/);
+      expect(catchRegion).toMatch(/errorClass:\s*diag\.errorClass/);
+      expect(catchRegion).toMatch(/httpCode:\s*diag\.httpCode/);
+      expect(catchRegion).toMatch(/safeCode:\s*diag\.safeCode/);
+      expect(catchRegion).toMatch(/sanitizedMessage:\s*diag\.sanitizedMessage/);
+      // Audit action uses the non-terminal PAYMENT_INITIATION_UNCERTAIN string,
+      // never the terminal PAYMENT_FAILED:
+      expect(catchRegion).toMatch(/auditActions\.paymentInitiationUncertain/);
+      expect(catchRegion).not.toMatch(/action:\s*i18n\.auditActions\.paymentFailed[\s\S]{0,300}initiateTransportFailed/);
       // description field is updated but not a terminal FAILED (it prefixes with
       // [provider-init-failed ambiguous, status preserved PENDING] via template literal).
       const descPrefix = catchRegion.indexOf('[provider-init-failed ambiguous, status preserved PENDING]');
       expect(descPrefix).toBeGreaterThan(0);
-      // Raw error is persisted to underpaidReason for review.
-      expect(catchRegion).toMatch(/underpaidReason:/);
     });
 
     it('TR-36.4 Max unresolved pending ceiling (MAX_UNRESOLVED_PENDING_PER_INVOICE = 2) prevents > 2 PENDING rows for same student+invoice before initiating any 3rd.', () => {
@@ -2457,24 +2473,22 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(initiateSlice).toMatch(/pendingCount\s*>=\s*MAX_UNRESOLVED_PENDING_PER_INVOICE[\s\S]{0,300}409/);
     });
 
-    it('TR-36.5 PENDING rows never reach status FAILED / UNDERPAID / OVERPAID / REVERSED / SUCCESS merely due to scheduler age in initiatePayment stale-age logic. No client-reinit-timeout DB description write at all (comment refs allowed only, not persisted to DB).', () => {
+    it('TR-36.5 PENDING rows never reach status FAILED / UNDERPAID / OVERPAID / REVERSED / SUCCESS merely due to scheduler age in initiatePayment stale-age logic. No client-reinit-timeout DB description write at all (no stale region terminal DB writes).', () => {
       expect(initiateSlice).toBeTruthy();
       // In the A5.1 stale logic: NO terminal writes of any kind.
-      //   (There's the linting-safety unreachable provider-explicitly-rejected
-      //    branch, but client-reinit-timeout DB description is gone entirely.)
+      //   Dead lint-safety branch has been FULLY REMOVED per release-blocker review.
       const ageGuardStart = initiateSlice!.indexOf('FIVE_MINUTES_MS');
       const legacyPathEnd = initiateSlice!.indexOf('// 3. Partial amount clamp');
       const staleRegion = initiateSlice!.slice(ageGuardStart, legacyPathEnd);
-      // client-reinit-timeout MUST NOT be written as DB description (comment-only references allowed).
+      // client-reinit-timeout MUST NOT be written as DB description.
       expect(staleRegion).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
-      expect(staleRegion).not.toMatch(/UNDERPAID|OVERPAID|REVERSED/);
-      expect(staleRegion).not.toMatch(/:\s*TransactionStatus\.SUCCESS/);
-      // Count of FAILED status DB writes in stale: should be ZERO except
-      // the unreachable lint-safety dead branch 'provider-explicitly-rejected'.
-      const matchesFailed = staleRegion.match(/status:\s*TransactionStatus\.FAILED/g) ?? [];
-      expect(matchesFailed.length === 0 || matchesFailed.length === 1).toBe(true);
-      // SUCCESS/UNDERPAID/OVERPAID/REVERSED never written in stale region at all:
-      expect(staleRegion).not.toMatch(/TransactionStatus\.(SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // STRICT: ZERO terminal status writes anywhere in stale region, period.
+      // No prior dead branches allowed; the region throws 425/409 and NEVER
+      // performs a prisma.transaction.update with any terminal status.
+      expect(staleRegion).not.toMatch(/:\s*TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // classifyPendingForRetry MUST NOT expose terminalizeFailed:
+      expect(staleRegion).not.toMatch(/terminalizeFailed/);
+      expect(staleRegion).not.toMatch(/\(policy\s+as\s+any\)/);
     });
 
     it('TR-36.6 acquireInitiateDedupeLock helper used: Redis SET NX EX with per (studentId, invoiceId) short TTL, degraded in-process Map fallback. Protects concurrent tab double-click / page refresh.', () => {
@@ -2525,23 +2539,18 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       const legacyFailIdx2 = initiateSlice!.indexOf('description: "client-reinit-timeout"');
       expect(legacyFailIdx2).toBe(-1);
       // In the entire initiatePayment function body, there is NO prisma.transaction.update
-      // writing FAILED status in the STALE-AGE region (between classifyPendingForRetry call
-      // and Partial amount clamp) that is reachable. The only prisma.transaction.update
-      // writing a terminal in that region is the linting-safety unreachable dead branch
-      // guarded by `(policy as any).terminalizeFailed === true`.
+      // writing ANY terminal status in the STALE-AGE region (between classifyPendingForRetry
+      // call and Partial amount clamp). Dead lint-safety branch has been FULLY REMOVED —
+      // subRegion must have ZERO terminal writes whatsoever.
       const classifyIdx = initiateSlice!.indexOf('classifyPendingForRetry(');
       const clampIdx = initiateSlice!.indexOf('// 3. Partial amount clamp');
       const subRegion = initiateSlice!.slice(Math.max(0, classifyIdx - 50), clampIdx);
-      // Any terminal status prisma writes other than the lint-safety dead-branch FAILED write:
-      const lintGuardInSub = subRegion.indexOf("(policy as any).terminalizeFailed === true");
-      // count occurrences of TransactionStatus.FAILED / SUCCESS / UNDERPAID / OVERPAID / REVERSED
-      // in subRegion. Allow one: the lint-safety dead branch FAILED that exists AFTER lintGuardInSub.
+      // ZERO terminal status prisma writes anywhere in subRegion:
       const terminalStatusAll = subRegion.match(/TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED)/g) ?? [];
-      expect(terminalStatusAll.length <= 1).toBe(true);
-      if (terminalStatusAll.length === 1) {
-        expect(lintGuardInSub).toBeGreaterThan(0);
-        expect(subRegion.indexOf('TransactionStatus.' + terminalStatusAll[0].split('.')[1])).toBeGreaterThan(lintGuardInSub);
-      }
+      expect(terminalStatusAll.length).toBe(0);
+      // classifyPendingForRetry MUST NOT expose terminalizeFailed:
+      expect(subRegion).not.toMatch(/terminalizeFailed/);
+      expect(subRegion).not.toMatch(/as\s+any\)\.terminalizeFailed/);
       // No client-reinit-timeout DB description anywhere:
       expect(subRegion).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
       // And no direct age > 5min -> FAILED write string
@@ -2615,7 +2624,7 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
   });
 
   describe('TR-38 Existing Paystack + webhook + idempotency regression behavior unchanged (task-13 through task-20)', () => {
-    it('TR-38.1 Provider-neutral policy enforced for stale retries: both PAYSTACK and ALATPAY pending rows preserve PENDING after 5 minutes. Elapsed time NEVER triggers PENDING→FAILED for any gateway. Gateway=NULL also fail closed. No reachable age-based FAILED prisma.transaction.update in stale region.', () => {
+    it('TR-38.1 Provider-neutral policy enforced for stale retries: both PAYSTACK and ALATPAY pending rows preserve PENDING after 5 minutes. Elapsed time NEVER triggers PENDING→FAILED for any gateway. Gateway=NULL also fail closed. ZERO reachable age-based FAILED prisma.transaction.update in stale region. Dead terminalizeFailed lint-safety branch has been fully removed.', () => {
       const fs: typeof import('fs') = require('fs');
       const path: typeof import('path') = require('path');
       const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
@@ -2625,10 +2634,13 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(region).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
       // 2) classifyPendingForRetry helper treats all 3 inputs identically (no
       //    conditional branches for PAYSTACK vs ALATPAY vs gateway NULL).
+      //    Helper signature MUST NOT expose terminalizeFailed return key.
       const helper = src.indexOf('function classifyPendingForRetry(');
       const helperEnd = src.indexOf('}', helper + 300);
       const helperBody = src.slice(helper, helperEnd + 5);
       expect(helperBody).not.toMatch(/PaymentGateway\.(ALATPAY|PAYSTACK)/);
+      expect(helperBody).not.toMatch(/terminalizeFailed/);
+      expect(helperBody).not.toMatch(/as\s+any/);
       // 3) After call to classifyPendingForRetry, policy.blockInitiation branch
       //    throws a 409 before any DB update writing terminal status.
       const call = region.indexOf('classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid)');
@@ -2636,20 +2648,15 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       const blockIf = region.indexOf('if (policy.blockInitiation)', call);
       expect(blockIf).toBeGreaterThan(call);
       const beforeEndOfStale = region.indexOf('// 3. Partial amount clamp', blockIf);
-      // The lint-safety dead branch (guard `(policy as any).terminalizeFailed === true`) is
-      // intentionally unreachable. subRegion is everything from blockIf to Partial clamp.
+      // subRegion = blockIf to clamp: ZERO terminal writes, ZERO lint-safety dead branches allowed.
       const subRegion = region.slice(blockIf, beforeEndOfStale > 0 ? beforeEndOfStale : blockIf + 6000);
-      // No age-based FAILED write OUTSIDE the lint-safety dead-branch guard.
-      //   Any TransactionStatus.FAILED literal after blockIf but BEFORE lintGuard = FAIL.
-      //   Any TransactionStatus.FAILED literal after lintGuard = OK (dead branch).
-      const lintGuardIdx = subRegion.indexOf("(policy as any).terminalizeFailed === true");
-      const firstFailedInSub = subRegion.indexOf("TransactionStatus.FAILED");
-      if (firstFailedInSub !== -1) {
-        expect(lintGuardIdx).toBeGreaterThan(0);
-        expect(firstFailedInSub).toBeGreaterThan(lintGuardIdx);
-      }
-      // No SUCCESS/UNDERPAID/OVERPAID/REVERSED anywhere in subRegion:
-      expect(subRegion).not.toMatch(/TransactionStatus\.(SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // No terminal writes anywhere in subRegion (strict zero-tolerance policy).
+      expect(subRegion).not.toMatch(/TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // classifyPendingForRetry return key terminalizeFailed must be absent.
+      expect(subRegion).not.toMatch(/terminalizeFailed/);
+      // No SUCCESS/UNDERPAID/OVERPAID/REVERSED anywhere in subRegion at all:
+      //   (the regex above already covers them so re-confirm via split check)
+      //   this line comment placeholder no-op for clarity.
       // 4) Gateway=null scenario: no fallback inference from activeGateway.
       //    pendingGateway used for message label only (gwLabel), never for
       //    different terminalization outcome:

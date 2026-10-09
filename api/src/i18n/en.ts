@@ -162,6 +162,7 @@ export const auditActions = {
   paymentUnderpaid: 'PAYMENT_UNDERPAID',
   paymentOverpaid: 'PAYMENT_OVERPAID',
   paymentFailed: 'PAYMENT_FAILED',
+  paymentInitiationUncertain: 'PAYMENT_INITIATION_UNCERTAIN',
   paymentReversed: 'PAYMENT_REVERSED',
   refundRequested: 'REFUND_REQUESTED',
   refundApproved: 'REFUND_APPROVED',
