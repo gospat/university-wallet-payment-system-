@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { catchAsync } from '../utils/catchAsync';
 import { AppError } from '../utils/AppError';
 import prisma from '../config/database';
-import { ReceiptService } from '../services/receipt';
+import { ReceiptService, resolveReceiptDisplayInfo } from '../services/receipt';
 
 const _isStaff = (role?: string) =>
   role === 'ADMIN' || role === 'BURSARY' || role === 'SUPER_ADMIN';
@@ -124,6 +124,7 @@ export const downloadFormalReceipt = catchAsync(async (req: Request, res: Respon
     voidedAt: row.voidedAt,
     paymentChannel: row.paymentChannel,
     paymentMethodDetail: row.paymentMethodDetail,
+    gateway: (row.transaction as any)?.gateway ?? null,
     paystackReference: row.paystackReference,
     qrUrl: row.qrCodeData || defaultVerifyUrl,
     student: row.student as any,
@@ -194,6 +195,7 @@ export const publicVerifyReceipt = catchAsync(async (req: Request, res: Response
     include: {
       student: { select: { id: true, firstName: true, lastName: true, matricNumber: true } },
       invoice: { include: { fee: { select: { id: true, name: true } } } },
+      transaction: { select: { gateway: true, reference: true } },
     },
   });
   if (!row) {
@@ -242,6 +244,13 @@ export const publicVerifyReceipt = catchAsync(async (req: Request, res: Response
     bankAccount: process.env.UNIVERSITY_BANK_ACCOUNT || '',
   };
 
+  const rowGateway: string | null = (row.transaction as any)?.gateway ?? null;
+  const disp = resolveReceiptDisplayInfo({
+    gateway: rowGateway,
+    paymentChannel: row.paymentChannel,
+    paymentMethodDetail: row.paymentMethodDetail,
+  });
+
   res.status(200).json({
     status: 'success',
     verified: !row.isVoided,
@@ -252,6 +261,12 @@ export const publicVerifyReceipt = catchAsync(async (req: Request, res: Response
       paidAt: row.paidAt,
       generatedAt: row.generatedAt,
       paymentChannel: row.paymentChannel || null,
+      paymentMethodDetail: row.paymentMethodDetail || null,
+      gateway: disp.brandForJson === 'UNKNOWN' ? null : disp.brandForJson,
+      gatewayBrand: disp.brand === 'Unknown' ? null : disp.brand,
+      paymentViaLine: disp.viaLine,
+      paymentMethodLine: disp.methodLine,
+      transactionReference: (row.transaction as any)?.reference ?? null,
       isVoided: row.isVoided,
       voidedAt: row.voidedAt || null,
       qrUrl: row.qrCodeData || `${process.env.APP_BASE_URL || ''}/public/verify-receipt/${row.verificationToken}`,

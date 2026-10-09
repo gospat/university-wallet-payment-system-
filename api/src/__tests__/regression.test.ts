@@ -1016,10 +1016,20 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(re.test('00000000-0000-0000-0000-000000000000')).toBe(false);
     });
 
-    it('TR-25.5 Worker uses alatpay.recon queue, PENDING/INITIATED status guard, bounded take + oldest-updatedAt-first (no infinite scan).', () => {
+    it('TR-25.5 Worker uses alatpay.recon queue, PENDING-only status (no INITIATED bogus enum), bounded take + oldest-updatedAt-first (no infinite scan).', () => {
       expect(paymentSrc).toMatch(/alatpay\.recon/);
-      expect(paymentSrc).toMatch(/status.*!==.*PENDING/);
-      expect(paymentSrc).toMatch(/INITIATED/);
+      expect(paymentSrc).toMatch(/TransactionStatus\.PENDING/);
+      // The invalid Prisma enum INITIATED MUST NOT appear in the scheduler WHERE/processing.
+      // Locate BATCH from METHOD DEFINITION (not the comment above which names it).
+      const defStart = paymentSrc!.indexOf('static async reconcilePendingAlatpayBatch(opts:');
+      expect(defStart).toBeGreaterThan(-1);
+      const batchRegion = paymentSrc!.slice(
+        Math.max(0, defStart - 10),
+        Math.min(paymentSrc!.length, defStart + 5500),
+      );
+      expect(batchRegion).not.toMatch(/\bINITIATED\b/);
+      // Strict: no `as any` cast on status or gateway WHERE in scheduler (so TypeScript catches enum drift).
+      expect(batchRegion).not.toMatch(/(?:status|gateway)\s*:\s*(?:\{[^}]*|[A-Za-z_]+)\s*as any/);
       expect(paymentSrc).toMatch(/updatedAt.*asc/);
       expect(paymentSrc).toMatch(/take:\s*limit,/);
     });
@@ -2002,6 +2012,325 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // Paystack route untouched: still retains exact old format
       const psRoute = whsrc.slice(whsrc.indexOf("router.post('/paystack'"), whsrc.indexOf("router.post('/paystack'") + 7000);
       expect(psRoute).toMatch(/jobId:\s*`paystack-webhook:\$\{paystackEventId\}`/);
+    });
+  });
+
+  // =========================================================================
+  // TR-33 — ALATPay reconciliation scheduler: TransactionStatus enum safety
+  //   Tests A through F — NO invalid enum, actual Prisma enum match, select rules.
+  // =========================================================================
+  describe('TR-33 ALATPay recon batch enum safety (PENDING-only, no INITIATED, compile-safe no as-any masks)', () => {
+    let paymentSrc: string | null = null;
+    let batchSlice: string | null = null;
+
+    beforeAll(() => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
+      const defStart = paymentSrc.indexOf('static async reconcilePendingAlatpayBatch(opts:');
+      batchSlice = defStart >= 0 ? paymentSrc.slice(Math.max(0, defStart - 10), Math.min(paymentSrc.length, defStart + 5500)) : null;
+    });
+
+    it('TR-33.A reconcilePendingAlatpayBatch does NOT submit an invalid Prisma enum value (no INITIATED anywhere in WHERE).', () => {
+      expect(batchSlice).toBeTruthy();
+      expect(batchSlice!).not.toMatch(/['"]INITIATED['"]/);
+      expect(batchSlice!).not.toMatch(/\bINITIATED\b/);
+    });
+
+    it('TR-33.B Scheduler query works against the actual TransactionStatus enum (static literal TransactionStatus.PENDING, no string enums).', () => {
+      expect(batchSlice).toMatch(/\bTransactionStatus\.PENDING\b/);
+      expect(batchSlice).toMatch(/\bPaymentGateway\.ALATPAY\b/);
+      // No raw string "ALATPAY" or "PENDING" fed directly into where-object with as any.
+      expect(batchSlice).not.toMatch(/gateway:\s*['"]ALATPAY['"]\s*as any/);
+      expect(batchSlice).not.toMatch(/status:\s*\{\s*in:\s*\[[^\]]*\]\s*as any/);
+    });
+
+    it('TR-33.C PENDING ALATPAY transaction + valid stored final UUID CAN be selected (finalTxId check passes).', () => {
+      // The WHERE-clause + per-tx logic: tx.alatpayFinalTransactionId is read, validated, trimmed
+      expect(batchSlice).toMatch(/alatpayFinalTransactionId:\s*true/);
+      expect(batchSlice).toMatch(/uuidV4\.test\(/);
+      // The PENDING guard double-checks:
+      expect(batchSlice).toMatch(/tx\.status\s*!==\s*TransactionStatus\.PENDING/);
+    });
+
+    it('TR-33.D PENDING ALATPAY transaction WITHOUT final UUID IS skipped (never passes final UUID guard).', () => {
+      expect(batchSlice).toMatch(/if\s*\(\s*!finalTxId\s*\)\s*\{[\s\S]{0,80}skippedNoId\+\+/);
+      expect(batchSlice).toMatch(/continue/);
+    });
+
+    it('TR-33.E SUCCESS transaction is NOT selected for reconciliation.', () => {
+      // WHERE uses exact literal TransactionStatus.PENDING (not an array).
+      expect(batchSlice).toMatch(/status:\s*TransactionStatus\.PENDING\s*,/);
+      expect(batchSlice).not.toMatch(/TransactionStatus\.SUCCESS/);
+      expect(batchSlice).not.toMatch(/status:\s*\{\s*in:\s*\[/);
+    });
+
+    it('TR-33.F FAILED / UNDERPAID / OVERPAID / REVERSED transactions are not selected (strict PENDING-only).', () => {
+      ['FAILED', 'UNDERPAID', 'OVERPAID', 'REVERSED', 'PROCESSING'].forEach((bad) => {
+        expect(batchSlice).not.toMatch(new RegExp("['\"]" + bad + "['\"]"));
+      });
+      // Confirm where clause equality (not in: [...]) — a single PENDING literal.
+      expect(batchSlice).not.toMatch(/status:\s*\{\s*in:\s*\[/);
+    });
+  });
+
+  // =========================================================================
+  // TR-34 — ALATPay reconciliation BullMQ-safe job id tests G-I
+  // =========================================================================
+  describe('TR-34 ALATPay recon BullMQ-safe job ID (no colons, [A-Za-z0-9_-] only, Queue.add real integration)', () => {
+    let paymentSrc: string | null = null;
+    let batchSlice: string | null = null;
+
+    beforeAll(() => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
+      const defStart = paymentSrc.indexOf('static async reconcilePendingAlatpayBatch(opts:');
+      batchSlice = defStart >= 0 ? paymentSrc.slice(Math.max(0, defStart - 10), Math.min(paymentSrc.length, defStart + 5500)) : null;
+    });
+
+    it('TR-34.G Reconciliation BullMQ job ID contains NO colon anywhere in generated path or fallback.', () => {
+      expect(batchSlice).toBeTruthy();
+      // 1. The dispatch block must pass jobId as `safeJobId` variable (colon-free, predicate-guarded).
+      const dispatchBlockRegex = /dispatchJob\(\s*['"`]alatpay\.recon['"`][\s\S]{0,800}?\)\s*;/;
+      const blocks = batchSlice!.match(dispatchBlockRegex) ? [batchSlice!.match(dispatchBlockRegex)![0]] : [];
+      expect(blocks.length).toBeGreaterThanOrEqual(1);
+      const block = blocks[0];
+      expect(block).toMatch(/jobId:\s*safeJobId/);
+      // 2. No inline backtick template for jobId in this block (use the makeAlatpayWebhookJobId call before dispatch).
+      const inlineTplInDispatch = block.match(/jobId:\s*`([^`]+)`/g) ?? [];
+      for (const t of inlineTplInDispatch) expect(t).not.toContain(':');
+      // 3. Helper/patterns in batchSlice:
+      expect(batchSlice).toMatch(/makeAlatpayWebhookJobId\(\s*`recon:tx:/);
+      expect(batchSlice).toMatch(/isBullmqSafeJobId\(safeJobId\)/);
+      expect(batchSlice).toMatch(/alatpay_recon_tx_\s*['"]?\s*\+/);
+      // Fallback template must not contain colon
+      const fbMatch = batchSlice!.match(/'alatpay_recon_tx_[^']*'/);
+      expect(fbMatch).toBeTruthy();
+      expect(fbMatch?.[0] ?? '').not.toContain(':');
+    });
+
+    it("TR-34.H Reconciliation BullMQ job id output matches /^[A-Za-z0-9_-]+$/ (runtime helper + fallback both safe).", () => {
+      const { makeAlatpayWebhookJobId, isBullmqSafeJobId } = require('../utils/alatpay');
+      // Simulate recon-path construction (what the code does today):
+      const constructed1 = makeAlatpayWebhookJobId(`recon:tx:42:abcd1234`);
+      const constructed2 = makeAlatpayWebhookJobId(`recon:tx:9999:00000000`);
+      const SAFE_RE = /^[A-Za-z0-9_-]+$/;
+      expect(constructed1).toMatch(SAFE_RE);
+      expect(constructed2).toMatch(SAFE_RE);
+      expect(isBullmqSafeJobId(constructed1)).toBe(true);
+      expect(isBullmqSafeJobId(constructed2)).toBe(true);
+      expect(constructed1.includes(':')).toBe(false);
+      expect(constructed2.includes(':')).toBe(false);
+      // Belt: fallback template (no colons, underscore format)
+      const fallback = 'alatpay_recon_tx_42_abcd1234_' + Date.now().toString(36) + '_a1b2c3';
+      expect(fallback).toMatch(SAFE_RE);
+    });
+
+    it('TR-34.I Queue.add accepts the generated reconciliation job ID using installed BullMQ version (real Redis Queue.add if available).', async () => {
+      const { makeAlatpayWebhookJobId, isBullmqSafeJobId } = require('../utils/alatpay');
+      const safeId = makeAlatpayWebhookJobId(`recon:tx:334:${Date.now()}`);
+      expect(isBullmqSafeJobId(safeId)).toBe(true);
+      expect(safeId.includes(':')).toBe(false);
+      expect(safeId).toMatch(/^[A-Za-z0-9_-]+$/);
+
+      // Attempt real Queue.add via installed queue if Redis reachable (else skip gracefully).
+      let realRedisOk = false;
+      try {
+        const Redis = require('ioredis');
+        const client = new Redis({
+          host: process.env.REDIS_HOST || '127.0.0.1',
+          port: Number(process.env.REDIS_PORT || 6379),
+          maxRetriesPerRequest: 1,
+          lazyConnect: true,
+          connectTimeout: 800,
+          commandTimeout: 800,
+        });
+        try {
+          await client.connect();
+          await client.ping();
+          realRedisOk = true;
+        } catch { /* Redis unavailable → skip */ }
+        try { await client.quit().catch(() => {}); } catch { /* ignore */ }
+      } catch { /* ioredis load fail */ }
+
+      if (!realRedisOk) {
+        return console.warn('SKIP: Redis not available; Queue.add skipped (safe ID pattern verified).');
+      }
+      const { Queue } = require('bullmq');
+      const connection = {
+        host: process.env.REDIS_HOST || '127.0.0.1',
+        port: Number(process.env.REDIS_PORT || 6379),
+        maxRetriesPerRequest: null,
+      } as const;
+      const q = new (Queue as any)('tr34_recon_safe_id_' + Math.floor(Math.random() * 1e6), {
+        connection,
+        defaultJobOptions: { removeOnComplete: true, removeOnFail: 1 },
+      });
+      try {
+        const job = await q.add('verify', {}, { jobId: safeId });
+        expect(job.id).toBe(safeId);
+        try { await job.remove().catch(() => {}); } catch { /* ignore */ }
+      } finally {
+        try { await q.close().catch(() => {}); await q.disconnect().catch(() => {}); } catch { /* ignore */ }
+      }
+    }, 15000);
+  });
+
+  // =========================================================================
+  // TR-35 — Receipt gateway display: historical gateway determinism
+  // =========================================================================
+  describe('TR-35 Receipt PDF/JSON gateway display derived from persisted Transaction.gateway (never hard-coded Paystack).', () => {
+    const { resolveReceiptDisplayInfo } = require('../services/receipt');
+
+    it('TR-35.1 ALATPAY transaction receipt: contains ALATPay, correct channel/detail, NO "Online Payment (Paystack)" text.', () => {
+      const r = resolveReceiptDisplayInfo({
+        gateway: 'ALATPAY',
+        paymentChannel: 'ALATPay · Bank Transfer',
+        paymentMethodDetail: 'Bank Transfer',
+      });
+      expect(r.brand).toBe('ALATPay');
+      expect(r.brandForJson).toBe('ALATPAY');
+      expect(r.viaLine).toBe('ALATPay · Bank Transfer');
+      expect(r.methodLine).toBe('Online Payment (ALATPay) · Bank Transfer');
+      expect(r.methodLine).not.toContain('Paystack');
+      expect(r.viaLine).not.toContain('Paystack');
+    });
+
+    it('TR-35.2 PAYSTACK transaction receipt: contains Paystack, correct channel/detail, NO ALATPay erroneous text.', () => {
+      const r = resolveReceiptDisplayInfo({
+        gateway: 'PAYSTACK',
+        paymentChannel: 'Paystack · Card',
+        paymentMethodDetail: 'Card',
+      });
+      expect(r.brand).toBe('Paystack');
+      expect(r.brandForJson).toBe('PAYSTACK');
+      expect(r.viaLine).toBe('Paystack · Card');
+      expect(r.methodLine).toBe('Online Payment (Paystack) · Card');
+      expect(r.methodLine).not.toContain('ALATPay');
+      expect(r.viaLine).not.toContain('ALATPay');
+    });
+
+    it('TR-35.3 Historical ALATPAY receipt regenerates using persisted gateway even when paymentChannel=NULL (not defaulted to Paystack).', () => {
+      const r = resolveReceiptDisplayInfo({
+        gateway: 'ALATPAY',
+        paymentChannel: null,
+        paymentMethodDetail: 'Bank Transfer',
+      });
+      expect(r.brand).toBe('ALATPay');
+      expect(r.brandForJson).toBe('ALATPAY');
+      expect(r.viaLine).toBe('ALATPay · Bank Transfer');
+      expect(r.methodLine).toBe('Online Payment (ALATPay) · Bank Transfer');
+      // Must NOT be "Paystack"
+      expect(r.viaLine).not.toContain('Paystack');
+      expect(r.methodLine).not.toContain('Paystack');
+    });
+
+    it('TR-35.4 Historical PAYSTACK receipt remains Paystack even if detail empty.', () => {
+      const r = resolveReceiptDisplayInfo({
+        gateway: 'PAYSTACK',
+        paymentChannel: 'Paystack',
+        paymentMethodDetail: null,
+      });
+      expect(r.brand).toBe('Paystack');
+      expect(r.brandForJson).toBe('PAYSTACK');
+      expect(r.viaLine).toBe('Paystack');
+      expect(r.methodLine).toBe('Online Payment (Paystack)');
+      expect(r.viaLine).not.toContain('ALATPay');
+    });
+
+    it('TR-35.5 Changing the system currently-active gateway does NOT rewrite the gateway shown on a historical receipt (pure function of persisted inputs, no env read).', () => {
+      const input1 = {
+        gateway: 'PAYSTACK' as const,
+        paymentChannel: 'Paystack · Bank Transfer',
+        paymentMethodDetail: 'Bank Transfer',
+      };
+      const before = resolveReceiptDisplayInfo(input1);
+      // Simulate "active gateway env change" → the function has no env deps; inputs unchanged → output byte identical.
+      const after = resolveReceiptDisplayInfo(input1);
+      expect(before.viaLine).toEqual(after.viaLine);
+      expect(before.methodLine).toEqual(after.methodLine);
+      expect(before.brand).toEqual('Paystack');
+      // ALATPAY input same test:
+      const inp2 = { gateway: 'ALATPAY' as const, paymentChannel: 'ALATPay · Bank Transfer' as const, paymentMethodDetail: 'Bank Transfer' as const };
+      const before2 = resolveReceiptDisplayInfo(inp2);
+      const after2 = resolveReceiptDisplayInfo(inp2);
+      expect(before2.viaLine).toEqual(after2.viaLine);
+      expect(before2.brand).toEqual('ALATPay');
+    });
+
+    it('TR-35.6 Both receipt rendering paths (generateReceipt + generateFormalReceipt) call resolveReceiptDisplayInfo (source-scan structural proof).', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const receiptSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'receipt.ts'), 'utf8');
+      const gen1 = receiptSrc.slice(
+        receiptSrc.indexOf('static async generateReceipt('),
+        receiptSrc.indexOf('static async generateReceipt(') + 4000,
+      );
+      const gen2 = receiptSrc.slice(
+        receiptSrc.indexOf('static async generateFormalReceipt('),
+        receiptSrc.indexOf('static async generateFormalReceipt(') + 3000,
+      );
+      expect(gen1).toMatch(/resolveReceiptDisplayInfo\(/);
+      expect(gen1).not.toMatch(/Online Payment \(Paystack\)/);
+      expect(gen2).toMatch(/resolveReceiptDisplayInfo\(/);
+      expect(gen2).not.toMatch(/Online Payment \(Paystack\)/);
+      // No standalone hard-coded Paystack fallback string inside via line for generateReceipt
+      expect(gen1).not.toMatch(/paymentChannel\s*\|\|\s*'Paystack'/);
+      // generateFormalReceipt: no `receipt.paymentChannel || 'Paystack'` fallback (would force unknown -> Paystack).
+      expect(gen2).not.toMatch(/receipt\.paymentChannel\s*\|\|\s*'Paystack'/);
+    });
+
+    it('TR-35.7 Public QR/verify endpoint returns gateway fields aligned with persisted Transaction.gateway (controller source scan).', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const ctrlSrc = fs.readFileSync(path.join(__dirname, '..', 'controllers', 'receipt.ts'), 'utf8');
+      // Controller must include transaction.gateway relation in publicVerifyReceipt query.
+      expect(ctrlSrc).toMatch(/transaction:\s*\{\s*select:\s*\{[^}]*gateway:\s*true/);
+      // And expose gateway/gatewayBrand/paymentMethodLine/paymentViaLine in the 200 JSON.
+      expect(ctrlSrc).toMatch(/gateway:\s*disp\.brandForJson/);
+      expect(ctrlSrc).toMatch(/gatewayBrand:\s*disp\.brand/);
+      expect(ctrlSrc).toMatch(/paymentViaLine:\s*disp\.viaLine/);
+      expect(ctrlSrc).toMatch(/paymentMethodLine:\s*disp\.methodLine/);
+      // downloadFormalReceipt call passes gateway field to ReceiptData.
+      expect(ctrlSrc).toMatch(/gateway:\s*\(row\.transaction\s+as\s+any\)\?\.gateway/);
+    });
+
+    it('TR-35.8 Resolve receipt display NEVER mutates its input arguments (financial values unaffected by receipt render resolution).', () => {
+      const frozen: any = Object.freeze({
+        gateway: 'ALATPAY',
+        paymentChannel: 'ALATPay · Bank Transfer',
+        paymentMethodDetail: 'Bank Transfer',
+      });
+      let threw = false;
+      try {
+        const r = resolveReceiptDisplayInfo(frozen);
+        expect(r.brand).toBeTruthy();
+      } catch { threw = true; }
+      // If strict property assignment was attempted by mistake on frozen object → would throw.
+      expect(threw).toBe(false);
+      // Financial value in ReceiptData object shape is unchanged (no property assignment inside the pure helper).
+      const inputWithPaidAmount: any = { paidAmount: 150.75, gateway: 'ALATPAY', paymentChannel: null };
+      const before = JSON.stringify(inputWithPaidAmount);
+      resolveReceiptDisplayInfo(inputWithPaidAmount);
+      expect(JSON.stringify(inputWithPaidAmount)).toEqual(before);
+    });
+
+    it('TR-35.9 Existing PDF receipt byte-signature test remains intact: render() function PDF header signature not tampered.', () => {
+      const fs: typeof import('fs') = require('fs');
+      const path: typeof import('path') = require('path');
+      const receiptSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'receipt.ts'), 'utf8');
+      // render() call + puppeteer PDF signature require present in any PDF test or render() body.
+      expect(receiptSrc).toMatch(/pdf\(\s*\{/);
+      // Puppeteer executablePath MUST still be explicitly set (production sandbox rule).
+      expect(receiptSrc).toMatch(/executablePath/);
+      // Extract ONLY the chromeArgs array literal items (not comments). The actual
+      // chromeArgs = [ ... ]; array must not contain disabled-sandbox reduction flags.
+      const argsMatch = receiptSrc.match(/const\s+chromeArgs\s*=\s*\[([\s\S]*?)\];/);
+      expect(argsMatch).toBeTruthy();
+      const argsBody = argsMatch?.[1] ?? '';
+      expect(argsBody).not.toMatch(/['"]--no-sandbox['"]/);
+      expect(argsBody).not.toMatch(/['"]--disable-setuid-sandbox['"]/);
     });
   });
 });

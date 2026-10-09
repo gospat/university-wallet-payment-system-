@@ -248,6 +248,66 @@ export async function isPuppeteerAvailable(): Promise<boolean> {
   }
 }
 
+type GatewayBrand = 'Paystack' | 'ALATPay' | 'Unknown';
+
+function detectGatewayBrandFromChannel(channel: string | null | undefined): GatewayBrand {
+  const c = String(channel ?? '').trim();
+  if (/^alatpay\b/i.test(c)) return 'ALATPay';
+  if (/^paystack\b/i.test(c)) return 'Paystack';
+  return 'Unknown';
+}
+
+export function resolveReceiptDisplayInfo(input: {
+  gateway?: string | null; // persisted Transaction.gateway: PAYSTACK / ALATPAY (authoritative)
+  paymentChannel?: string | null; // from Receipt.paymentChannel or legacy paystackChannel
+  paymentMethodDetail?: string | null;
+  paystackChannelLegacy?: string | null;
+}): {
+  viaLine: string;
+  methodLine: string;
+  brand: GatewayBrand;
+  brandForJson: 'PAYSTACK' | 'ALATPAY' | 'UNKNOWN';
+  channelDetail: string | null;
+} {
+  // 1. Brand determination — persisted gateway wins (authoritative for historical determinism).
+  let brand: GatewayBrand = 'Unknown';
+  let brandForJson: 'PAYSTACK' | 'ALATPAY' | 'UNKNOWN' = 'UNKNOWN';
+  if (input.gateway === 'PAYSTACK') {
+    brand = 'Paystack';
+    brandForJson = 'PAYSTACK';
+  } else if (input.gateway === 'ALATPAY') {
+    brand = 'ALATPay';
+    brandForJson = 'ALATPAY';
+  }
+  if (brand === 'Unknown') {
+    const channelBrand = detectGatewayBrandFromChannel(input.paymentChannel);
+    if (channelBrand !== 'Unknown') {
+      brand = channelBrand;
+      brandForJson = channelBrand === 'ALATPay' ? 'ALATPAY' : 'PAYSTACK';
+    }
+  }
+
+  // 2. Channel detail: strip "Brand · " prefix from paymentChannel if present.
+  //    Also strip when paymentChannel is exactly the brand (no channel suffix).
+  let channelDetail: string | null = null;
+  if (input.paymentChannel) {
+    let stripped = String(input.paymentChannel).replace(/^(ALATPay|Paystack)\s*·\s*/i, '').trim();
+    // If after first strip the string equals a brand name — clean it again to avoid "Brand · Brand".
+    stripped = stripped.replace(/^(ALATPay|Paystack)$/i, '').trim();
+    if (stripped) channelDetail = stripped;
+  }
+  if (!channelDetail && input.paymentMethodDetail) channelDetail = String(input.paymentMethodDetail).trim();
+  if (!channelDetail && input.paystackChannelLegacy) channelDetail = String(input.paystackChannelLegacy).trim();
+
+  // 3. Build displayed lines. "Unknown" never becomes "Paystack" by default.
+  const brandTop = brand === 'Unknown' ? 'Online Payment' : brand;
+  const viaLine = channelDetail ? `${brandTop} · ${channelDetail}` : brandTop;
+  const methodBrand = brand === 'Unknown' ? 'Online Payment' : `Online Payment (${brand})`;
+  const methodLine = channelDetail ? `${methodBrand} · ${channelDetail}` : methodBrand;
+
+  return { viaLine, methodLine, brand, brandForJson, channelDetail };
+}
+
 type ReceiptData = {
   receiptNumber: string;
   paidAmount: number;
@@ -256,6 +316,7 @@ type ReceiptData = {
   voidedAt?: Date | null;
   paymentChannel?: string | null;
   paymentMethodDetail?: string | null;
+  gateway?: 'PAYSTACK' | 'ALATPAY' | string | null;
   paystackReference?: string | null;
   qrUrl: string;
   student: { firstName: string; lastName: string; email: string; matricNumber: string | null };
@@ -711,6 +772,13 @@ ${chargeSourceCss()}
     const statusText = transaction.receipt?.isVoided ? 'VOIDED' : 'PAID';
     const invoiceNumber = transaction.invoice?.invoiceNumber;
     const feeName = transaction.invoice?.fee?.name;
+    // Historical determinism: authoritative persisted Transaction.gateway first.
+    const displayInfo = resolveReceiptDisplayInfo({
+      gateway: transaction.gateway ?? null,
+      paymentChannel: transaction.receipt?.paymentChannel ?? null,
+      paymentMethodDetail: transaction.receipt?.paymentMethodDetail ?? null,
+      paystackChannelLegacy: transaction.paystackChannel ?? null,
+    });
     const directBill = await lookupDirectBillForInvoice(transaction.userId ?? student.id, transaction.invoice?.feeId);
     const chargeSourceBlock = chargeSourceHtml(directBill);
     const html = `<!DOCTYPE html>
@@ -801,7 +869,7 @@ ${chargeSourceCss()}
   <div class="amount">
     <div class="label">Amount Paid</div>
     <h1 class="value">${moneyNGN(transaction.receipt?.paidAmount ?? transaction.amount)}</h1>
-    <p class="words">Payment via ${escapeHtml(transaction.receipt?.paymentChannel || transaction.paystackChannel || 'Paystack')}</p>
+    <p class="words">Payment via ${escapeHtml(displayInfo.viaLine)}</p>
   </div>
 
   <div class="grid">
@@ -813,7 +881,7 @@ ${chargeSourceCss()}
     <div>
       <div class="group"><div class="label">Payment Date & Time</div><div class="value">${new Date(transaction.receipt?.paidAt || transaction.createdAt).toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'medium' })}</div></div>
       <div class="group"><div class="label">Transaction Reference</div><div class="value" style="font-family: monospace;">${escapeHtml(transaction.receipt?.receiptNumber || transaction.reference)}</div></div>
-      <div class="group"><div class="label">Payment Method</div><div class="value">Online Payment (Paystack)${escapeHtml(transaction.receipt?.paymentMethodDetail ? ' • ' + transaction.receipt.paymentMethodDetail : '')}</div></div>
+      <div class="group"><div class="label">Payment Method</div><div class="value">${escapeHtml(displayInfo.methodLine)}</div></div>
     </div>
   </div>
 
@@ -858,6 +926,11 @@ ${chargeSourceCss()}
     const qrCodeImage = await QRCode.toDataURL(receipt.qrUrl, { errorCorrectionLevel: 'M' });
     const statusClass = receipt.isVoided ? 'badge-voided' : 'badge-paid';
     const statusText = receipt.isVoided ? 'VOIDED' : 'PAID';
+    const formalDisplay = resolveReceiptDisplayInfo({
+      gateway: receipt.gateway ?? null,
+      paymentChannel: receipt.paymentChannel ?? null,
+      paymentMethodDetail: receipt.paymentMethodDetail ?? null,
+    });
     const directBill = await lookupDirectBillForInvoice((receipt.student as any)?.id, receipt.invoice?.fee ? ((receipt.invoice as any).fee as any).id : (receipt.invoice as any)?.feeId);
     const chargeSourceBlock = chargeSourceHtml(directBill);
     const html = `<!DOCTYPE html>
@@ -947,7 +1020,7 @@ ${chargeSourceCss()}
   <div class="amount">
     <div class="label">Amount Paid</div>
     <h1 class="value">${moneyNGN(receipt.paidAmount)}</h1>
-    <p class="words">Payment via ${escapeHtml(receipt.paymentChannel || 'Paystack')}</p>
+    <p class="words">Payment via ${escapeHtml(formalDisplay.viaLine)}</p>
   </div>
 
   <div class="grid">
@@ -959,7 +1032,7 @@ ${chargeSourceCss()}
     <div>
       <div class="group"><div class="label">Payment Date & Time</div><div class="value">${new Date(receipt.paidAt).toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'medium' })}</div></div>
       <div class="group"><div class="label">Receipt Reference</div><div class="value" style="font-family: monospace;">${escapeHtml(receipt.receiptNumber)}</div></div>
-      <div class="group"><div class="label">Payment Method</div><div class="value">Online Payment (Paystack)${receipt.paymentMethodDetail ? ' • ' + escapeHtml(receipt.paymentMethodDetail) : ''}</div></div>
+      <div class="group"><div class="label">Payment Method</div><div class="value">${escapeHtml(formalDisplay.methodLine)}</div></div>
     </div>
   </div>
 

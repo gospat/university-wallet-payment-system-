@@ -18,6 +18,7 @@
 //         6. Receipt row creation (generateReceiptReference counter + verificationToken).
 //         7. Wallet credit backward-compat (wallet flow still works).
 // =============================================================================
+import * as crypto from 'crypto';
 import { z } from 'zod';
 import { Prisma, TransactionType, TransactionStatus, Role, PaymentGateway } from '@prisma/client';
 import prisma from '../config/database';
@@ -31,7 +32,7 @@ import { AdminNotificationService } from './adminNotification';
 import { SystemSettingsService } from './systemSettings';
 import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerFactory';
 import { gatewayLabel, VerifyPaymentOptions, PaymentBreakdown, AlatpayPublicCheckout } from './payment/types';
-import { parseAlatpayCustomerMetadata } from '../utils/alatpay';
+import { parseAlatpayCustomerMetadata, makeAlatpayWebhookJobId, isBullmqSafeJobId } from '../utils/alatpay';
 
 type ReqLike = any;
 
@@ -1360,8 +1361,8 @@ export class PaymentService {
   // stored at initiate (because the popup never completed its last postMessage
   // or the student closed early), we simply keep that row PENDING — as if the
   // student never finished the payment flow. Idempotency is preserved via the
-  // BullMQ jobId = alatpay.recon:<transactionId>:<finalUuidHead8> dedup on
-  // dispatch plus the existing verifyPayment internal atomicity.
+  // BullMQ safe jobId per (tx, finalUuid) stable dedup on dispatch plus the
+  // existing verifyPayment internal atomicity.
   // ---------------------------------------------------------------------------
   static async reconcilePendingAlatpayBatch(opts: { minAgeMs?: number; limit?: number } = {}): Promise<{
     scanned: number;
@@ -1374,8 +1375,8 @@ export class PaymentService {
     const cutoff = new Date(Date.now() - minAgeMs);
     const rows = await prisma.transaction.findMany({
       where: {
-        gateway: 'ALATPAY' as any,
-        status: { in: ['PENDING', 'INITIATED'] as any },
+        gateway: PaymentGateway.ALATPAY,
+        status: TransactionStatus.PENDING,
         createdAt: { lte: cutoff },
       },
       orderBy: [{ updatedAt: 'asc' }],
@@ -1424,17 +1425,28 @@ export class PaymentService {
         }
         continue;
       }
-      if (tx.status !== 'PENDING' && (tx.status as any) !== 'INITIATED') {
+      if (tx.status !== TransactionStatus.PENDING) {
         skippedTerminal++;
         continue;
       }
       try {
+        // BullMQ-safe per-attempt unique reconciliation job id (no colons).
+        // The format alatpay_recon_tx_<id>_<uuidHead8> plus <ts36>_<nonce8> tail.
+        let safeJobId: string;
+        try {
+          safeJobId = makeAlatpayWebhookJobId(`recon:tx:${tx.id}:${finalTxId.slice(0, 8)}`);
+          if (!isBullmqSafeJobId(safeJobId)) throw new Error('predicate-fail');
+        } catch {
+          // Belt: always have a fallback with conservative chars
+          safeJobId = 'alatpay_recon_tx_' + tx.id + '_' + finalTxId.slice(0, 8) + '_' +
+            Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
+        }
         await dispatchJob(
-          'alatpay.recon' as any,
+          'alatpay.recon',
           { transactionId: tx.id, providerReference: finalTxId, expectedAmount: Number(tx.expectedAmount || 0) },
           {
             deduplicate: true,
-            jobId: `alatpay.recon:tx-${tx.id}-${finalTxId.slice(0, 8)}`,
+            jobId: safeJobId,
             priority: 'low',
             retries: 3,
           },
