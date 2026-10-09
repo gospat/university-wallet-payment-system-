@@ -32,7 +32,7 @@ import { AdminNotificationService } from './adminNotification';
 import { SystemSettingsService } from './systemSettings';
 import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerFactory';
 import { gatewayLabel, VerifyPaymentOptions, PaymentBreakdown, AlatpayPublicCheckout } from './payment/types';
-import { parseAlatpayCustomerMetadata, makeAlatpayWebhookJobId, isBullmqSafeJobId } from '../utils/alatpay';
+import { parseAlatpayCustomerMetadata, makeAlatpayWebhookJobId, isBullmqSafeJobId, isAlatpayUuid } from '../utils/alatpay';
 import { getRedis } from '../config/redis';
 
 type ReqLike = any;
@@ -129,6 +129,47 @@ function money(n: number | Prisma.Decimal): number {
   return Number(Number(n).toFixed(2));
 }
 
+/**
+ * Provider-neutral conservative retry policy (Blocker fix 1/2/3):
+ *
+ * FINANCIAL INVARIANT — Elapsed time alone must NEVER produce FAILED / SUCCESS /
+ * UNDERPAID / OVERPAID / REVERSED for ANY payment gateway.
+ *   UNKNOWN != FAILED.
+ *   TIMEOUT != FAILED.
+ *   NO CALLBACK != FAILED.
+ *   NETWORK ERROR != FAILED.
+ *   RETRY != FAILED.
+ *
+ * Exact policy for existing unresolved PENDING on same (student, invoice):
+ *
+ *  1. MAX_UNRESOLVED_PENDING_PER_INVOICE = 2 ceiling (any age, any gateway).
+ *     Prevents unlimited duplicate PENDING accumulation.
+ *  2. Age < 5 minutes → block duplicate with 425 regardless of gateway.
+ *     UX: student should wait.
+ *  3. Age >= 5 minutes:
+ *       NO TERMINAL STATUS WRITE EVER.
+ *       Never infer gateway from activeGateway if persisted gateway is NULL.
+ *       Never treat an existing stored alatpayFinalTransactionId as proof
+ *       of failure; it's only a correlation handle for verification.
+ *       Block new initiation with a 409. Student may trigger the
+ *       authoritative reverification workflow (POST /payments/:id/reverify)
+ *       separately; initiatePayment is NEVER the path for re-verification.
+ *
+ * SUCCESS / UNDERPAID / OVERPAID / REVERSED rows never match this block
+ * because the Promise.all query filters status = PENDING only.
+ */
+function classifyPendingForRetry(
+  pendingGateway: string | null,
+  _activeGateway: PaymentGateway,
+  _hasTrustedAlatpayFinalUuid: boolean,
+): { terminalizeFailed: false; blockInitiation: true } {
+  // Provider-neutral conservative policy: never terminalize on age alone.
+  // Future: if authoritative provider-init-time rejection classification is
+  // introduced (not transport ambiguous), a narrower safe terminalization
+  // may be added here with explicit audit/source evidence.
+  return { terminalizeFailed: false, blockInitiation: true };
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -180,29 +221,34 @@ export class PaymentService {
 
     // A5.1 Idempotency guard (FR-A7): check for recent PENDING rows on this invoice
     //
-    // CRITICAL FINANCIAL SAFETY (per issue with production transaction #40):
+    // CRITICAL FINANCIAL SAFETY (per production transaction #40, review blockers 1/2/3):
     //   An unresolved PENDING row MUST NEVER be automatically transitioned to FAILED
     //   (or any other terminal financial status) merely because of elapsed time /
-    //   browser timeout / popup closure / missing webhook / missing final UUID.
+    //   browser timeout / popup closure / missing webhook / missing final UUID /
+    //   transport error / student retry.
     //   UNKNOWN is not FAILED. NO CALLBACK is not FAILED. TIMEOUT is not FAILED.
-    //   RETRY is not FAILED.
+    //   RETRY is not FAILED. NETWORK ERROR is not FAILED.
     //
-    // Policy:
-    //   * recent pending (< FIVE_MINUTES_MS) -> block with 425 regardless of gateway.
-    //   * older unresolved PAYSTACK pending -> retain legacy PENDING->FAILED with
-    //     description=client-reinit-timeout. Paystack pending references can usually
-    //     be re-verified client-side later; this path is the preexisting behavior and
-    //     was not flagged in incident. Not broadened to ALATPAY.
-    //   * older unresolved ALATPAY (or gateway unknown / null) pending -> BLOCK
-    //     initiation entirely with a 409 student-facing status message. DO NOT write
-    //     FAILED. DO NOT create a second PENDING provider transaction. The student
-    //     must wait for the existing attempt to be reconciled (requires stored
-    //     alatpayFinalTransactionId that only the provider can supply / verify).
+    // CONSERVATIVE PROVIDER-NEUTRAL POLICY:
+    //   * MAX_UNRESOLVED_PENDING_PER_INVOICE=2 ceiling (any gateway, any age).
+    //   * Age < 5min → block duplicate with 425.
+    //   * Age >= 5min → 409 BLOCK new initiation. No terminal status write.
+    //     The existing PENDING row is PRESERVED UNTOUCHED so that the
+    //     authoritative reverification workflow, scheduler recon, future webhook
+    //     delivery, or future callback can still settle it correctly.
+    //   * Unknown/null persisted gateway → FAIL CLOSED. DO NOT infer the
+    //     historical provider identity from today's activeGateway setting.
+    //     The past attempt may have been made under a different provider; any
+    //     guess would risk incorrectly terminalizing a valid pending attempt.
     //
-    // Additional duplicate ceiling (Task 4): regardless of age, if the same
-    // invoice/student already has 2+ unresolved PENDING rows total, block
-    // initiation until at least one clears; this prevents runaway accumulation of
-    // duplicate provider sessions (accidental double-click / tab / refresh storms).
+    //   * The presence of a stored alatpayFinalTransactionId (trustworthy UUID)
+    //     is only a correlation identifier that MAY be used for authoritative
+    //     verification elsewhere. It is NOT proof of success, proof of failure,
+    //     or reason to terminalize the row here. (Blocker 1)
+    //
+    // Duplicate ceiling (B1/B2/B3 invariant): prevents unbounded provider
+    // session creation even after 5 minutes when the lock has expired or the
+    // student manually keeps retrying.
     const FIVE_MINUTES_MS = 5 * 60 * 1000;
     const MAX_UNRESOLVED_PENDING_PER_INVOICE = 2;
     const [existingPending, pendingCount] = await Promise.all([
@@ -234,33 +280,62 @@ export class PaymentService {
       const nowTime = Date.now();
       const ageMs = nowTime - createdAtTime;
       const pendingGateway = (existingPending as any).gateway as string | null;
-      const hasTrustedAlatpayFinalUuid = Boolean((existingPending as any).alatpayFinalTransactionId) && /^[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12}$/.test(String((existingPending as any).alatpayFinalTransactionId));
+
+      // Use the single canonical strict UUID-v4 helper (also used by recon
+      // worker and student reverify route) — never any inline weak variant.
+      // (Blocker 4: single shared validator.
+      // Presence of UUID is not proof of payment status. It only means: we may
+      // attempt authoritative verification through it in a separate workflow.)
+      const hasTrustedAlatpayFinalUuid = isAlatpayUuid((existingPending as any).alatpayFinalTransactionId);
+
       if (ageMs < FIVE_MINUTES_MS) {
         throw new AppError(
           'Payment already in progress. Please wait 5 minutes before retrying or check status.',
           425,
         );
       }
-      // Older than 5 minutes. Policy depends on the PERSISTED gateway of that
-      // attempt, NOT the currently-active system gateway (historical determinism).
-      const isAlatpayUnresolved =
-        pendingGateway === PaymentGateway.ALATPAY ||
-        (pendingGateway == null && activeGateway === PaymentGateway.ALATPAY);
-      if (isAlatpayUnresolved && !hasTrustedAlatpayFinalUuid) {
-        // DO NOT write FAILED. Block initiation. Preserve original PENDING row
-        // untouched so scheduler reconciliation can still succeed if/when the
-        // provider's UUID is eventually captured / delivered.
+
+      // Provider-neutral conservative: never terminalize from age alone.
+      // classifyPendingForRetry returns { terminalizeFailed:false, blockInitiation:true }
+      // for every input (no exceptions, no gateway-branch special cases).
+      const policy = classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid);
+      if (policy.blockInitiation) {
+        // 409 with student-facing actionable message.
+        // The message distinguishes ALATPAY / PAYSTACK / UNKNOWN scenarios so
+        // the student knows which status workflow to use next, but NO DB
+        // terminal write happens ever here.
+        const isAlatpay = pendingGateway === PaymentGateway.ALATPAY;
+        const isPaystack = pendingGateway === PaymentGateway.PAYSTACK;
+        const gwLabel =
+          isAlatpay ? 'ALATPay' : isPaystack ? 'Paystack' : 'an earlier';
+        const finalUuidHint =
+          isAlatpay && hasTrustedAlatpayFinalUuid
+            ? ' (its final provider transaction identifier has been captured; use the Check Status / Re-verify action on this payment to obtain an authoritative result.)'
+            : isAlatpay
+              ? ' (the final provider transaction identifier is not yet recorded locally; confirmation is still pending.)'
+              : '';
         throw new AppError(
-          'A previous ALATPay payment attempt is still awaiting confirmation and has not been authoritatively failed. Please verify that attempt using its transaction reference, or contact support. Another payment will not be started automatically because the final provider transaction identifier is not yet recorded.',
+          `A ${gwLabel} payment attempt from ${Math.round(ageMs / 60000)} minutes ago is still awaiting confirmation and has not been authoritatively settled. Please verify that attempt using its transaction reference${finalUuidHint}, or contact support. Another payment will not be started automatically.`,
           409,
         );
       }
-      // Legacy path: Paystack PENDING that has aged past 5 minutes. Re-transition
-      // to FAILED so another attempt can be made (unchanged Paystack behavior).
-      await prisma.transaction.update({
-        where: { id: existingPending.id },
-        data: { status: TransactionStatus.FAILED, description: 'client-reinit-timeout' },
-      });
+
+      // LINTING SAFETY — classifyPendingForRetry never returns terminalizeFailed
+      // today, but the call signature is extensible for a future explicit,
+      // signed-off, provider-declared rejection-only narrow path if a
+      // classification abstraction is ever added. In the current code the
+      // `if (policy.blockInitiation)` branch above always matches, and the
+      // code below is unreachable. It is preserved explicitly to prevent a
+      // silent accidental legacy `update FAILED client-reinit-timeout` from
+      // being reintroduced by a future inattentive edit.
+      if ((policy as any).terminalizeFailed === true) {
+        // Never reachable today. If enabled in future: this MUST ONLY happen
+        // for an EXPLICIT AUTHORITATIVE PROVIDER-DECLARED REJECTION (not time).
+        await prisma.transaction.update({
+          where: { id: existingPending.id },
+          data: { status: TransactionStatus.FAILED, description: 'provider-explicitly-rejected' },
+        });
+      }
     }
   // 3. Partial amount clamp
   let payable = balance;
@@ -455,14 +530,82 @@ export class PaymentService {
       return base;
     } catch (err) {
       const rawErrMsg = (err as Error)?.message ?? '';
+
+      // -----------------------------------------------------------------------
+      // Blocker 5 FIX — distinguish explicit provider rejection vs transport/
+      // ambiguous initialization error.
+      //
+      // PRE-AUDIT FINDINGS (K1):
+      //   ALATPAY provider.initialize catch: all errors → new AppError(msg, 502).
+      //     Transport (timeout/DNS/502/503/lost response): throws code 502.
+      //     Provider 4xx errors: still re-classified as AppError(502) in catch.
+      //     So thrown HTTP status == 502 for ALATPAY ambiguous/transport paths.
+      //
+      //   PAYSTACK PaystackService.initializeTransaction catch: all errors →
+      //     new AppError(msg, 500). No 4xx/declined distinction.
+      //
+      // THEREFORE: today's provider abstraction does NOT reliably distinguish
+      // explicit authoritative provider-rejected initializations (A) from
+      // transport/system/ambiguous failures (B). Per user mandate: if we
+      // cannot reliably separate A from B → FAIL CLOSED. Do NOT invent
+      // certainty.
+      //
+      // RESULTING POLICY:
+      //   Transaction DB row status remains = PENDING (unresolved).
+      //   This is because:
+      //     * The provider may have actually created a session on its side
+      //       (e.g. ALATPAY POSTed initialize, DB row committed, then
+      //        socket reset before response came back — a webhook in the
+      //        future can still settle it).
+      //     * Marking FAILED prematurely would destroy the ability of a
+      //       future webhook/recon to recover.
+      //
+      //   We PERSIST:
+      //     * description: sanitized raw error message (human review)
+      //     * underpaidReason: same raw error (for tooling)
+      //     * metadata.initiateTransportFailed: { at, code, errClass }
+      //       flag so bursary/UI can label: "Provider init failed. Retry."
+      //
+      //   If a future version of the providers' abstraction can reliably
+      //   return a signed-off explicit provider-declared initialization
+      //   rejection (e.g. an HTTP 422 business code "amount too high" or
+      //   "merchant blocked", NOT a transport error), THEN a narrow
+      //   FAILED terminal write can be added for that specific, classified
+      //   case only.
+      //
+      //   Audit write keeps paymentFailed action name (since the student
+      //   UX shows an error to them) but DB-row status is PENDING (not
+      //   authoritative terminal).
+      // -----------------------------------------------------------------------
+      const errHttpCode: number | null =
+        (err as any)?.httpCode && Number.isFinite((err as any).httpCode) ? Number((err as any).httpCode) :
+        (err as any)?.statusCode && Number.isFinite((err as any).statusCode) ? Number((err as any).statusCode) :
+        (err as any)?.status && Number.isFinite((err as any).status) ? Number((err as any).status) : null;
       try {
+        const existingMeta =
+          txRow.metadata && typeof txRow.metadata === 'object'
+            ? (txRow.metadata as Record<string, any>)
+            : {};
+        const updatedMeta: Record<string, any> = {
+          ...existingMeta,
+          initiateTransportFailed: {
+            at: new Date().toISOString(),
+            httpCode: errHttpCode,
+            errorClass: (err as any)?.name ?? (err as any)?.constructor?.name ?? 'Error',
+            sanitized: rawErrMsg ? rawErrMsg.slice(0, 200) : null,
+          },
+        };
         await prisma.transaction.update({
           where: { id: txRow.id },
           data: {
             gateway: activeGateway,
-            status: TransactionStatus.FAILED,
+            // STATUS = PENDING (preserve unresolved — no authoritative terminal write)
+            // status: NOT SET → remains as created PENDING.
             underpaidReason: rawErrMsg ? rawErrMsg.slice(0, 190) : null,
-            description: rawErrMsg ? rawErrMsg.slice(0, 190) : null,
+            description: rawErrMsg
+              ? `[provider-init-failed ambiguous, status preserved PENDING] ${rawErrMsg.slice(0, 160)}`
+              : '[provider-init-failed ambiguous, status preserved PENDING]',
+            metadata: updatedMeta as Prisma.InputJsonValue,
           },
         });
       } catch (persistErr) {
@@ -474,7 +617,14 @@ export class PaymentService {
           entityType: 'TRANSACTION',
           entityId: txRow.id,
           oldValue: { status: 'PENDING' },
-          newValue: { gateway: activeGateway, status: 'FAILED', error: rawErrMsg.slice(0, 500) },
+          newValue: {
+            gateway: activeGateway,
+            // Row DB status still PENDING, audit records the student UX failure.
+            // Status field written as 'PENDING + initiate-failed' explicitly:
+            status: 'PENDING (initiate transport/ambiguous failure; not authoritative terminal)',
+            error: rawErrMsg.slice(0, 500),
+            errorHttpCode: errHttpCode,
+          },
         });
       } catch (auditErr) {
         console.warn('[initiatePayment:catch] audit write failed (ignored):', (auditErr as Error)?.message);
@@ -895,7 +1045,7 @@ export class PaymentService {
             updateData.paystackChannel = channel;
           } else {
             updateData.alatpayReference = providerRef;
-            if (providerRef && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(providerRef)) {
+            if (isAlatpayUuid(providerRef)) {
               updateData.alatpayFinalTransactionId = providerRef;
             }
           }
@@ -980,7 +1130,7 @@ export class PaymentService {
         };
       } else {
         updateSuccessData.alatpayReference = providerRef;
-        if (providerRef && /^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(providerRef)) {
+        if (isAlatpayUuid(providerRef)) {
           updateSuccessData.alatpayFinalTransactionId = providerRef;
         }
         if (latest.alatpayFinalTransactionId && !updateSuccessData.alatpayFinalTransactionId) {
@@ -1499,14 +1649,16 @@ export class PaymentService {
       },
     });
     const { dispatchJob } = await import('../config/queue');
-    const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    // Canonical strict UUID-v4 helper: typeof s==='string' + trim + /^[0-9a-f]{8}-[0-9a-f]{4}-4xxx-[89ab]xxx-xxx{12}$/i
+    // (imported from utils/alatpay.ts). Replaces previous inline regex to
+    // eliminate validator duplication / inconsistency drift (Blocker 4).
     let totalEnqueued = 0;
     let skippedNoId = 0;
     let skippedTerminal = 0;
     const noStoredFinalUuidTxSample: string[] = [];
     for (const tx of rows) {
       const finalTxId =
-        typeof tx.alatpayFinalTransactionId === 'string' && uuidV4.test(tx.alatpayFinalTransactionId.trim())
+        typeof tx.alatpayFinalTransactionId === 'string' && isAlatpayUuid(tx.alatpayFinalTransactionId)
           ? tx.alatpayFinalTransactionId.trim()
           : null;
       if (!finalTxId) {

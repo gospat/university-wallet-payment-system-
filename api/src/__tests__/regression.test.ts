@@ -945,13 +945,14 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(safeRegion).not.toMatch(/SUCCESS/);
     });
 
-    it('TR-24.7 Provider reference for ALATPAY: ONLY stored alatpayFinalTransactionId accepted (strict v4 regex). Never arbitrary user-supplied UUID.', () => {
+    it('TR-24.7 Provider reference for ALATPAY: ONLY stored alatpayFinalTransactionId accepted (strict v4 regex via shared isAlatpayUuid helper). Never arbitrary user-supplied UUID.', () => {
       const gateRegion = studentsSrc!.slice(
         studentsSrc!.indexOf("tx.gateway === 'ALATPAY'"),
         studentsSrc!.indexOf("tx.gateway === 'ALATPAY'") + 700,
       );
       expect(gateRegion).toMatch(/alatpayFinalTransactionId/);
-      expect(gateRegion).toMatch(/uuidV4Re\.(test|match)/);
+      // Blocker 4 fix: single canonical shared helper (no inline uuidV4Re regex duplication):
+      expect(gateRegion).toMatch(/isAlatpayUuid\(/);
       // No reference whatsoever to request body provider fields:
       expect(gateRegion).not.toMatch(/req\.body.*provider/i);
     });
@@ -968,9 +969,10 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
     });
 
-    it('TR-25.1 Tier A selector prefers stored alatpayFinalTransactionId over all other refs (never downgrades)', () => {
+    it('TR-25.1 Tier A selector prefers stored alatpayFinalTransactionId over all other refs (never downgrades). Single shared strict-v4 helper isAlatpayUuid is used (no inline uuidV4 regex variant duplication drift).', () => {
       expect(paymentSrc).toMatch(/alatpayFinalTransactionId/);
-      expect(paymentSrc).toMatch(/uuidV4\.test\(.*alatpayFinalTransactionId/);
+      // Blocker 4 fix: uses the single canonical shared strict-v4 helper from utils/alatpay.ts:
+      expect(paymentSrc).toMatch(/isAlatpayUuid\(.*alatpayFinalTransactionId/);
       expect(paymentSrc).toMatch(/alatpayOrderReference/);
       expect(paymentSrc).toMatch(/alatpayInitPaymentReference/);
     });
@@ -2045,10 +2047,11 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(batchSlice).not.toMatch(/status:\s*\{\s*in:\s*\[[^\]]*\]\s*as any/);
     });
 
-    it('TR-33.C PENDING ALATPAY transaction + valid stored final UUID CAN be selected (finalTxId check passes).', () => {
+    it('TR-33.C PENDING ALATPAY transaction + valid stored final UUID CAN be selected (finalTxId check passes via single shared isAlatpayUuid strict v4 helper).', () => {
       // The WHERE-clause + per-tx logic: tx.alatpayFinalTransactionId is read, validated, trimmed
       expect(batchSlice).toMatch(/alatpayFinalTransactionId:\s*true/);
-      expect(batchSlice).toMatch(/uuidV4\.test\(/);
+      // Blocker 4 fix: single canonical shared strict-v4 helper (no inline uuidV4.test regex duplication):
+      expect(batchSlice).toMatch(/isAlatpayUuid\(/);
       // The PENDING guard double-checks:
       expect(batchSlice).toMatch(/tx\.status\s*!==\s*TransactionStatus\.PENDING/);
     });
@@ -2349,7 +2352,9 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
       const defStart = paymentSrc.indexOf('static async initiatePayment(');
       expect(defStart).toBeGreaterThan(5000);
-      initiateSlice = paymentSrc.slice(Math.max(0, defStart - 10), Math.min(paymentSrc.length, defStart + 30000));
+      // Helper classifyPendingForRetry lives at byte offset ~8483, initiatePayment at ~9243.
+      // So back off by 850 bytes to guarantee the helper is included.
+      initiateSlice = paymentSrc.slice(Math.max(0, defStart - 850), Math.min(paymentSrc.length, defStart + 30000));
     });
 
     it('TR-36.1 425 block for unresolved PENDING younger than FIVE_MINUTES_MS still enforced (regardless of gateway, regression-safe).', () => {
@@ -2359,58 +2364,89 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(initiateSlice).toMatch(/Payment already in progress/);
     });
 
-    it('TR-36.2 Elapsed time (>5 min) DOES NOT trigger automatic PENDING→FAILED for unresolved ALATPAY. No FAILED write path for gateway=ALATPAY without alatpayFinalTransactionId (trustworthy uuid).', () => {
+    it('TR-36.2 Elapsed time (>5 min) DOES NOT trigger automatic PENDING→FAILED for ANY gateway (ALATPAY WITH UUID, ALATPAY without UUID, PAYSTACK, gateway=NULL all equally fail closed: preserve PENDING + block new attempt). Provider-neutral invariant: elapsed time alone NEVER writes a terminal financial status.', () => {
       expect(initiateSlice).toBeTruthy();
-      // 1. ALATPAY-unresolved predicate isALATPAYUnresolved is declared and
-      //    uses PERSISTED pending gateway (not just today's active gateway).
       const p = initiateSlice!;
-      const a1 = p.indexOf('isAlatpayUnresolved =');
-      const a2 = p.indexOf('pendingGateway === PaymentGateway.ALATPAY');
-      const a3 = p.indexOf('PaymentGateway.ALATPAY');
-      expect(a1).toBeGreaterThan(0);
-      expect(a2).toBeGreaterThan(a1);
-      expect(a3).toBeGreaterThan(0);
-      // 2. hasTrustedAlatpayFinalUuid is derived from raw alatpayFinalTransactionId
-      //    + UUID v4 shape regex (starts with ^[0-9a-fA-F-]{8}-).
-      const b1 = p.indexOf('hasTrustedAlatpayFinalUuid = Boolean(');
-      const b2 = p.indexOf('alatpayFinalTransactionId', b1);
-      const b3 = p.indexOf('/^[0-9a-fA-F-]{8}-', b1);
-      expect(b1).toBeGreaterThan(0);
-      expect(b2).toBeGreaterThan(b1);
-      expect(b3).toBeGreaterThan(b1);
-      // 3. Guard THROWS 409 for isAlatpayUnresolved && !hasTrustedAlatpayFinalUuid.
-      const guard = p.indexOf('if (isAlatpayUnresolved && !hasTrustedAlatpayFinalUuid)');
-      const throwInGuard = p.indexOf('throw new AppError(', guard);
-      const msg = p.indexOf('final provider transaction identifier is not yet recorded', guard);
-      expect(guard).toBeGreaterThan(0);
-      expect(throwInGuard).toBeGreaterThan(guard);
-      expect(msg).toBeGreaterThan(guard);
-      expect(msg).toBeLessThan(throwInGuard + 800);
-      // 4. Single legacy Paystack FAILED write (client-reinit-timeout) happens ONLY AFTER the guard throw, which means the path is unreachable for unresolved ALATPAY.
-      const legacyFail = p.indexOf("status: TransactionStatus.FAILED, description: 'client-reinit-timeout'");
-      expect(legacyFail).toBeGreaterThan(msg);
-      // 5. No UNDERPAID/OVERPAID/REVERSED/SUCCESS in the stale policy region.
-      const region = p.slice(guard - 500, legacyFail + 500);
-      expect(region).not.toMatch(/UNDERPAID|OVERPAID|REVERSED/);
-      expect(region).not.toMatch(/:\s*TransactionStatus\.SUCCESS/);
+      // 1. Provider-neutral classifyPendingForRetry helper is declared, takes all
+      //    combinations and returns { terminalizeFailed: false, blockInitiation: true }.
+      const helper = p.indexOf('function classifyPendingForRetry(');
+      const helperSig = p.indexOf('pendingGateway: string | null', helper);
+      const helperReturns = p.indexOf('terminalizeFailed: false', helper);
+      const helperBlock = p.indexOf('blockInitiation: true', helper);
+      expect(helper).toBeGreaterThan(0);
+      expect(helperSig).toBeGreaterThan(helper);
+      expect(helperReturns).toBeGreaterThan(helper);
+      expect(helperBlock).toBeGreaterThan(helper);
+      // 2. Inside classifyPendingForRetry there is NO branching on pendingGateway
+      //    activeGateway hasTrustedAlatpayFinalUuid to decide terminalizeFailed.
+      //    Meaning: no ALATPAY vs PAYSTACK special-case to write FAILED on age.
+      const helperBody = p.slice(helper, helper + 500);
+      // Helper body contains NO if() on gateway that writes a terminal.
+      expect(helperBody.indexOf('PaymentGateway.ALATPAY')).toBe(-1);
+      expect(helperBody.indexOf('PaymentGateway.PAYSTACK')).toBe(-1);
+      // 3. stale pending region invokes classifyPendingForRetry, then blocks
+      //    on policy.blockInitiation throwing 409 BEFORE any prisma.transaction.update
+      //    that would write a terminal status in the age path.
+      const callSite = p.indexOf('classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid)');
+      expect(callSite).toBeGreaterThan(0);
+      const blockIf = p.indexOf('if (policy.blockInitiation)', callSite);
+      expect(blockIf).toBeGreaterThan(callSite);
+      const throw409InBlock = p.indexOf('throw new AppError(', blockIf);
+      expect(throw409InBlock).toBeGreaterThan(blockIf);
+      const msgAwaitConfirmation = p.indexOf('is still awaiting confirmation and has not been authoritatively settled', blockIf);
+      expect(msgAwaitConfirmation).toBeGreaterThan(blockIf);
+      expect(msgAwaitConfirmation).toBeLessThan(throw409InBlock + 600);
+      // 4. After the throw 409 message (age-based block), there is NO reachable
+      //    prisma.transaction.update writing FAILED terminal status in the
+      //    stale age check path. (Only linting-safety unreachable branch.)
+      //    Legacy client-reinit-timeout FAILED write string DOES NOT exist.
+      const staleRegionA = p.slice(msgAwaitConfirmation - 200, p.indexOf('// 3. Partial amount clamp'));
+      // client-reinit-timeout may appear as a comment (lint guard) but MUST NOT appear as DB description write.
+      expect(staleRegionA).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
+      // No TransactionStatus.FAILED outside the guarded lint-safety unreachable dead branch:
+      //    The only FAILED write string is: description: 'provider-explicitly-rejected'
+      //    It is guarded by `if ((policy as any).terminalizeFailed === true)` and helper always returns false.
+      const lintGuard = staleRegionA.indexOf("(policy as any).terminalizeFailed === true");
+      const failedWrite = staleRegionA.indexOf("status: TransactionStatus.FAILED, description: 'provider-explicitly-rejected'");
+      // Either no FAILED write at all, or it's AFTER the lint-safety guard (unreachable):
+      expect(failedWrite === -1 || (lintGuard > 0 && failedWrite > lintGuard)).toBe(true);
+      // 5. hasTrustedAlatpayFinalUuid uses the single shared helper isAlatpayUuid
+      const uuidUsage = p.indexOf('hasTrustedAlatpayFinalUuid = isAlatpayUuid(');
+      expect(uuidUsage).toBeGreaterThan(0);
+      // 6. No inference of gateway from activeGateway for NULL persisted pendingGateway
+      //    (fallback activeGateway to decide behavior). In new code pendingGateway
+      //    is only used for the STUDENT-FACING MESSAGE label after decision;
+      //    the classifyPendingForRetry helper treats all inputs identically.
+      const gwNullFallback = p.match(/pendingGateway\s*==\s*null\s*&&\s*activeGateway/);
+      expect(gwNullFallback).toBeNull();
+      // 7. No UNDERPAID/OVERPAID/REVERSED/SUCCESS anywhere in stale policy region
+      expect(staleRegionA).not.toMatch(/UNDERPAID|OVERPAID|REVERSED/);
+      expect(staleRegionA).not.toMatch(/:\s*TransactionStatus\.SUCCESS/);
     });
 
-    it('TR-36.3 Provider-confirmed FAILED (catch after provider.initialize synchronous throw) still FAILED — legitimate authoritative write, PRESERVED.', () => {
+    it('TR-36.3 Provider initialize transport/ambiguous error preserves unresolved PENDING (no authoritative FAILED) — fail closed per Blocker 5 audit. DB row stays PENDING, error stored in description + initiateTransportFailed metadata flag for review.', () => {
       expect(initiateSlice).toBeTruthy();
-      // Provider.initialize is called, wrapped in a try/catch block. Catch block
-      // has a prisma.transaction.update writing FAILED status + error desc.
       const p = initiateSlice!;
       const provInit = p.indexOf('provider.initialize(');
       const catchAt = p.indexOf('catch (err) {', provInit);
       expect(provInit).toBeGreaterThan(0);
       expect(catchAt).toBeGreaterThan(provInit);
-      const updateFailedAfter = p.indexOf('prisma.transaction.update', catchAt);
-      expect(updateFailedAfter).toBeGreaterThan(catchAt);
-      // At least one FAILED status in the catch area.
-      const failWriteRegion = p.slice(updateFailedAfter, updateFailedAfter + 800);
-      expect(failWriteRegion).toMatch(/TransactionStatus\.FAILED/);
-      const rawErrMsgIdx = failWriteRegion.indexOf('rawErrMsg');
-      expect(rawErrMsgIdx).toBeGreaterThan(0);
+      // Blocker-5 classification comment exists in catch region:
+      const bl5 = p.indexOf('Blocker 5 FIX', catchAt);
+      expect(bl5).toBeGreaterThan(catchAt);
+      const noStatus = p.indexOf("// STATUS = PENDING (preserve unresolved — no authoritative terminal write)", bl5);
+      expect(noStatus).toBeGreaterThan(bl5);
+      // There is NO status: TransactionStatus.FAILED setting in the catch region.
+      const catchRegion = p.slice(catchAt, catchAt + 5000);
+      expect(catchRegion).not.toMatch(/status:\s*TransactionStatus\.FAILED/);
+      // Initiate metadata flag is persisted:
+      expect(catchRegion).toMatch(/initiateTransportFailed:/);
+      // description field is updated but not a terminal FAILED (it prefixes with
+      // [provider-init-failed ambiguous, status preserved PENDING] via template literal).
+      const descPrefix = catchRegion.indexOf('[provider-init-failed ambiguous, status preserved PENDING]');
+      expect(descPrefix).toBeGreaterThan(0);
+      // Raw error is persisted to underpaidReason for review.
+      expect(catchRegion).toMatch(/underpaidReason:/);
     });
 
     it('TR-36.4 Max unresolved pending ceiling (MAX_UNRESOLVED_PENDING_PER_INVOICE = 2) prevents > 2 PENDING rows for same student+invoice before initiating any 3rd.', () => {
@@ -2421,21 +2457,24 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(initiateSlice).toMatch(/pendingCount\s*>=\s*MAX_UNRESOLVED_PENDING_PER_INVOICE[\s\S]{0,300}409/);
     });
 
-    it('TR-36.5 PENDING rows never reach status FAILED / UNDERPAID / OVERPAID / REVERSED / SUCCESS merely due to scheduler age.', () => {
+    it('TR-36.5 PENDING rows never reach status FAILED / UNDERPAID / OVERPAID / REVERSED / SUCCESS merely due to scheduler age in initiatePayment stale-age logic. No client-reinit-timeout DB description write at all (comment refs allowed only, not persisted to DB).', () => {
       expect(initiateSlice).toBeTruthy();
-      // In the A5.1 stale logic, the ONLY terminal writes are:
-      //   * FAILED via legacy Paystack path (after the ALATPAY-blocking throw)
-      //   * FAILED via provider.initialize catch (authoritative)
-      // There MUST be no unconditional FAILED/UNDERPAID/OVERPAID/REVERSED/SUCCESS
-      // writes that fire solely on age check:
+      // In the A5.1 stale logic: NO terminal writes of any kind.
+      //   (There's the linting-safety unreachable provider-explicitly-rejected
+      //    branch, but client-reinit-timeout DB description is gone entirely.)
       const ageGuardStart = initiateSlice!.indexOf('FIVE_MINUTES_MS');
-      const legacyPathEnd = initiateSlice!.indexOf('Partial amount clamp');
+      const legacyPathEnd = initiateSlice!.indexOf('// 3. Partial amount clamp');
       const staleRegion = initiateSlice!.slice(ageGuardStart, legacyPathEnd);
+      // client-reinit-timeout MUST NOT be written as DB description (comment-only references allowed).
+      expect(staleRegion).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
       expect(staleRegion).not.toMatch(/UNDERPAID|OVERPAID|REVERSED/);
       expect(staleRegion).not.toMatch(/:\s*TransactionStatus\.SUCCESS/);
-      // And SUCCESS/UNDERPAID/OVERPAID/REVERSED not written anywhere outside verify.
-      const successWriteOutsideVerify = paymentSrc.match(/TransactionStatus\.SUCCESS/gi);
-      expect((successWriteOutsideVerify ?? []).length).toBeGreaterThanOrEqual(2);
+      // Count of FAILED status DB writes in stale: should be ZERO except
+      // the unreachable lint-safety dead branch 'provider-explicitly-rejected'.
+      const matchesFailed = staleRegion.match(/status:\s*TransactionStatus\.FAILED/g) ?? [];
+      expect(matchesFailed.length === 0 || matchesFailed.length === 1).toBe(true);
+      // SUCCESS/UNDERPAID/OVERPAID/REVERSED never written in stale region at all:
+      expect(staleRegion).not.toMatch(/TransactionStatus\.(SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
     });
 
     it('TR-36.6 acquireInitiateDedupeLock helper used: Redis SET NX EX with per (studentId, invoiceId) short TTL, degraded in-process Map fallback. Protects concurrent tab double-click / page refresh.', () => {
@@ -2475,24 +2514,38 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(paymentSrc).not.toMatch(/where:\s*\{[\s\S]{0,200}status:\s*TransactionStatus\.FAILED[\s\S]{0,300}data:\s*\{[\s\S]{0,200}status:\s*TransactionStatus\.PENDING/);
     });
 
-    it('TR-36.9 Runtime structural: ALATPAY unresolved PENDING > 5 min scenario uses AppError 409 message from code string scan (elapsed time produces no FAILED terminal prisma write).', () => {
+    it('TR-36.9 Runtime structural: provider-neutral age policy uses classifyPendingForRetry → blockInitiation 409 message (elapsed time produces ZERO FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED terminal prisma writes that are reachable).', () => {
       expect(initiateSlice).toBeTruthy();
-      // The 409 block message appears only inside the ALATPAY unresolved guard.
-      expect(initiateSlice!.indexOf('final provider transaction identifier is not yet recorded')).toBeGreaterThan(0);
-      // Paystack legacy PENDING→FAILED with client-reinit-timeout is reachable only after that 409 guard (index larger), which means execution cannot produce FAILED for the ALATPAY unresolved case at all.
-      const guardIdx = initiateSlice!.indexOf('final provider transaction identifier is not yet recorded');
+      // 409 classification block message present
+      const msgIdx = initiateSlice!.indexOf('is still awaiting confirmation and has not been authoritatively settled');
+      expect(msgIdx).toBeGreaterThan(0);
+      // client-reinit-timeout NOT persisted to DB description anywhere (legacy Paystack write removed)
       const legacyFailIdx = initiateSlice!.indexOf("description: 'client-reinit-timeout'");
-      expect(legacyFailIdx).toBeGreaterThan(guardIdx);
-      // Count of prisma.transaction.update with FAILED terminal status in the stale section is 1 (Paystack only).
-      const reCount = /prisma\.transaction\.update\s*\(\s*\{[\s\S]{0,250}status:\s*TransactionStatus\.FAILED\s*,[\s\S]{0,120}\}\s*\)\s*;/g;
-      const matches = initiateSlice!.match(reCount);
-      // Should be exactly 2 occurrences in the function body:
-      //   1. Paystack reinit-timeout legacy write (stale section)
-      //   2. provider.initialize catch (authoritative provider FAILED)
-      //   3. (maybe another). We only require that none of them happen before
-      //      the ALATPAY unresolved throw.
-      expect(Array.isArray(matches)).toBe(true);
-      expect((matches ?? []).length).toBeGreaterThanOrEqual(1);
+      expect(legacyFailIdx).toBe(-1);
+      const legacyFailIdx2 = initiateSlice!.indexOf('description: "client-reinit-timeout"');
+      expect(legacyFailIdx2).toBe(-1);
+      // In the entire initiatePayment function body, there is NO prisma.transaction.update
+      // writing FAILED status in the STALE-AGE region (between classifyPendingForRetry call
+      // and Partial amount clamp) that is reachable. The only prisma.transaction.update
+      // writing a terminal in that region is the linting-safety unreachable dead branch
+      // guarded by `(policy as any).terminalizeFailed === true`.
+      const classifyIdx = initiateSlice!.indexOf('classifyPendingForRetry(');
+      const clampIdx = initiateSlice!.indexOf('// 3. Partial amount clamp');
+      const subRegion = initiateSlice!.slice(Math.max(0, classifyIdx - 50), clampIdx);
+      // Any terminal status prisma writes other than the lint-safety dead-branch FAILED write:
+      const lintGuardInSub = subRegion.indexOf("(policy as any).terminalizeFailed === true");
+      // count occurrences of TransactionStatus.FAILED / SUCCESS / UNDERPAID / OVERPAID / REVERSED
+      // in subRegion. Allow one: the lint-safety dead branch FAILED that exists AFTER lintGuardInSub.
+      const terminalStatusAll = subRegion.match(/TransactionStatus\.(FAILED|SUCCESS|UNDERPAID|OVERPAID|REVERSED)/g) ?? [];
+      expect(terminalStatusAll.length <= 1).toBe(true);
+      if (terminalStatusAll.length === 1) {
+        expect(lintGuardInSub).toBeGreaterThan(0);
+        expect(subRegion.indexOf('TransactionStatus.' + terminalStatusAll[0].split('.')[1])).toBeGreaterThan(lintGuardInSub);
+      }
+      // No client-reinit-timeout DB description anywhere:
+      expect(subRegion).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
+      // And no direct age > 5min -> FAILED write string
+      expect(initiateSlice).not.toMatch(/ageMs\s*>=\s*FIVE_MINUTES_MS[\s\S]{0,400}TransactionStatus\.FAILED/);
     });
   });
 
@@ -2562,38 +2615,50 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
   });
 
   describe('TR-38 Existing Paystack + webhook + idempotency regression behavior unchanged (task-13 through task-20)', () => {
-    it('TR-38.1 Paystack legacy reinit guard preserved: PENDING→FAILED after 5 minutes of age is still reachable for PENDING rows whose gateway resolves to PAYSTACK (persisted gateway PAYSTACK or activeGateway fallback is Paystack, not ALATPAY).', () => {
+    it('TR-38.1 Provider-neutral policy enforced for stale retries: both PAYSTACK and ALATPAY pending rows preserve PENDING after 5 minutes. Elapsed time NEVER triggers PENDING→FAILED for any gateway. Gateway=NULL also fail closed. No reachable age-based FAILED prisma.transaction.update in stale region.', () => {
       const fs: typeof import('fs') = require('fs');
       const path: typeof import('path') = require('path');
       const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
       const def = src.indexOf('static async initiatePayment');
-      const region = src.slice(def, def + 12000);
-      // client-reinit-timeout is only used for the legacy Paystack path in
-      // the reinit section (after the ALATPAY unresolved guard).
-      expect(region).toMatch(/description:\s*'client-reinit-timeout'/);
-      // The path to it is gated: ALATPAY unresolved throws first.
-      const unresolvedGuard = region.indexOf('isAlatpayUnresolved && !hasTrustedAlatpayFinalUuid');
-      const legacyFail = region.indexOf("description: 'client-reinit-timeout'");
-      expect(legacyFail).toBeGreaterThan(unresolvedGuard);
-      // Persisted-gateway == PAYSTACK scenario reaches legacy path because
-      // isAlatpayUnresolved will be FALSE (pendingGateway=PAYSTACK). That
-      // property is asserted indirectly by the fact that the check uses
-      // pendingGateway (from the existing PENDING row) rather than only
-      // activeGateway.
-      expect(region).toMatch(/pendingGateway\s*===\s*PaymentGateway\.PAYSTACK|pendingGateway\s*!==\s*PaymentGateway\.ALATPAY|isAlatpayUnresolved\s*=\s*pendingGateway\s*===\s*PaymentGateway\.ALATPAY/);
-      // Also: PaymentGateway.PAYSTACK is referenced somewhere in the stale
-      // section (either for the pendingGateway direct check or for the
-      // activeGateway fallback equality).
-      const staleStart = region.indexOf('Older than 5 minutes');
-      const staleEnd = region.indexOf('Partial amount clamp');
-      const stale = region.slice(Math.max(0, staleStart - 100), staleEnd + 50);
-      // The stale path only branches to the legacy FAILED write if the
-      // ALATPAY unresolved guard (throw 409) does NOT fire. For persisted
-      // gateway === PAYSTACK rows, that guard is FALSE (isAlatpayUnresolved
-      // is FALSE for pendingGateway === PAYSTACK), so the write path is
-      // reached for Paystack rows unchanged.
-      expect(stale).toMatch(/isAlatpayUnresolved\s*=|PaymentGateway\.ALATPAY/);
-      expect(stale).toMatch(/client-reinit-timeout/);
+      const region = src.slice(def, def + 20000);
+      // 1) client-reinit-timeout is NOT written to DB description in initiatePayment stale-age region anymore.
+      expect(region).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
+      // 2) classifyPendingForRetry helper treats all 3 inputs identically (no
+      //    conditional branches for PAYSTACK vs ALATPAY vs gateway NULL).
+      const helper = src.indexOf('function classifyPendingForRetry(');
+      const helperEnd = src.indexOf('}', helper + 300);
+      const helperBody = src.slice(helper, helperEnd + 5);
+      expect(helperBody).not.toMatch(/PaymentGateway\.(ALATPAY|PAYSTACK)/);
+      // 3) After call to classifyPendingForRetry, policy.blockInitiation branch
+      //    throws a 409 before any DB update writing terminal status.
+      const call = region.indexOf('classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid)');
+      expect(call).toBeGreaterThan(0);
+      const blockIf = region.indexOf('if (policy.blockInitiation)', call);
+      expect(blockIf).toBeGreaterThan(call);
+      const beforeEndOfStale = region.indexOf('// 3. Partial amount clamp', blockIf);
+      // The lint-safety dead branch (guard `(policy as any).terminalizeFailed === true`) is
+      // intentionally unreachable. subRegion is everything from blockIf to Partial clamp.
+      const subRegion = region.slice(blockIf, beforeEndOfStale > 0 ? beforeEndOfStale : blockIf + 6000);
+      // No age-based FAILED write OUTSIDE the lint-safety dead-branch guard.
+      //   Any TransactionStatus.FAILED literal after blockIf but BEFORE lintGuard = FAIL.
+      //   Any TransactionStatus.FAILED literal after lintGuard = OK (dead branch).
+      const lintGuardIdx = subRegion.indexOf("(policy as any).terminalizeFailed === true");
+      const firstFailedInSub = subRegion.indexOf("TransactionStatus.FAILED");
+      if (firstFailedInSub !== -1) {
+        expect(lintGuardIdx).toBeGreaterThan(0);
+        expect(firstFailedInSub).toBeGreaterThan(lintGuardIdx);
+      }
+      // No SUCCESS/UNDERPAID/OVERPAID/REVERSED anywhere in subRegion:
+      expect(subRegion).not.toMatch(/TransactionStatus\.(SUCCESS|UNDERPAID|OVERPAID|REVERSED)/);
+      // 4) Gateway=null scenario: no fallback inference from activeGateway.
+      //    pendingGateway used for message label only (gwLabel), never for
+      //    different terminalization outcome:
+      const gwLabel = region.indexOf("pendingGateway === PaymentGateway.ALATPAY");
+      expect(gwLabel).toBeGreaterThan(0);
+      // The fallback line `pendingGateway == null && activeGateway ===` pattern
+      // must NOT exist in new initiatePayment code:
+      const fallbackPattern = region.match(/pendingGateway\s*==\s*null\s*&&\s*activeGateway\s*===\s*PaymentGateway\.ALATPAY/);
+      expect(fallbackPattern).toBeNull();
     });
 
     it('TR-38.2 Callback + webhook + scheduler idempotency structural invariants intact: atomic claim (status=PENDING → status=PROCESSING via updateMany WHERE PENDING) is present at the head of verifyPayment $transaction block, BEFORE any financial posting.', () => {
@@ -2621,7 +2686,7 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(Math.max(ledgerCreate, receiptCreate)).toBeGreaterThan(um);
     });
 
-    it('TR-38.3 Scheduler/webhook reconciliation never substitutes order ref/init ref/session/amount for final UUID. reconcilePendingAlatpayBatch only proceeds to dispatch a provider reconciliation job when finalTxId passes the strict uuidV4 regex AND tx.status is still PENDING. Without finalTxId the iteration skips with skippedNoId++ and continue.', () => {
+    it('TR-38.3 Scheduler/webhook reconciliation never substitutes order ref/init ref/session/amount for final UUID. reconcilePendingAlatpayBatch only proceeds to dispatch a provider reconciliation job when finalTxId passes the single shared strict isAlatpayUuid helper AND tx.status is still PENDING. Without finalTxId the iteration skips with skippedNoId++ and continue.', () => {
       const fs: typeof import('fs') = require('fs');
       const path: typeof import('path') = require('path');
       const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
@@ -2637,8 +2702,9 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(noIdJump).toBeGreaterThan(finalTernary);
       expect(afterJump).toBeGreaterThan(noIdJump);
       expect(dispatchJob).toBeGreaterThan(afterJump);
-      // UUID v4 regex is used to build finalTxId (not any other ref)
-      expect(region).toMatch(/uuidV4\.test\(tx\.alatpayFinalTransactionId\.trim\(\)/);
+      // Single shared helper: isAlatpayUuid() (strict v4 from utils/alatpay) is used
+      // to validate finalTxId (not inline regex duplication).
+      expect(region).toMatch(/isAlatpayUuid\(tx\.alatpayFinalTransactionId\)/);
       // Order ref / init ref / session id are NEVER used directly as a
       // provider correlation key for /transactions/{id} lookup. We only see
       // them logged, not passed to dispatchJob as providerReference.

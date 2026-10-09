@@ -59,6 +59,7 @@ import { FeeService, FeeQuerySchema } from '../services/fee';
 import { PaymentService, InitiatePaymentSchema } from '../services/payment';
 import { Prisma } from '@prisma/client';
 import { generateInvoiceReference } from '../utils/paystack';
+import { isAlatpayUuid } from '../utils/alatpay';
 
 const router = express.Router();
 
@@ -133,7 +134,6 @@ router.get(
 // ----------------------------------------------------------------------------
 const _reverifyCooldown: Map<string, number> = new Map(); // txId -> unlockAtEpochMs (degraded mode when Redis is unreachable)
 const REVERIFY_COOLDOWN_MS = 30 * 1000;
-const uuidV4Re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ReverifyTxParam = z.object({ transactionId: z.coerce.number().int().positive() });
 router.post(
   '/payments/:transactionId/reverify',
@@ -194,7 +194,7 @@ router.post(
     let providerReference: string | null = null;
     let providerMissingReason: string | null = null;
     if (tx.gateway === 'ALATPAY') {
-      if (tx.alatpayFinalTransactionId && uuidV4Re.test(String(tx.alatpayFinalTransactionId).trim())) {
+      if (tx.alatpayFinalTransactionId && isAlatpayUuid(tx.alatpayFinalTransactionId)) {
         providerReference = String(tx.alatpayFinalTransactionId).trim();
       } else {
         providerMissingReason = 'provider_final_uuid_unavailable';
