@@ -256,14 +256,6 @@ export class StudentFeesService {
     const origin = computeInvoiceOrigin(studentId, feeId, directByFee);
     const directAssignment = directByFee.get(feeId) ?? null;
     const activeGateway = await getActiveGatewaySetting();
-    const payPayload = {
-      canPay: balance > 0 && (row as any).status !== 'CANCELLED' && (row as any).status !== 'REFUNDED' && (row as any).status !== 'REVERSED',
-      amountToPay: balance,
-      paymentReference: generatePaymentReference(),
-      dueDate: (row as any).dueDate,
-      activeGateway,
-      gateway_label: gatewayLabel(activeGateway),
-    };
     // Map raw Transaction fields (per schema.prisma model) into the shape
     // the frontend expects (channel / paymentReference / transactionDate).
     const mappedTransactions = ((row as any).transactions ?? []).map((tx: any) => {
@@ -305,6 +297,33 @@ export class StudentFeesService {
         updatedAt: tx.updatedAt,
       };
     });
+    // ---- Find the blocking pending for presentation panels (no DB write) ---
+    // PaymentService.initiatePayment uses classifyPendingForRetry() which
+    // returns {blockInitiation:true} for every pending row (never terminalizes
+    // from age; UNKNOWN != FAILED invariant). Here we expose the candidate
+    // most-recent PENDING row for the UI so it can offer [Check Pending
+    // Payment] BEFORE the user clicks Pay Now (§23/27/28). NO financial logic.
+    const pendingTransactions = mappedTransactions.filter(
+      (tx: any) => String(tx.status ?? '').toUpperCase() === 'PENDING',
+    );
+    const blockingPendingTransaction: any | null = pendingTransactions[0] ?? null;
+    // A payment can be initiated ONLY when: balance > 0, invoice not terminal,
+    // AND there is no unresolved PENDING row on this invoice (matches A5.1
+    // existing guards MAX_UNRESOLVED_PENDING_PER_INVOICE). The UI uses canPay to
+    // choose between [Pay Now] vs [Check Pending Payment] primary button.
+    const payPayload = {
+      canPay:
+        balance > 0 &&
+        (row as any).status !== 'CANCELLED' &&
+        (row as any).status !== 'REFUNDED' &&
+        (row as any).status !== 'REVERSED' &&
+        pendingTransactions.length === 0,
+      amountToPay: balance,
+      paymentReference: generatePaymentReference(),
+      dueDate: (row as any).dueDate,
+      activeGateway,
+      gateway_label: gatewayLabel(activeGateway),
+    };
     return {
       invoice: {
         id: row.id,
@@ -323,6 +342,7 @@ export class StudentFeesService {
         directAssignment,
       },
       transactions: mappedTransactions,
+      blockingPendingTransaction,
       pay: payPayload,
     };
   }

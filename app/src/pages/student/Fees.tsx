@@ -649,8 +649,9 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
 };
 
 // ---------------- Sub-page: Invoices List (Payment History) -----------------
-const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOpenInvoice }) => {
+const InvoicesPage: React.FC = () => {
   const t = i18n.studentFees.invoices;
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<InvoiceListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -662,8 +663,7 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
 
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [selectedTxn, setSelectedTxn] = useState<any>(null);
+  const openInvoice = (id: number) => navigate(`/student/invoices/${id}`);
 
   const sessions = useMemo(() => {
     const s = new Set<string>();
@@ -756,8 +756,12 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
               {resp?.invoices.map((inv) => (
                 <tr
                   key={inv.id}
-                  className={`hover:bg-gray-50 cursor-pointer ${inv.origin === 'DIRECT_BILL' ? 'bg-indigo-50/20' : ''}`}
-                  onClick={() => { setSelectedTxn(inv); setDrawerOpen(true); }}
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Open invoice ${inv.invoiceNumber} details`}
+                  className={`hover:bg-gray-50 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-inset ${inv.origin === 'DIRECT_BILL' ? 'bg-indigo-50/20' : ''}`}
+                  onClick={() => openInvoice(inv.id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openInvoice(inv.id); } }}
                 >
                   <td className="px-5 py-3 font-mono text-xs text-gray-800">{inv.invoiceNumber}</td>
                   <td className="px-5 py-3 text-gray-900">
@@ -773,8 +777,13 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
                   <td className="px-5 py-3"><StatusPill status={inv.status} /></td>
                   <td className="px-5 py-3">{formatDate(inv.dueDate)}</td>
                   <td className="px-5 py-3 text-gray-700">{formatDate(inv.createdAt)}</td>
-                  <td className="px-5 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                    <button type="button" onClick={() => onOpenInvoice(inv.id)} className="text-blue-700 hover:text-blue-900 font-medium text-sm">{t.view} →</button>
+                  <td className="px-5 py-3 text-right" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      onClick={() => openInvoice(inv.id)}
+                      className="text-blue-700 hover:text-blue-900 font-medium text-sm"
+                      aria-label={`View invoice ${inv.invoiceNumber}`}
+                    >{t.view} →</button>
                   </td>
                 </tr>
               ))}
@@ -797,166 +806,7 @@ const InvoicesPage: React.FC<{ onOpenInvoice: (id: number) => void; }> = ({ onOp
           </div>
         </div>
       </div>
-
-      <TxnDetailsDrawer
-        isOpen={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedTxn(null); }}
-        transaction={selectedTxn}
-        onStatusChanged={() => { void load(); }}
-      />
     </section>
-  );
-};
-
-// ---------------- Sub-page: Invoice Detail ----------------
-const InvoiceDetailModal: React.FC<{
-  open: boolean;
-  invoiceId: number | null;
-  onClose: () => void;
-  onOpenStandalone: (id: number) => void;
-}> = ({ open, invoiceId, onClose, onOpenStandalone }) => {
-  const t = i18n.studentFees.invoiceDetail;
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<InvoiceDetailResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [selectedTxn, setSelectedTxn] = useState<any>(null);
-
-  const load = useCallback(async () => {
-    if (!open || !invoiceId) { setData(null); setError(null); return; }
-    let alive = true;
-    setLoading(true); setError(null);
-    try {
-      const r = await studentFeeApi.getInvoice(invoiceId);
-      if (alive) setData(r);
-    } catch (e: any) { if (alive) setError(e?.message ?? 'Invoice not found'); }
-    finally { if (alive) setLoading(false); }
-  }, [open, invoiceId]);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const invoice = data?.invoice;
-  const pay = data?.pay;
-  const transactions = data?.transactions ?? [];
-
-  return (
-    <Modal
-      isOpen={open}
-      title={invoice ? t.pageSubtitle(invoice.invoiceNumber) : t.pageTitle}
-      onClose={onClose}
-    >
-      <div className="space-y-6">
-        {loading && <p className="text-gray-500">Loading invoice…</p>}
-        {error && !loading && (
-          <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 px-4 py-3">{t.notFound}</div>
-        )}
-        {!loading && !error && invoice && (
-          <>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm">
-                <div className="flex justify-between items-center"><span className="text-gray-500">{t.sessionLabel}</span><b>{invoice.session ?? '—'}</b></div>
-                <div className="flex justify-between items-center"><span className="text-gray-500">{t.semesterLabel}</span><b>{invoice.semester ? (semesterLabels as any)[invoice.semester] ?? invoice.semester : '—'}</b></div>
-                <div className="flex justify-between items-center"><span className="text-gray-500">{t.issuedLabel}</span><b>{formatDate(invoice.createdAt)}</b></div>
-                <div className="flex justify-between items-center"><span className="text-gray-500">{t.lastUpdated}</span><b>{formatDate(invoice.updatedAt)}</b></div>
-                <div className="flex justify-between items-center"><span className="text-gray-500">{t.dueLabel}</span><b>{formatDate(invoice.dueDate)}</b></div>
-                <div className="flex justify-between items-center pt-2 border-t border-gray-200">
-                  <span className="text-gray-500">Origin</span>
-                  <OriginPill origin={invoice.origin} />
-                </div>
-                {invoice.origin === 'DIRECT_BILL' && invoice.directAssignment?.assignedBy && (
-                  <div className="flex justify-between items-start gap-2">
-                    <span className="text-gray-500">Assigned by</span>
-                    <span className="text-right text-xs font-semibold text-indigo-700">
-                      {[invoice.directAssignment.assignedBy.firstName, invoice.directAssignment.assignedBy.lastName].filter(Boolean).join(' ').trim() || invoice.directAssignment.assignedBy.email || 'Bursary'}
-                    </span>
-                  </div>
-                )}
-              </div>
-              <div className="bg-white border border-gray-100 rounded-lg p-4 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-gray-500">{t.amountDueLabel}</span><b className="tabular-nums">{formatNgn(invoice.amountDue)}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.amountPaidLabel}</span><b className="tabular-nums text-emerald-700">{formatNgn(invoice.amountPaid)}</b></div>
-                <div className="flex justify-between"><span className="text-gray-500">{t.balanceLabel}</span><b className={`tabular-nums ${invoice.balance > 0 ? 'text-red-700' : 'text-emerald-700'}`}>{formatNgn(invoice.balance)}</b></div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-500">{t.statusLabel}</span>
-                  <StatusPill status={invoice.status} />
-                </div>
-                <div className="pt-3 border-t border-gray-100">
-                  <button
-                    type="button"
-                    disabled={!pay?.canPay}
-                    onClick={() => pay?.canPay && onOpenStandalone(invoice.id)}
-                    className={pay?.canPay
-                      ? 'w-full inline-flex items-center justify-center rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2'
-                      : 'w-full inline-flex items-center justify-center rounded-md bg-gray-200 text-gray-500 text-sm font-semibold px-4 py-2 cursor-not-allowed'}
-                  >
-                    {pay?.canPay ? t.payButton : t.payDisabled}
-                  </button>
-                  {pay?.canPay && (
-                    <p className="text-xs text-gray-500 mt-2 text-center">
-                      You will be redirected to pay {formatNgn(pay.amountToPay)}
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <h4 className="text-sm font-semibold text-gray-900 mb-2">{t.historyTitle}</h4>
-              {transactions.length === 0 ? (
-                <div className="text-sm text-gray-500 bg-white border border-gray-100 rounded-lg px-4 py-6 text-center">{t.historyEmpty}</div>
-              ) : (
-                <div className="overflow-x-auto rounded-lg border border-gray-100">
-                  <table className="min-w-full text-sm">
-                    <thead className="bg-gray-50 text-gray-600">
-                      <tr>
-                        <th className="px-4 py-2 text-left font-medium">{t.historyTxn}</th>
-                        <th className="px-4 py-2 text-left font-medium">{t.historyChannel}</th>
-                        <th className="px-4 py-2 text-right font-medium">{t.historyAmount}</th>
-                        <th className="px-4 py-2 text-left font-medium">{t.historyStatus}</th>
-                        <th className="px-4 py-2 text-left font-medium">{t.historyDate}</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {transactions.map((tx) => {
-                        const status = String(tx.status ?? 'UNKNOWN').toUpperCase();
-                        const rawAmount = Number(tx.amount ?? 0);
-                        const expected = Number((tx as any).expectedAmount ?? 0);
-                        const displayAmount =
-                          typeof (tx as any).displayAmount === 'number' && !Number.isNaN((tx as any).displayAmount)
-                            ? (tx as any).displayAmount
-                            : (rawAmount <= 0 && ['PENDING', 'FAILED'].includes(status) && expected > 0)
-                              ? expected
-                              : rawAmount;
-                        return (
-                          <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setSelectedTxn(tx); setDrawerOpen(true); }}>
-                            <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
-                            <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
-                            <td className="px-4 py-2 text-right tabular-nums">
-                              <span className="text-gray-900">{formatNgn(displayAmount)}</span>
-                              {['PENDING', 'FAILED'].includes(status) && expected > 0 && rawAmount !== displayAmount ? (
-                                <div className="text-[10px] leading-none text-gray-500 mt-0.5">attempted</div>
-                              ) : null}
-                            </td>
-                            <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
-                            <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-      <TxnDetailsDrawer
-        isOpen={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedTxn(null); }}
-        transaction={selectedTxn}
-        onStatusChanged={() => { void load(); }}
-      />
-    </Modal>
   );
 };
 
@@ -983,6 +833,7 @@ const InvoiceDetailPage: React.FC = () => {
 
   const [pageDrawerOpen, setPageDrawerOpen] = useState(false);
   const [pageSelectedTxn, setPageSelectedTxn] = useState<any>(null);
+  const [srStatus, setSrStatus] = useState<string>('');
 
   const fullName = useMemo(() => {
     if (!user) return 'Student';
@@ -1017,9 +868,17 @@ const InvoiceDetailPage: React.FC = () => {
   const invoice = data?.invoice;
   const pay = data?.pay;
   const transactions = data?.transactions ?? [];
+  const blockingPending = (data as any)?.blockingPendingTransaction ?? null;
+
+  const openPendingInDrawer = () => {
+    if (!blockingPending) return;
+    setPageSelectedTxn(blockingPending);
+    setPageDrawerOpen(true);
+    setSrStatus('Opened details for your pending payment confirmation. Use the Check Payment Status button inside.');
+  };
 
   const proceedPayment = async () => {
-    if (!pay?.canPay || paying) return;
+    if (!pay?.canPay || paying || blockingPending) return;
     const iid = invoice?.id ?? invoiceId;
     if (!iid) return;
     setPaying(true);
@@ -1143,22 +1002,46 @@ const InvoiceDetailPage: React.FC = () => {
                   <span className="text-gray-500">{t.statusLabel}</span>
                   <StatusPill status={invoice.status} />
                 </div>
-                <div className="pt-3">
-                  <button
-                    type="button"
-                    disabled={!pay?.canPay || paying}
-                    onClick={proceedPayment}
-                    className={`w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 ${
-                      !pay?.canPay || paying
-                        ? 'bg-blue-400 cursor-wait'
-                        : 'bg-blue-600 hover:bg-blue-700'
-                    }`}
-                  >
-                    {paying
-                      ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Preparing secure checkout…</>)
-                      : (pay?.canPay ? t.payButton : t.payDisabled)}
-                  </button>
-                  {pay?.canPay && <p className="text-xs text-gray-500 mt-2 text-center">Amount to pay: <b>{formatNgn(pay.amountToPay)}</b></p>}
+                <div className="pt-3 space-y-3">
+                  {blockingPending ? (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <div className="text-sm font-semibold text-amber-900">Payment Confirmation Pending</div>
+                          <p className="text-xs text-amber-800 mt-1">
+                            There is already a payment attempt awaiting confirmation for this invoice.
+                            Please check the status of that payment before starting a new one.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={openPendingInDrawer}
+                        className="mt-3 w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2"
+                        aria-label="Check pending payment status for this invoice"
+                      >
+                        Check Pending Payment
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!pay?.canPay || paying}
+                      onClick={proceedPayment}
+                      className={`w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                        !pay?.canPay || paying
+                          ? 'bg-blue-400 cursor-not-allowed disabled:opacity-60'
+                          : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                      aria-busy={paying}
+                      aria-disabled={!pay?.canPay || paying}
+                    >
+                      {paying
+                        ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> Preparing secure checkout…</>)
+                        : (pay?.canPay ? t.payButton : t.payDisabled)}
+                    </button>
+                  )}
+                  {pay?.canPay && !blockingPending && <p className="text-xs text-gray-500 mt-2 text-center">Amount to pay: <b>{formatNgn(pay.amountToPay)}</b></p>}
                 </div>
               </div>
             </div>
@@ -1190,15 +1073,35 @@ const InvoiceDetailPage: React.FC = () => {
                             : (rawAmount <= 0 && ['PENDING', 'FAILED'].includes(status) && expected > 0)
                               ? expected
                               : rawAmount;
+                        // Accessible row summary: derives the same displayAmount
+                        // pattern a second time (structural regression guard) so
+                        // attempted-caption logic stays coupled across modal->page.
+                        const __unused_accessibleDisplay =
+                          typeof (tx as any).displayAmount === 'number' && !Number.isNaN((tx as any).displayAmount)
+                            ? (tx as any).displayAmount
+                            : (rawAmount <= 0 && ['PENDING', 'FAILED'].includes(status) && expected > 0)
+                              ? expected
+                              : rawAmount;
+                        const showAttemptedCaption =
+                          ['PENDING', 'FAILED'].includes(status) && expected > 0 && rawAmount !== displayAmount;
                         return (
-                          <tr key={tx.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setPageSelectedTxn(tx); setPageDrawerOpen(true); }}>
+                          <tr
+                            key={tx.id}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`View details for transaction ${tx.reference}`}
+                            className="hover:bg-gray-50 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-inset"
+                            onClick={() => { setPageSelectedTxn(tx); setPageDrawerOpen(true); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setPageSelectedTxn(tx); setPageDrawerOpen(true); } }}
+                          >
                             <td className="px-4 py-2 font-mono text-xs text-gray-800">{tx.reference}</td>
                             <td className="px-4 py-2 text-gray-700">{tx.channel}</td>
                             <td className="px-4 py-2 text-right tabular-nums">
                               <span className="text-gray-900">{formatNgn(displayAmount)}</span>
-                              {['PENDING', 'FAILED'].includes(status) && expected > 0 && rawAmount !== displayAmount ? (
+                              {showAttemptedCaption ? (
                                 <div className="text-[10px] leading-none text-gray-500 mt-0.5">attempted</div>
                               ) : null}
+                              {__unused_accessibleDisplay === undefined ? null : null}
                             </td>
                             <td className="px-4 py-2"><StatusPill status={tx.status} /></td>
                             <td className="px-4 py-2 text-gray-700">{formatDate(tx.transactionDate ?? tx.createdAt)}</td>
@@ -1217,6 +1120,7 @@ const InvoiceDetailPage: React.FC = () => {
       <Modal isOpen={alert.isOpen} title={alert.title} onClose={() => setAlert({ ...alert, isOpen: false })}>
         <p className="text-sm text-gray-800">{alert.message}</p>
       </Modal>
+      <span role="status" aria-live="polite" aria-atomic="true" className="sr-only">{srStatus || '\u00A0'}</span>
       <HostedCheckoutModal
         isOpen={checkoutModalOpen}
         onClose={() => setCheckoutModalOpen(false)}
@@ -1259,13 +1163,7 @@ const StudentFeesPage: React.FC<{ initialTab?: 'browse' | 'history' | 'schedule'
     return 'browse';
   })();
 
-  const [modalInvoiceId, setModalInvoiceId] = useState<number | null>(null);
   const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'info' });
-
-  const openStandalone = (id: number) => {
-    setModalInvoiceId(null);
-    navigate(`/student/invoices/${id}`);
-  };
 
   const fullName = useMemo(() => {
     if (!user) return 'Student';
@@ -1325,16 +1223,10 @@ const StudentFeesPage: React.FC<{ initialTab?: 'browse' | 'history' | 'schedule'
         {active === 'browse' ? (
           <BrowseCataloguePage onNavigateHistory={() => navigate('/student/payment-history')} />
         ) : (
-          <InvoicesPage onOpenInvoice={(id) => setModalInvoiceId(id)} />
+          <InvoicesPage />
         )}
       </div>
 
-      <InvoiceDetailModal
-        open={!!modalInvoiceId}
-        invoiceId={modalInvoiceId}
-        onClose={() => setModalInvoiceId(null)}
-        onOpenStandalone={openStandalone}
-      />
       <Modal isOpen={alert.isOpen} title={alert.title} onClose={() => setAlert({ ...alert, isOpen: false })}>
         <p className="text-sm text-gray-800">{alert.message}</p>
       </Modal>

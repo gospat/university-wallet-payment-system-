@@ -77,18 +77,45 @@ export type InvoiceDetailResponse = {
   transactions: Array<{
     id: number;
     reference: string;
+    gateway?: string | null;
     channel: string;
     amount: number | string;
+    expectedAmount?: number | string;
+    displayAmount?: number | string;
     status: string;
     paymentReference: string | null;
+    paystackReference?: string | null;
+    alatpayReference?: string | null;
+    alatpayFinalTransactionId?: string | null;
     transactionDate: string | null;
+    type?: string | null;
+    description?: string | null;
     createdAt: string;
+    updatedAt?: string;
   }>;
+  blockingPendingTransaction?: {
+    id: number;
+    reference: string;
+    gateway?: string | null;
+    channel?: string | null;
+    amount?: number | string;
+    expectedAmount?: number | string;
+    displayAmount?: number | string;
+    status: string;
+    paystackReference?: string | null;
+    alatpayReference?: string | null;
+    alatpayFinalTransactionId?: string | null;
+    transactionDate?: string | null;
+    createdAt: string;
+    updatedAt?: string;
+  } | null;
   pay?: {
     canPay: boolean;
     amountToPay: number;
     paymentReference: string;
     dueDate: string | null;
+    activeGateway?: string | null;
+    gateway_label?: string | null;
   } | null;
 };
 

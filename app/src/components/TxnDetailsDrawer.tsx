@@ -183,22 +183,22 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
         });
         onStatusChanged?.();
       } else if (uiState === 'failed') {
-        setReverifyUi({ kind: 'failed', message: 'Payment confirmed as failed by the provider.' });
+        setReverifyUi({ kind: 'failed', message: 'The payment provider has confirmed this attempt was not completed. You may safely initiate a new payment.' });
         onStatusChanged?.();
       } else if (uiState === 'pending') {
-        setReverifyUi({ kind: 'pending', message: 'Payment is still pending. Please check again later.' });
+        setReverifyUi({ kind: 'pending', message: 'Confirmation is still in progress. Please check again in a few minutes.' });
       } else if (uiState === 'unavailable') {
         setReverifyUi({
           kind: 'unavailable',
           reason: r?.providerResult?.reason ?? r?.reason ?? 'provider_unavailable',
-          message: r?.message ?? 'Unable to confirm payment at this time.',
+          message: r?.message ?? 'We cannot confirm the status right now. Please try again later.',
           supportContact: !!r?.supportContact,
         });
       } else {
         setReverifyUi({
           kind: 'unavailable',
           reason: 'unknown_ui_state',
-          message: 'Could not determine payment status. Please try again.',
+          message: 'Could not determine payment status right now. Please try again.',
         });
       }
     } catch (e: any) {
@@ -208,26 +208,26 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
         setReverifyUi({
           kind: 'cooldown',
           cooldownMs: Number(data?.cooldownMs || 30000),
-          message: data?.message ?? 'Please wait a moment before checking again.',
+          message: data?.message ?? 'To avoid duplicate checks, please wait a moment before checking again.',
         });
       } else if (statusCode === 409) {
         setReverifyUi({
           kind: 'conflict',
-          reason: data?.reason ?? 'correlation_missing',
-          message: data?.message ?? 'Unable to confirm payment automatically.',
+          reason: data?.reason ?? 'provider_uuid_unavailable',
+          message: data?.message ?? 'Confirmation is still being processed for this payment.',
         });
       } else if (statusCode === 403 || statusCode === 401 || statusCode === 404) {
         setReverifyUi({
           kind: 'unavailable',
           reason: statusCode === 404 ? 'not_found' : 'unauthorized',
-          message: data?.message ?? 'Transaction not available for verification.',
+          message: data?.message ?? 'Transaction not available for verification right now.',
           supportContact: true,
         });
       } else {
         setReverifyUi({
           kind: 'unavailable',
           reason: 'network_error',
-          message: e?.message ?? 'Network error while verifying payment. Please try again.',
+          message: e?.message ?? 'Temporary network issue while checking status. Please try again.',
         });
       }
     }
@@ -329,7 +329,7 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
                     case 'cooldown':
                       return 'rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2';
                     case 'conflict':
-                      return 'rounded-lg border border-purple-200 bg-purple-50 p-3 space-y-2';
+                      return 'rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2';
                     case 'unavailable':
                     default:
                       return 'rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2';
@@ -340,11 +340,11 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
                       <div className="flex items-start gap-2">
                         <CheckCircle2 className="h-4.5 w-4.5 mt-0.5 text-emerald-600 shrink-0" />
                         <div className="text-sm text-emerald-900 font-medium">
-                          Payment Successful
+                          Payment Confirmed
                         </div>
                       </div>
                       <p className="text-xs text-emerald-800 pl-6.5 ml-6">
-                        {reverifyUi.message || 'Your payment has been confirmed and receipt generated.'}
+                        {reverifyUi.message || 'Your payment has been confirmed and a receipt has been generated.'}
                       </p>
                       {reverifyUi.receipt && (
                         <div className="ml-6 text-xs">
@@ -367,10 +367,13 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
                     <>
                       <div className="flex items-start gap-2">
                         <Clock className="h-4.5 w-4.5 mt-0.5 text-sky-600 shrink-0" />
-                        <div className="text-sm text-sky-900 font-medium">Payment Still Pending</div>
+                        <div className="text-sm text-sky-900 font-medium">Still Awaiting Confirmation</div>
                       </div>
                       <p className="text-xs text-sky-800 ml-6">
-                        {reverifyUi.message || 'The provider has not yet finalised this payment. You may check again later.'}
+                        {reverifyUi.message || 'The provider has not yet finalised this payment. Please check again later.'}
+                      </p>
+                      <p className="text-xs text-sky-700/90 ml-6">
+                        Do not make another payment yet. If debited, this payment can still be reconciled.
                       </p>
                     </>
                   )}
@@ -378,38 +381,35 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
                     <>
                       <div className="flex items-start gap-2">
                         <XCircle className="h-4.5 w-4.5 mt-0.5 text-red-600 shrink-0" />
-                        <div className="text-sm text-red-900 font-medium">Payment Failed</div>
+                        <div className="text-sm text-red-900 font-medium">Payment Not Completed</div>
                       </div>
                       <p className="text-xs text-red-800 ml-6">
-                        {reverifyUi.message || 'This payment attempt was declined. Please initiate a new payment if needed.'}
+                        {reverifyUi.message || 'This payment attempt was declined. You may initiate a new payment.'}
                       </p>
                     </>
                   )}
                   {reverifyUi.kind === 'cooldown' && (
                     <>
                       <div className="flex items-start gap-2">
-                        <Clock className="h-4.5 w-4.5 mt-0.5 text-amber-600 shrink-0 animate-pulse" />
-                        <div className="text-sm text-amber-900 font-medium">Too Many Attempts</div>
+                        <Clock className="h-4.5 w-4.5 mt-0.5 text-amber-600 shrink-0" />
+                        <div className="text-sm text-amber-900 font-medium">Please Wait Before Checking Again</div>
                       </div>
                       <p className="text-xs text-amber-800 ml-6">
-                        {reverifyUi.message || 'Please wait before checking again.'}
-                        <span className="inline-block ml-1 font-mono font-bold">
-                          ({cooldownSecondsLeft}s)
-                        </span>
+                        {reverifyUi.message || `Please wait ${cooldownSecondsLeft} seconds before checking again.`}
                       </p>
                     </>
                   )}
                   {reverifyUi.kind === 'conflict' && (
                     <>
                       <div className="flex items-start gap-2">
-                        <HelpCircle className="h-4.5 w-4.5 mt-0.5 text-purple-600 shrink-0" />
-                        <div className="text-sm text-purple-900 font-medium">Unable to Confirm Automatically</div>
+                        <HelpCircle className="h-4.5 w-4.5 mt-0.5 text-amber-700 shrink-0" />
+                        <div className="text-sm text-amber-900 font-medium">Confirmation Still Pending</div>
                       </div>
-                      <p className="text-xs text-purple-800 ml-6">
-                        {reverifyUi.message || 'The provider reference for this payment was not captured.'}
+                      <p className="text-xs text-amber-800 ml-6">
+                        {reverifyUi.message || 'We have not yet received enough information from the payment provider to confirm the result automatically.'}
                       </p>
-                      <p className="text-xs text-purple-800/90 ml-6">
-                        Please contact <b>Bursary</b> with your payment reference for manual verification.
+                      <p className="text-xs text-amber-700/90 ml-6">
+                        Do not make another payment. If you were debited, please contact <b>Bursary</b> with your reference for reconciliation.
                       </p>
                     </>
                   )}
@@ -418,15 +418,15 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
                       <div className="flex items-start gap-2">
                         <AlertTriangle className="h-4.5 w-4.5 mt-0.5 text-slate-600 shrink-0" />
                         <div className="text-sm text-slate-900 font-medium">
-                          {reverifyUi.reason === 'receipt_download_failed' ? 'Receipt Download Failed' : 'Unable to Confirm Payment'}
+                          {reverifyUi.reason === 'receipt_download_failed' ? 'Receipt Download Failed' : 'Unable to Confirm Right Now'}
                         </div>
                       </div>
                       <p className="text-xs text-slate-800 ml-6">
-                        {reverifyUi.message || 'The verification service is currently unavailable. Please try again later.'}
+                        {reverifyUi.message || 'The verification service is temporarily unavailable. Please try again later.'}
                       </p>
                       {reverifyUi.supportContact && (
                         <p className="text-xs text-slate-700 ml-6">
-                          If the issue persists, please contact <b>Bursary</b> with your reference.
+                          If the issue persists, contact <b>Bursary</b> with your payment reference.
                         </p>
                       )}
                     </>
@@ -438,18 +438,20 @@ const TxnDetailsDrawer: React.FC<TxnDetailsDrawerProps> = ({ isOpen, onClose, tr
                 type="button"
                 onClick={handleReverify}
                 disabled={reverifyUi.kind === 'loading' || reverifyUi.kind === 'cooldown'}
+                aria-disabled={reverifyUi.kind === 'loading' || reverifyUi.kind === 'cooldown'}
+                aria-busy={reverifyUi.kind === 'loading'}
                 className={
-                  'w-full inline-flex items-center justify-center gap-2 font-semibold px-4 py-2.5 rounded-lg shadow-sm transition-colors ' +
+                  'w-full inline-flex items-center justify-center gap-2 font-semibold px-4 py-2.5 rounded-lg shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[#0a3d91] focus:ring-offset-2 ' +
                   (reverifyUi.kind === 'loading' || reverifyUi.kind === 'cooldown'
                     ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
                     : 'bg-white hover:bg-slate-50 text-[#0a3d91] border border-[#0a3d91]/30')
                 }
               >
-                <RefreshCw className={'h-4 w-4 ' + (reverifyUi.kind === 'loading' ? 'animate-spin' : '')} />
+                <RefreshCw className={'h-4 w-4 ' + (reverifyUi.kind === 'loading' ? 'animate-spin' : '')} aria-hidden="true" />
                 {reverifyUi.kind === 'loading'
                   ? 'Checking Payment Status…'
                   : reverifyUi.kind === 'cooldown'
-                  ? `Wait ${cooldownSecondsLeft}s…`
+                  ? `Check Again in ${cooldownSecondsLeft}s`
                   : 'Check Payment Status'}
               </button>
             </div>
