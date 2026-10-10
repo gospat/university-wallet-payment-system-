@@ -110,24 +110,22 @@ type ProviderVerifyClassification =
 
 function classifyProviderVerify(verifyResult: VerifyResult): ProviderVerifyClassification {
   const ps = String(verifyResult.providerStatus ?? '').toLowerCase().trim();
-  const terminalNegativePatterns = [
+  // Authoritative terminal failure statuses ONLY — exact match.
+  // Substring matching is forbidden: a provider response containing
+  // 'timeout', 'error', 'invalid' or 'unpaid' must NOT authorize cancellation.
+  const terminalNegativeExact = new Set([
     'declined', 'failed', 'expired', 'abandoned', 'rejected',
-    'cancelled', 'canceled', 'voided', 'not_paid', 'unpaid',
-    'error', 'invalid', 'timeout', 'expire',
-  ];
-  for (const tok of terminalNegativePatterns) {
-    if (ps.includes(tok)) {
-      return { kind: 'AUTH_FAILURE_TERMINAL' };
-    }
+    'cancelled', 'canceled', 'voided', 'not_paid',
+  ]);
+  if (terminalNegativeExact.has(ps)) {
+    return { kind: 'AUTH_FAILURE_TERMINAL' };
   }
   if (verifyResult.status === TransactionStatus.FAILED) {
     return { kind: 'AUTH_FAILURE_TERMINAL' };
   }
-  const pendingPatterns = ['pending', 'processing', 'received', 'queued', 'initiated', 'ongoing'];
-  for (const tok of pendingPatterns) {
-    if (ps.includes(tok)) {
-      return { kind: 'PENDING' };
-    }
+  const pendingExact = new Set(['pending', 'processing', 'received', 'queued', 'initiated', 'ongoing']);
+  if (pendingExact.has(ps)) {
+    return { kind: 'PENDING' };
   }
   if (verifyResult.status === TransactionStatus.PENDING || verifyResult.status === TransactionStatus.PROCESSING) {
     return { kind: 'PENDING' };

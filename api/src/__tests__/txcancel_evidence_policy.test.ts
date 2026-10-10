@@ -714,4 +714,88 @@ describe('TR4 Transaction Cancellation Evidence Policy (FR-4)', () => {
       expect(cancelUpdates.length).toBe(0);
     });
   });
+
+  // Defect #3: provider response SUBSTRING containing timeout/error/invalid/unpaid
+  // must NOT automatically establish terminal failure. Only EXACT authoritative
+  // terminal-failure statuses are allowed.
+  describe('TR4_7 unsafe substring terminal-failure detector must NOT authorize cancellation', () => {
+    const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+    const VALID_UUID_V4 = 'ca3b8e52-4c8d-4e1e-9f1e-2e9d5d6f7ab1';
+
+    for (const dangerousSubstring of [
+      'timeout_reached_but_not_confirmed_failed',
+      'gateway_internal_error_but_pending_processing',
+      'invalid_csrf_token_please_retry',
+      'unpaid_invoice_placeholder_but_tx_in_progress',
+      'ERROR_TIMEOUT_INVALID_UNPAID',  // all four tokens present but NOT terminal
+      'status=processing_error_retriable',
+    ]) {
+      it(`TR4_7 providerStatus="${dangerousSubstring}" → still 412 no cancel (substrings must NOT auto-terminalize)`, async () => {
+        const m = setupBase(PaymentGateway.ALATPAY);
+        const pendingTx: any = {
+          id: 9990,
+          reference: 'PAY-SUBSTR-9990',
+          status: TransactionStatus.PENDING,
+          gateway: PaymentGateway.ALATPAY,
+          userId: MOCK_STUDENT.id,
+          invoiceId: MOCK_INVOICE.id,
+          expectedAmount: new DECIMAL(25000),
+          amount: new DECIMAL(0),
+          createdAt: new Date(),
+          paystackReference: null,
+          alatpayFinalTransactionId: VALID_UUID_V4,
+          metadata: {},
+          invoice: { ...MOCK_INVOICE },
+        };
+        (prisma.transaction.findUnique as jest.Mock).mockReset();
+        (prisma.transaction.findUnique as jest.Mock).mockResolvedValue(pendingTx);
+        (prisma.transaction.updateMany as jest.Mock).mockReset();
+        (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+        if ((prisma as any).webhookEvent) {
+          (prisma.webhookEvent.findMany as jest.Mock).mockReset();
+          (prisma.webhookEvent.findMany as jest.Mock).mockResolvedValue([]);
+        }
+
+        m.providerVerify.mockReset();
+        m.providerVerify.mockResolvedValueOnce({
+          providerStatus: dangerousSubstring,
+          providerReference: 'alatsub9990',
+          paidAmountMinor: 0,
+          paidAmountNaira: 0,
+          status: TransactionStatus.PENDING,
+          raw: {},
+        });
+
+        let threw: any = null;
+        try {
+          await TransactionCancellationService.cancelTransaction({
+            transactionId: pendingTx.id,
+            actorId: 5001,
+            actorRole: Role.ADMIN,
+            actorPermissions: [Permissions.VOID_TRANSACTIONS],
+            reason: 'STUDENT_ABANDONED',
+            writtenExplanation: `Provider status returned "${dangerousSubstring}" — administrator believes this confirms terminal failure.`,
+            evidenceReference: dangerousSubstring.toUpperCase().slice(0, 24),
+          });
+        } catch (e) {
+          threw = e;
+        }
+
+        expect(threw).toBeInstanceOf(AppError);
+        const statusCode =
+          (threw as any).statusCode ??
+          (threw as any).httpCode ??
+          (threw as any).code ??
+          (threw as AppError).status;
+        expect(statusCode).toBe(412);
+        const cancelUpdates = (prisma.transaction.updateMany as jest.Mock).mock.calls.filter(
+          (c) => {
+            const data = (c?.[1]?.data ?? c?.[0]?.data) as any;
+            return data?.status === TransactionStatus.CANCELLED;
+          },
+        );
+        expect(cancelUpdates.length).toBe(0);
+      });
+    }
+  });
 });

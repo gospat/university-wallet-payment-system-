@@ -47,7 +47,6 @@ const CheckoutPage: React.FC = () => {
   const [pendingTx, setPendingTx] = useState<any>(null);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [continuing, setContinuing] = useState(false);
-  const [continueOption, setContinueOption] = useState<any>(null);
   const [showUnresolved, setShowUnresolved] = useState(false);
   const [lastInitiatedResult, setLastInitiatedResult] = useState<any>(null);
 
@@ -67,6 +66,24 @@ const CheckoutPage: React.FC = () => {
         const paid = Number(inv?.amountPaid ?? 0);
         const out = due - paid;
         setAmountToPay(String(out > 0 ? out : 0));
+
+        // Restore unresolved payment panel from the backend invoice detail
+        // (do NOT rely exclusively on React state from the original checkout
+        // session, which is lost on tab refresh / re-navigation).
+        const blockingPending =
+          (r as any)?.blockingPendingTransaction ??
+          (r?.data as any)?.blockingPendingTransaction ??
+          null;
+        if (blockingPending && String(blockingPending.status ?? '').toUpperCase() === 'PENDING') {
+          setPendingTx({
+            reference: blockingPending.reference,
+            transactionId: blockingPending.id,
+            gateway: blockingPending.gateway ?? null,
+            expectedAmount: blockingPending.expectedAmount ?? null,
+          });
+          if (blockingPending.gateway) setGatewayLabel(String(blockingPending.gateway));
+          setShowUnresolved(true);
+        }
       } catch (_err: any) {
         const m = _err?.response?.data?.message || 'Unable to load invoice';
         setError(typeof m === 'string' ? m : 'Unable to load invoice');
@@ -232,10 +249,8 @@ const CheckoutPage: React.FC = () => {
     }
     setContinuing(true);
     setMsg(null);
-    setContinueOption(null);
     try {
       const option: any = await studentFeeApi.getContinueOption(txId);
-      setContinueOption(option);
       if (!option?.canResume) {
         const reason = option?.reason || 'Unable to continue this payment session.';
         setMsg(reason);
@@ -245,6 +260,18 @@ const CheckoutPage: React.FC = () => {
       }
       const payload = option.payload || {};
       if (option.resumeMode === 'alatpay_native') {
+        // ALATPay SDK setup re-launch does NOT safely reuse the same provider
+        // attempt unless the backend explicitly confirms
+        // sdkSetupIsSameAttempt === true. Otherwise, clearly explain that safe
+        // continuation is unavailable and direct to Check Status / Support.
+        if (payload?.sdkSetupIsSameAttempt !== true) {
+          const cannotResume =
+            'Safe continuation of this ALATPay payment is not available because the original provider session cannot be verified to be the same attempt. Please use Check Payment Status or contact Support.';
+          setMsg(cannotResume);
+          alert(cannotResume);
+          setContinuing(false);
+          return;
+        }
         const alatpayCheckout = lastInitiatedResult?.alatpay_public_checkout ?? null;
         if (!alatpayCheckout) {
           const cannotResume = 'Original ALATPay checkout session data is no longer available in this browser tab. Please use Check Payment Status or start a new payment.';

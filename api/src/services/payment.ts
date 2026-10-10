@@ -51,7 +51,7 @@ const JSON_DB_NULL = Prisma.JsonNull;
 // would otherwise both pass the pending-count guard before any row persists.
 let INITIATE_LOCK_TTL_SEC: number = Number(process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE) || (process.env.NODE_ENV === 'test' ? 0 : 3);
 export function _testOverrideInitiateLockTtl(sec: number): void { INITIATE_LOCK_TTL_SEC = Math.max(0, sec); }
-const AUTH_SUCCESS_SET = new Set(['success', 'completed', 'paid']);
+const AUTH_SUCCESS_SET = new Set(['success', 'successful', 'completed', 'paid']);
 const AUTH_TERMINAL_FAILURE_SET = new Set(['failed', 'declined', 'rejected', 'expired', 'abandoned']);
 const NON_TERMINAL_SET = new Set(['pending', 'processing', 'initiated', 'queued', 'unknown', '', 'unrecognized', 'ambiguous']);
 
@@ -1238,10 +1238,12 @@ export class PaymentService {
     let alatpayNormalization: AlatpayNormalization | null = null;
     if (
       txGateway === PaymentGateway.ALATPAY &&
+      verifyResult != null &&
+      typeof verifyResult === 'object' &&
       Number.isFinite(Number(verifyResult.providerGrossAmountNaira))
     ) {
       const grossNaira = money(Number(verifyResult.providerGrossAmountNaira));
-      const feeNaira = money(Number(verifyResult.providerFeeAmountNaira ?? 0));
+      const feeNaira = money(Number((verifyResult as any).providerFeeAmountNaira ?? 0));
       const grossMinor = Math.round(grossNaira * 100);
       const feeMinor = Math.round(feeNaira * 100);
       // NOTE: we compare against normalizationExpectedKobo computed from

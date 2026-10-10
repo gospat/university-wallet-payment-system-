@@ -165,8 +165,20 @@ export const getContinueOption = catchAsync(async (req: Request, res: Response) 
     const storedCheckout = tx.alatpayCheckoutUrl || checkoutFromMetadata;
     const hasSession = !!tx.alatpaySessionId && String(tx.alatpaySessionId).trim().length > 0;
     const hasCheckout = !!storedCheckout && String(storedCheckout).trim().length > 0;
+    const hasInitRef = !!tx.alatpayInitPaymentReference && String(tx.alatpayInitPaymentReference).trim().length > 0;
+    const hasOrderRef = !!tx.alatpayOrderReference && String(tx.alatpayOrderReference).trim().length > 0;
 
-    if (hasSession && (hasCheckout || hasSession)) {
+    // ALATPay SDK setup is NOT a supposed "resume" mechanism unless it is
+    // verified it reuses the SAME provider attempt. The server SDK
+    // /initialize returns new sessions / new init refs. Therefore we can
+    // only safely claim a resume when ALL of the required identifiers
+    // (session + init ref + order ref + stored checkout URL) from the
+    // original single initiation are present and match this transaction.
+    // Otherwise, clearly explain that safe continuation is unavailable.
+    const hasAllOriginalSessionArtifacts =
+      hasSession && hasInitRef && hasOrderRef && hasCheckout;
+
+    if (hasAllOriginalSessionArtifacts) {
       return res.status(200).json({
         canResume: true,
         reason: null,
@@ -182,9 +194,20 @@ export const getContinueOption = catchAsync(async (req: Request, res: Response) 
           bellsReference,
           transactionStatus,
           expectedAmountNaira,
+          sdkSetupIsSameAttempt: false,
         },
       });
     }
+
+    // Partial stored artifacts: do NOT claim resume; do NOT re-run SDK
+    // setup. Direct to Status check / support.
+    return res.status(200).json({
+      canResume: false,
+      reason: 'Stored ALATPay checkout session is not available for safe resume of the original provider attempt. Please use Check Payment Status or contact Support.',
+      resumeMode: 'none',
+      canCheckStatus: true,
+      payload: null,
+    });
   }
 
   if (gateway === 'PAYSTACK') {

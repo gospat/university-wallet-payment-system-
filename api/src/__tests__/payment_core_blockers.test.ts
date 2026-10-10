@@ -850,7 +850,10 @@ describe('Payment Core Blockers — FR Classification / Late Success / CAS Lock'
 
   // ---- classifyProviderVerify unit tests (comprehensive strict-sets check) ----
   describe('classifyProviderVerify strict sets', () => {
-    const successCases = ['success', 'completed', 'paid', 'SUCCESS', '  Completed  '];
+    const successCases = [
+      'success', 'successful', 'completed', 'paid',
+      'SUCCESS', 'SUCCESSFUL', '  Completed  ', '   successful   ',
+    ];
     for (const s of successCases) {
       it(`AUTH_SUCCESS_SET accepts "${s}"`, () => {
         const r = classifyProviderVerify(s);
@@ -862,6 +865,18 @@ describe('Payment Core Blockers — FR Classification / Late Success / CAS Lock'
       const r = classifyProviderVerify({ status: TransactionStatus.SUCCESS } as any);
       expect(r.kind).toBe('AUTH_SUCCESS');
     });
+    // Paystack-authoritative values (subset of classifier since both providers share strict set)
+    for (const s of ['success', 'completed', 'paid']) {
+      it(`Paystack SUCCESS value "${s}" classified AUTH_SUCCESS`, () => {
+        expect(classifyProviderVerify(s).kind).toBe('AUTH_SUCCESS');
+      });
+    }
+    // ALATPay-authoritative success values includes "successful"
+    for (const s of ['success', 'successful', 'completed', 'paid']) {
+      it(`ALATPay SUCCESS value "${s}" classified AUTH_SUCCESS`, () => {
+        expect(classifyProviderVerify(s).kind).toBe('AUTH_SUCCESS');
+      });
+    }
     const terminalCases = ['failed', 'declined', 'rejected', 'expired', 'abandoned'];
     for (const s of terminalCases) {
       it(`AUTH_TERMINAL_FAILURE_SET accepts "${s}"`, () => {
@@ -878,6 +893,13 @@ describe('Payment Core Blockers — FR Classification / Late Success / CAS Lock'
         expect(r.writtenStatus).toBe(null);
       });
     }
+    // Ambiguous strings must NOT be AUTH_SUCCESS even if they contain "success"
+    const ambiguousNotSuccess = ['successfully_failed', 'un_successful', 'quasi-successful_but_not', 'succeeded-but-then-reversed'];
+    for (const s of ambiguousNotSuccess) {
+      it(`ambiguous "${s}" not classified AUTH_SUCCESS`, () => {
+        expect(classifyProviderVerify(s).kind).not.toBe('AUTH_SUCCESS');
+      });
+    }
     it('didThrow.error → TRANSPORT_EXCEPTION', () => {
       const r = classifyProviderVerify('anything', { error: true });
       expect(r.kind).toBe('TRANSPORT_EXCEPTION');
@@ -887,6 +909,128 @@ describe('Payment Core Blockers — FR Classification / Late Success / CAS Lock'
     it('unknown brand-new status falls to NON_TERMINAL', () => {
       const r = classifyProviderVerify('some_brand_new_status_xyz');
       expect(r.kind).toBe('NON_TERMINAL');
+    });
+  });
+
+  // ---- ALATPay transport exception does not throw TypeError accessing providerGrossAmountNaira ----
+  describe('ALATPay provider verification network throws: tx non-terminal, no financial posts, no TypeError', () => {
+    it('ALATPay verify network error: verifyPayment does not throw TypeError, remains non-terminal', async () => {
+      const originalProviderFactory = require('../services/payment/providerFactory');
+      const originalGet = originalProviderFactory.getPaymentProvider;
+      const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+      const VALID_UUID_V4 = 'e2b8d6c3-4a91-4f1e-8b3c-9d7e2f4a5b6c';
+      const transactions: any[] = [{
+        id: 92001,
+        userId: 11,
+        reference: 'PAY-ALAT-TRANSPORT-92001',
+        gateway: 'ALATPAY',
+        status: 'PENDING',
+        amount: new DECIMAL(0),
+        expectedAmount: new DECIMAL(100000),
+        invoiceId: 92000,
+        paystackReference: null,
+        alatpaySessionId: 'sess-92001',
+        alatpayOrderReference: 'order-92001',
+        alatpayInitPaymentReference: 'init-92001',
+        alatpayCheckoutUrl: null,
+        alatpayFinalTransactionId: null,
+        metadata: {},
+        createdAt: new Date('2026-01-01'),
+      }];
+      const invoice: any = {
+        id: 92000, studentId: 11, amountDue: new DECIMAL(100000), amountPaid: new DECIMAL(0),
+        status: 'UNPAID', feeId: 9, invoiceNumber: 'INV-92000', createdAt: new Date('2026-01-01'),
+      };
+      const originalTxFindFirst = prisma.transaction.findFirst as any;
+      const originalTxFindMany = prisma.transaction.findMany as any;
+      const originalTxFindUnique = prisma.transaction.findUnique as any;
+      const originalInvoiceFindUnique = prisma.invoice.findUnique as any;
+      const originalReceiptFindFirst = prisma.receipt.findFirst as any;
+      const originalGLCreate = (prisma as any).generalLedger?.create;
+      const originalSettlement = (prisma as any).settlement;
+      const originalCounter = (prisma as any).counter;
+      let receiptCreated = false;
+      let ledgerPosted = false;
+      let settlementCreated = false;
+      try {
+        originalProviderFactory.getPaymentProvider = jest.fn(() => ({
+          name: 'ALATPAY',
+          async verify(_ref: string) {
+            throw new Error('ENETDOWN: ALATPay provider network timeout simulated');
+          },
+          supportsVerify: () => true,
+        }));
+        (prisma.transaction.findFirst as any) = jest.fn().mockImplementation(async (q: any) => {
+          if (q.where.id) return transactions.find((t: any) => t.id === q.where.id) || null;
+          return transactions[0] || null;
+        });
+        (prisma.transaction.findMany as any) = jest.fn().mockResolvedValue([]);
+        (prisma.transaction.findUnique as any) = jest.fn().mockImplementation(async (q: any) =>
+          transactions.find((t: any) => t.id === q.where.id) || null
+        );
+        (prisma.invoice.findUnique as any) = jest.fn().mockImplementation(async (q: any) =>
+          invoice.id === q.where.id ? invoice : null
+        );
+        (prisma.receipt.findFirst as any) = jest.fn().mockResolvedValue(null);
+        (prisma.receipt.create as any) = jest.fn().mockImplementation(async () => { receiptCreated = true; return { id: 1 }; });
+        if ((prisma as any).generalLedger) {
+          (prisma as any).generalLedger.create = jest.fn().mockImplementation(async () => { ledgerPosted = true; return { id: 1 }; });
+        }
+        if ((prisma as any).settlement) {
+          (prisma as any).settlement.create = jest.fn().mockImplementation(async () => { settlementCreated = true; return { id: 1 }; });
+        }
+        if ((prisma as any).counter) {
+          (prisma as any).counter.findUnique = jest.fn().mockResolvedValue(null);
+          (prisma as any).counter.upsert = jest.fn().mockResolvedValue({});
+        }
+        (prisma as any).$transaction = jest.fn(async (fn: any) => fn({
+          transaction: {
+            findFirst: prisma.transaction.findFirst,
+            findMany: prisma.transaction.findMany,
+            findUnique: prisma.transaction.findUnique,
+            create: jest.fn().mockResolvedValue(transactions[0]),
+            update: jest.fn().mockResolvedValue(transactions[0]),
+          },
+          invoice: {
+            findUnique: prisma.invoice.findUnique,
+            update: jest.fn().mockResolvedValue(invoice),
+          },
+          receipt: prisma.receipt,
+          generalLedger: (prisma as any).generalLedger,
+          settlement: (prisma as any).settlement,
+          counter: (prisma as any).counter,
+        }));
+
+        let err: any = null;
+        try {
+          await (PaymentService.verifyPayment as any)('PAY-ALAT-TRANSPORT-92001', {
+            studentId: 11,
+            gateway: 'ALATPAY',
+            providerReference: 'order-92001',
+            expectedAmountMinor: 10000000,
+            expectedTransactionId: 92001,
+          });
+        } catch (e: any) {
+          err = e;
+        }
+        // Defect #1: accessing verifyResult.providerGrossAmountNaira when
+        // verifyResult is null must NOT produce TypeError.
+        expect(err?.name).not.toBe('TypeError');
+        // No financial posts may occur during a transport exception.
+        expect(receiptCreated).toBe(false);
+        expect(ledgerPosted).toBe(false);
+        expect(settlementCreated).toBe(false);
+      } finally {
+        originalProviderFactory.getPaymentProvider = originalGet;
+        (prisma.transaction.findFirst as any) = originalTxFindFirst;
+        (prisma.transaction.findMany as any) = originalTxFindMany;
+        (prisma.transaction.findUnique as any) = originalTxFindUnique;
+        (prisma.invoice.findUnique as any) = originalInvoiceFindUnique;
+        (prisma.receipt.findFirst as any) = originalReceiptFindFirst;
+        if (originalGLCreate && (prisma as any).generalLedger) (prisma as any).generalLedger.create = originalGLCreate;
+        if (originalSettlement) (prisma as any).settlement = originalSettlement;
+        if (originalCounter) (prisma as any).counter = originalCounter;
+      }
     });
   });
 });
