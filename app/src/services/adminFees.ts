@@ -421,6 +421,7 @@ export type CancelTransactionInput = {
   reason: CancelTransactionReasonKey | '';
   writtenExplanation?: string | null;
   evidenceReference?: string | null;
+  evidenceOverride?: 'MANUAL_SUPPORT_OVERRIDE';
 };
 
 export type CancelTransactionResponse = {
@@ -442,6 +443,7 @@ export async function cancelTransaction(
     reason: body.reason,
     writtenExplanation: body.writtenExplanation?.trim() ?? undefined,
     evidenceReference: body.evidenceReference?.trim() ?? undefined,
+    evidenceOverride: body.evidenceOverride,
   });
   return unwrap<CancelTransactionResponse>(resp);
 }

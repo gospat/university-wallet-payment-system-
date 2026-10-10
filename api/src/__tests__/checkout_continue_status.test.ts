@@ -371,6 +371,193 @@ describe('T5 FR-5 — Check Status + Continue Payment Safety', () => {
     expect(forbiddenUpdateMany.length).toBe(0);
   }, 20000);
 
+  it('TR5_1b verifyPayment provider returns unknown — tx NEVER becomes FAILED; status stays non-terminal.', async () => {
+    const m = setupBase(PaymentGateway.ALATPAY);
+    const Decimal = (require('@prisma/client').Prisma.Decimal as any);
+    const pendingTxRow: any = {
+      id: 43,
+      reference: 'PAY-TR5-1B',
+      status: TransactionStatus.PENDING,
+      gateway: PaymentGateway.ALATPAY,
+      userId: MOCK_STUDENT.id,
+      invoiceId: MOCK_INVOICE.id,
+      expectedAmount: new Decimal(BREAKDOWN.totalAmount),
+      amount: new Decimal(0),
+      paystackReference: null,
+      alatpayFinalTransactionId: 'uuid-for-1b',
+      alatpayOrderReference: 'ord-ref-1b',
+      alatpayInitPaymentReference: 'init-ref-1b',
+      alatpaySessionId: 'sess-1b',
+      metadata: {},
+      createdAt: minutesAgo(2),
+      updatedAt: minutesAgo(2),
+    };
+    (prisma.transaction.findFirst as jest.Mock).mockImplementation(async (opts: any) => {
+      const where = opts?.where ?? {};
+      if (where.reference === 'PAY-TR5-1B' || where.id === 43) return pendingTxRow;
+      return null;
+    });
+    (prisma.transaction.findUnique as jest.Mock).mockImplementation(async (opts: any) => {
+      const w = opts?.where ?? {};
+      if (w.reference === 'PAY-TR5-1B' || w.id === 43) return pendingTxRow;
+      return null;
+    });
+    m.providerVerify.mockResolvedValue({
+      verified: false,
+      status: 'unknown',
+      reason: 'provider_status_unknown',
+      amountMajor: 0,
+      providerRaw: { status: 'unknown' },
+    });
+    m.PaystackVerify.mockResolvedValue({
+      status: true,
+      data: { status: 'unknown', amount: 0, reference: 'PAY-TR5-1B' },
+    });
+
+    try {
+      await PaymentService.verifyPayment('PAY-TR5-1B', {
+        assertStudentId: MOCK_STUDENT.id,
+        req: { ip: '127.0.0.1', headers: {}, user: { id: MOCK_STUDENT.id } } as any,
+        providerReference: 'uuid-for-1b',
+        expectedTransactionId: 43,
+      });
+    } catch (_e) {
+      // Swallow intentionally — we only care whether any FAILED writes occurred.
+    }
+
+    const failedUpdates = (prisma.transaction.update as jest.Mock).mock.calls.filter((call) => {
+      const s = (call?.[1]?.data?.status ?? call?.[0]?.data?.status) as any;
+      return s === TransactionStatus.FAILED;
+    });
+    expect(failedUpdates.length).toBe(0);
+    const failedUpdateMany = (prisma.transaction.updateMany as jest.Mock).mock.calls.filter((call) => {
+      const s = (call?.[1]?.data?.status ?? call?.[0]?.data?.status) as any;
+      return s === TransactionStatus.FAILED;
+    });
+    expect(failedUpdateMany.length).toBe(0);
+  }, 20000);
+
+  it('TR5_1c verifyPayment provider returns processing — tx NEVER becomes FAILED.', async () => {
+    const m = setupBase(PaymentGateway.ALATPAY);
+    const Decimal = (require('@prisma/client').Prisma.Decimal as any);
+    const processingTxRow: any = {
+      id: 44,
+      reference: 'PAY-TR5-1C',
+      status: TransactionStatus.PROCESSING,
+      gateway: PaymentGateway.ALATPAY,
+      userId: MOCK_STUDENT.id,
+      invoiceId: MOCK_INVOICE.id,
+      expectedAmount: new Decimal(BREAKDOWN.totalAmount),
+      amount: new Decimal(0),
+      paystackReference: null,
+      alatpayFinalTransactionId: 'uuid-for-1c',
+      alatpayOrderReference: 'ord-ref-1c',
+      alatpayInitPaymentReference: 'init-ref-1c',
+      alatpaySessionId: 'sess-1c',
+      metadata: {},
+      createdAt: minutesAgo(2),
+      updatedAt: minutesAgo(2),
+    };
+    (prisma.transaction.findFirst as jest.Mock).mockImplementation(async (opts: any) => {
+      const where = opts?.where ?? {};
+      if (where.reference === 'PAY-TR5-1C' || where.id === 44) return processingTxRow;
+      return null;
+    });
+    (prisma.transaction.findUnique as jest.Mock).mockImplementation(async (opts: any) => {
+      const w = opts?.where ?? {};
+      if (w.reference === 'PAY-TR5-1C' || w.id === 44) return processingTxRow;
+      return null;
+    });
+    m.providerVerify.mockResolvedValue({
+      verified: false,
+      status: 'processing',
+      reason: 'provider_still_processing',
+      amountMajor: 0,
+      providerRaw: { status: 'processing' },
+    });
+    m.PaystackVerify.mockResolvedValue({
+      status: true,
+      data: { status: 'processing', amount: 0, reference: 'PAY-TR5-1C' },
+    });
+
+    try {
+      await PaymentService.verifyPayment('PAY-TR5-1C', {
+        assertStudentId: MOCK_STUDENT.id,
+        req: { ip: '127.0.0.1', headers: {}, user: { id: MOCK_STUDENT.id } } as any,
+        providerReference: 'uuid-for-1c',
+        expectedTransactionId: 44,
+      });
+    } catch (_e) {
+      // Swallow intentionally.
+    }
+
+    const failedUpdates = (prisma.transaction.update as jest.Mock).mock.calls.filter((call) => {
+      const s = (call?.[1]?.data?.status ?? call?.[0]?.data?.status) as any;
+      return s === TransactionStatus.FAILED;
+    });
+    expect(failedUpdates.length).toBe(0);
+  }, 20000);
+
+  it('TR5_1d verifyPayment provider throws "Resource not found" — tx NEVER becomes FAILED.', async () => {
+    const m = setupBase(PaymentGateway.ALATPAY);
+    const Decimal = (require('@prisma/client').Prisma.Decimal as any);
+    const pendingTxRow: any = {
+      id: 45,
+      reference: 'PAY-TR5-1D',
+      status: TransactionStatus.PENDING,
+      gateway: PaymentGateway.ALATPAY,
+      userId: MOCK_STUDENT.id,
+      invoiceId: MOCK_INVOICE.id,
+      expectedAmount: new Decimal(BREAKDOWN.totalAmount),
+      amount: new Decimal(0),
+      paystackReference: null,
+      alatpayFinalTransactionId: 'uuid-for-1d',
+      alatpayOrderReference: 'ord-ref-1d',
+      alatpayInitPaymentReference: 'init-ref-1d',
+      alatpaySessionId: 'sess-1d',
+      metadata: {},
+      createdAt: minutesAgo(2),
+      updatedAt: minutesAgo(2),
+    };
+    (prisma.transaction.findFirst as jest.Mock).mockImplementation(async (opts: any) => {
+      const where = opts?.where ?? {};
+      if (where.reference === 'PAY-TR5-1D' || where.id === 45) return pendingTxRow;
+      return null;
+    });
+    (prisma.transaction.findUnique as jest.Mock).mockImplementation(async (opts: any) => {
+      const w = opts?.where ?? {};
+      if (w.reference === 'PAY-TR5-1D' || w.id === 45) return pendingTxRow;
+      return null;
+    });
+    m.providerVerify.mockRejectedValueOnce(new Error('Resource not found'));
+    m.PaystackVerify.mockResolvedValue({
+      status: false,
+      message: 'Resource not found',
+    });
+
+    try {
+      await PaymentService.verifyPayment('PAY-TR5-1D', {
+        assertStudentId: MOCK_STUDENT.id,
+        req: { ip: '127.0.0.1', headers: {}, user: { id: MOCK_STUDENT.id } } as any,
+        providerReference: 'uuid-for-1d',
+        expectedTransactionId: 45,
+      });
+    } catch (_e) {
+      // Swallow intentionally — only care that no FAILED write occurred.
+    }
+
+    const failedUpdates = (prisma.transaction.update as jest.Mock).mock.calls.filter((call) => {
+      const s = (call?.[1]?.data?.status ?? call?.[0]?.data?.status) as any;
+      return s === TransactionStatus.FAILED;
+    });
+    expect(failedUpdates.length).toBe(0);
+    const failedUpdateMany = (prisma.transaction.updateMany as jest.Mock).mock.calls.filter((call) => {
+      const s = (call?.[1]?.data?.status ?? call?.[0]?.data?.status) as any;
+      return s === TransactionStatus.FAILED;
+    });
+    expect(failedUpdateMany.length).toBe(0);
+  }, 20000);
+
   // -----------------------------------------------------------------------
   // TR5_2a (mandatory #20 part A): ALATPAY PENDING with sessionId + checkoutUrl
   //   → canResume=true resumeMode='alatpay_native'. 0 tx.create, 0 provider.initialize.

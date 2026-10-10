@@ -1884,6 +1884,7 @@ router.post(
       reason: body.reason,
       writtenExplanation: body.writtenExplanation,
       evidenceReference: body.evidenceReference,
+      evidenceOverride: body.evidenceOverride,
       req: req as any,
     });
     res.status(200).json({

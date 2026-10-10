@@ -49,6 +49,8 @@ const CheckoutPage: React.FC = () => {
   const [continuing, setContinuing] = useState(false);
   const [showUnresolved, setShowUnresolved] = useState(false);
   const [lastInitiatedResult, setLastInitiatedResult] = useState<any>(null);
+  const [continueOption, setContinueOption] = useState<any>(null);
+  const [continueOptionLoading, setContinueOptionLoading] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -92,6 +94,28 @@ const CheckoutPage: React.FC = () => {
       }
     })();
   }, [invoiceId]);
+
+  useEffect(() => {
+    if (!showUnresolved) {
+      setContinueOption(null);
+      return;
+    }
+    const txId =
+      (pendingTx?.transactionId) ||
+      (lastInitiatedResult?.transactionId) ||
+      (lastInitiatedResult?.data?.transactionId);
+    if (!txId) {
+      setContinueOption(null);
+      return;
+    }
+    let cancelled = false;
+    setContinueOptionLoading(true);
+    studentFeeApi.getContinueOption(txId)
+      .then((opt: any) => { if (!cancelled) setContinueOption(opt ?? null); })
+      .catch(() => { if (!cancelled) setContinueOption(null); })
+      .finally(() => { if (!cancelled) setContinueOptionLoading(false); });
+    return () => { cancelled = true; };
+  }, [showUnresolved, pendingTx?.transactionId, lastInitiatedResult?.transactionId]);
 
   const due = Number(invoice?.amountDue ?? 0);
   const paid = Number(invoice?.amountPaid ?? 0);
@@ -484,10 +508,13 @@ const CheckoutPage: React.FC = () => {
             {showUnresolved && (
               <section className="bg-amber-50 border border-amber-200 rounded-2xl shadow-sm p-6">
                 <h2 className="text-lg font-bold text-amber-900 flex items-center gap-2">
-                  <AlertTriangle className="h-5 w-5 text-amber-600" /> Unresolved Payment Attempt
+                  <AlertTriangle className="h-5 w-5 text-amber-600" />{' '}
+                  {continueOption?.canResume ? 'Unresolved Payment Attempt' : 'Awaiting Confirmation'}
                 </h2>
                 <p className="text-sm text-amber-800 mt-1">
-                  You recently closed a payment popup or checkout window before confirmation completed. Your payment may still be in progress. Use the actions below before starting a new payment.
+                  {continueOption?.canResume
+                    ? 'You can continue this payment attempt or check its current status below.'
+                    : 'Your payment is still being processed by the provider. Safe continuation of this exact payment attempt is not available from this device. Use Check Payment Status to refresh the latest state, or contact Bursary/Support if it remains unresolved.'}
                 </p>
                 <div className="mt-4 text-xs font-mono text-amber-900/80 bg-amber-100/60 border border-amber-200 rounded-lg px-3 py-2">
                   Reference:&nbsp;
@@ -518,21 +545,29 @@ const CheckoutPage: React.FC = () => {
                     )}
                     {checkingStatus ? 'Checking…' : 'Check Payment Status'}
                   </button>
-                  <button
-                    type="button"
-                    onClick={continuePayment}
-                    disabled={continuing || checkingStatus}
-                    aria-label="Continue Payment"
-                    className="inline-flex items-center gap-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white font-bold px-5 py-2.5 rounded-lg shadow-sm"
-                  >
-                    {continuing ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <ArrowRight className="h-4 w-4" />
-                    )}
-                    {continuing ? 'Continuing…' : 'Continue Payment'}
-                  </button>
+                  {continueOption?.canResume && (
+                    <button
+                      type="button"
+                      onClick={continuePayment}
+                      disabled={continuing || checkingStatus || continueOptionLoading}
+                      aria-label="Continue Payment"
+                      className="inline-flex items-center gap-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white font-bold px-5 py-2.5 rounded-lg shadow-sm"
+                    >
+                      {continuing ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <ArrowRight className="h-4 w-4" />
+                      )}
+                      {continuing ? 'Continuing…' : 'Continue Payment'}
+                    </button>
+                  )}
                 </div>
+                {!continueOption?.canResume && !continueOptionLoading && (
+                  <p className="mt-4 text-xs text-amber-700 leading-relaxed">
+                    If the provider cannot resolve this payment after some time, please contact the Bursary or Support with the
+                    reference above for assistance. Do not start a new payment until this attempt is resolved.
+                  </p>
+                )}
               </section>
             )}
           </div>

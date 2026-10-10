@@ -132,8 +132,11 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [cancelReason, setCancelReason] = useState<CancelTransactionReasonKey | ''>('');
   const [cancelWritten, setCancelWritten] = useState<string>('');
   const [cancelEvidence, setCancelEvidence] = useState<string>('');
+  const [cancelOverride, setCancelOverride] = useState(false);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [cancelError, setCancelError] = useState<string>('');
+
+  const STRICT_SUPPORT_TICKET_REGEX = /^(SUPPORT-[0-9]{5,}|[A-Z]{2,}-TKT-[0-9]{4,}|REC-[A-Z0-9]{6,})$/;
 
   const canCancelTransaction = (t: any): { ok: boolean; why?: string } => {
     if (!t) return { ok: false, why: 'Missing row' };
@@ -157,6 +160,7 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     setCancelReason('');
     setCancelWritten('');
     setCancelEvidence('');
+    setCancelOverride(false);
     setCancelError('');
     setCancelDialogOpen(true);
   };
@@ -170,11 +174,22 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     if (cancelReason === 'OTHER' && (cancelWritten.trim().length < 1)) {
       setCancelError('Written explanation is required when reason is Other.'); return;
     }
+    if (cancelOverride && role !== 'ADMIN') {
+      setCancelError('Manual Support Override is only available to ADMIN role.'); return;
+    }
+    if (cancelOverride && !STRICT_SUPPORT_TICKET_REGEX.test(cancelEvidence.trim())) {
+      setCancelError('Manual Support Override requires a valid support reference (e.g. SUPPORT-12345, AB-TKT-1234, REC-ABC123).'); return;
+    }
     setCancelLoading(true); setCancelError('');
     try {
       await cancelTransactionApi(
         Number(cancelTarget.id),
-        { reason: cancelReason, writtenExplanation: cancelWritten || null, evidenceReference: cancelEvidence || null },
+        {
+          reason: cancelReason,
+          writtenExplanation: cancelWritten || null,
+          evidenceReference: cancelEvidence || null,
+          evidenceOverride: cancelOverride ? 'MANUAL_SUPPORT_OVERRIDE' : undefined,
+        },
         { role: role === 'ADMIN' ? 'admin' : 'bursary' }
       );
       closeCancelDialog();
@@ -524,6 +539,29 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               className={inputCls + ' resize-y min-h-[100px]'}
             />
           </div>
+          {role === 'ADMIN' && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 space-y-2">
+              <label htmlFor="cancel-override" className="flex items-start gap-2 cursor-pointer">
+                <input
+                  id="cancel-override"
+                  type="checkbox"
+                  checked={cancelOverride}
+                  onChange={(e) => setCancelOverride(!!e.target.checked)}
+                  disabled={cancelLoading}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                />
+                <span className="text-xs font-semibold text-amber-900">
+                  Manual Support Override (MANUAL_SUPPORT_OVERRIDE)
+                </span>
+              </label>
+              <p className="text-[11px] text-amber-800 leading-relaxed pl-6">
+                Exceptional reconciliation only. Requires ADMIN role, VOID_TRANSACTIONS permission, a valid support
+                reference (e.g. <code className="font-mono">SUPPORT-12345</code>, <code className="font-mono">AB-TKT-1234</code>,
+                <code className="font-mono">REC-ABC123</code>), and a written explanation. Never use for popup-close,
+                elapsed time, missing callback, or missing final UUID.
+              </p>
+            </div>
+          )}
           {cancelError && (
             <Alert variant="danger">
               <div className="text-xs whitespace-pre-wrap leading-relaxed">{cancelError}</div>

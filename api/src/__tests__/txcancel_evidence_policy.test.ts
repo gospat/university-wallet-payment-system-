@@ -954,4 +954,62 @@ describe('TR4 Transaction Cancellation Evidence Policy (FR-4)', () => {
       });
     }
   });
+
+  describe('TR4_8 successful/reversed/cancelled transactions cannot be cancelled', () => {
+    it('TR4_8: SUCCESS transaction → 409, no CANCELLED update, no receipt/GL/settlement', async () => {
+      setupBase(PaymentGateway.PAYSTACK);
+      const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+      const successTx: any = {
+        id: 9955,
+        reference: 'PAY-SUCCESS-9955',
+        status: TransactionStatus.SUCCESS,
+        gateway: PaymentGateway.PAYSTACK,
+        userId: MOCK_STUDENT.id,
+        invoiceId: MOCK_INVOICE.id,
+        expectedAmount: new DECIMAL(50000),
+        amount: new DECIMAL(50000),
+        createdAt: new Date(),
+        paystackReference: 'pay_success_ref_9955',
+        alatpayFinalTransactionId: null,
+        metadata: {},
+        invoice: { ...MOCK_INVOICE },
+      };
+      (prisma.transaction.findUnique as jest.Mock).mockResolvedValue(successTx);
+
+      let threw: any = null;
+      try {
+        await TransactionCancellationService.cancelTransaction({
+          transactionId: successTx.id,
+          actorId: 5001,
+          actorRole: Role.ADMIN,
+          actorPermissions: [Permissions.VOID_TRANSACTIONS],
+          reason: 'ADMINISTRATIVE_CORRECTION',
+          writtenExplanation: 'Attempting to cancel a successful transaction',
+          evidenceReference: 'SUPPORT-12345',
+          evidenceOverride: 'MANUAL_SUPPORT_OVERRIDE',
+        });
+      } catch (e) {
+        threw = e;
+      }
+
+      expect(threw).toBeInstanceOf(AppError);
+      const statusCode =
+        (threw as any).statusCode ??
+        (threw as any).httpCode ??
+        (threw as any).code ??
+        (threw as AppError).status;
+      expect(statusCode).toBe(409);
+      const cancelUpdates = (prisma.transaction.updateMany as jest.Mock).mock.calls.filter(
+        (c) => {
+          const data = (c?.[1]?.data ?? c?.[0]?.data) as any;
+          return data?.status === TransactionStatus.CANCELLED;
+        },
+      );
+      expect(cancelUpdates.length).toBe(0);
+      expect((prisma.receipt.create as jest.Mock).mock.calls.length).toBe(0);
+      if ((prisma as any).generalLedger) {
+        expect((prisma as any).generalLedger.create.mock.calls.length).toBe(0);
+      }
+    });
+  });
 });
