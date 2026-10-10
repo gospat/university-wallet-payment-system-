@@ -515,6 +515,13 @@ export class TransactionCancellationService {
       const liveUnresolved =
         liveAttempt || hasPendingOrUnverifiedWebhooks || providerRefMissing;
 
+      // Sanitized evidence captured when the live-unresolved gate passes.
+      // These are persisted to metadata.cancellation + audit details so the
+      // audit can distinguish PROVIDER_TERMINAL_NEGATIVE from
+      // MANUAL_SUPPORT_OVERRIDE. Only allowlisted, non-secret fields are stored.
+      let providerEvidence: Record<string, unknown> | null = null;
+      let overrideEvidence: Record<string, unknown> | null = null;
+
       if (liveUnresolved) {
         let providerNegativeTerminal = false;
 
@@ -537,6 +544,20 @@ export class TransactionCancellationService {
               const cls = classifyProviderVerify(verifyResult);
               if (cls.kind === 'AUTH_FAILURE_TERMINAL') {
                 providerNegativeTerminal = true;
+                // Sanitized evidence ONLY — never store raw provider payload,
+                // authorization headers, or secrets.
+                const rawStatus =
+                  verifyResult && typeof verifyResult.providerStatus === 'string'
+                    ? verifyResult.providerStatus
+                    : '';
+                providerEvidence = {
+                  gateway: String(initialTx.gateway),
+                  providerReference: bestProviderRef,
+                  providerStatusRaw: rawStatus,
+                  providerStatusNormalized: rawStatus.trim().toLowerCase(),
+                  classification: 'AUTH_FAILURE_TERMINAL',
+                  verifiedAt: new Date().toISOString(),
+                };
               }
             } catch (_err) {
               providerNegativeTerminal = false;
@@ -550,6 +571,15 @@ export class TransactionCancellationService {
           (input.actorPermissions ?? []).includes(Permissions.VOID_TRANSACTIONS) &&
           evidenceReference != null &&
           STRICT_SUPPORT_TICKET_REGEX.test(String(evidenceReference).trim());
+
+        if (overrideGate) {
+          overrideEvidence = {
+            basis: 'MANUAL_SUPPORT_OVERRIDE',
+            supportTicketReference: String(evidenceReference).trim(),
+            actorId,
+            actorRole,
+          };
+        }
 
         if (!providerNegativeTerminal && !overrideGate) {
           throw new AppError(
@@ -760,6 +790,14 @@ export class TransactionCancellationService {
           evidenceReference: (evidenceReference ?? '').trim().slice(0, 500) || null,
           actorId,
           statusBefore: String(liveTx.status),
+          authorizationBasis:
+            providerEvidence != null
+              ? 'PROVIDER_TERMINAL_NEGATIVE'
+              : overrideEvidence != null
+                ? 'MANUAL_SUPPORT_OVERRIDE'
+                : null,
+          providerEvidence,
+          overrideEvidence,
           preservedReferences: {
             reference: liveTx.reference ?? null,
             paystackReference: (liveTx as any).paystackReference ?? null,
@@ -832,6 +870,9 @@ export class TransactionCancellationService {
               reason,
               writtenExplanation: cancellationMeta.writtenExplanation,
               evidenceReference: cancellationMeta.evidenceReference,
+              authorizationBasis: cancellationMeta.authorizationBasis,
+              providerEvidence: cancellationMeta.providerEvidence,
+              overrideEvidence: cancellationMeta.overrideEvidence,
               preservedReferences: cancellationMeta.preservedReferences,
               prechecks: {
                 receiptCleared: receiptRecheck === 0,

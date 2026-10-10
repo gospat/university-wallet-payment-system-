@@ -52,7 +52,7 @@ const JSON_DB_NULL = Prisma.JsonNull;
 let INITIATE_LOCK_TTL_SEC: number = Number(process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE) || (process.env.NODE_ENV === 'test' ? 0 : 3);
 export function _testOverrideInitiateLockTtl(sec: number): void { INITIATE_LOCK_TTL_SEC = Math.max(0, sec); }
 const AUTH_SUCCESS_SET = new Set(['success', 'successful', 'completed', 'paid']);
-const AUTH_TERMINAL_FAILURE_SET = new Set(['failed', 'declined', 'rejected', 'expired', 'abandoned']);
+const AUTH_TERMINAL_FAILURE_SET = new Set(['failed', 'declined', 'rejected', 'expired', 'abandoned', 'cancelled', 'canceled']);
 const NON_TERMINAL_SET = new Set(['pending', 'processing', 'initiated', 'queued', 'unknown', '', 'unrecognized', 'ambiguous']);
 
 export type ProviderClassifyKind = 'AUTH_SUCCESS' | 'AUTH_FAILURE_TERMINAL' | 'NON_TERMINAL' | 'TRANSPORT_EXCEPTION';

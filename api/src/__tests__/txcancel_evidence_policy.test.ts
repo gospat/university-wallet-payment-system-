@@ -501,6 +501,162 @@ describe('TR4 Transaction Cancellation Evidence Policy (FR-4)', () => {
     });
   });
 
+  describe('TR4_3b PROVIDER_TERMINAL_NEGATIVE evidence persisted in metadata + audit', () => {
+    it('TR4_3b: providerVerify returned terminal negative (cancelled) → authorizationBasis=PROVIDER_TERMINAL_NEGATIVE, sanitized providerEvidence stored, NO raw payload/secrets', async () => {
+      const m = setupBase(PaymentGateway.ALATPAY);
+      const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+      const pendingTx: any = {
+        id: 9933,
+        reference: 'PAY-PEND-9933',
+        status: TransactionStatus.PENDING,
+        gateway: PaymentGateway.ALATPAY,
+        userId: MOCK_STUDENT.id,
+        invoiceId: MOCK_INVOICE.id,
+        expectedAmount: new DECIMAL(50000),
+        amount: new DECIMAL(0),
+        createdAt: new Date(),
+        paystackReference: null,
+        alatpayFinalTransactionId: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+        metadata: {},
+        invoice: { ...MOCK_INVOICE },
+      };
+      (prisma.transaction.findUnique as jest.Mock)
+        .mockResolvedValueOnce(pendingTx)
+        .mockResolvedValueOnce(pendingTx)
+        .mockResolvedValueOnce({ ...pendingTx, status: TransactionStatus.CANCELLED });
+      (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      if ((prisma as any).webhookEvent) {
+        (prisma.webhookEvent.findMany as jest.Mock).mockResolvedValue([]);
+      }
+
+      const rawPayload = {
+        status: 'cancelled',
+        authorization: 'Bearer sk_live_SECRET_TOKEN_12345',
+        apiKey: 'AKIA_SECRET_KEY',
+        amount: 0,
+        gateway_response: 'Transaction cancelled by user',
+      };
+
+      m.providerVerify.mockResolvedValueOnce({
+        providerStatus: 'cancelled',
+        paidAmountMinor: 0,
+        paidAmountNaira: 0,
+        status: TransactionStatus.FAILED,
+        providerReference: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+        channel: 'card',
+        paidAt: new Date(),
+        currency: 'NGN',
+        raw: rawPayload,
+      });
+
+      await TransactionCancellationService.cancelTransaction({
+        transactionId: pendingTx.id,
+        actorId: 5001,
+        actorRole: Role.ADMIN,
+        actorPermissions: [Permissions.VOID_TRANSACTIONS],
+        reason: 'PROVIDER_SESSION_EXPIRED',
+        writtenExplanation: 'Provider verify returned cancelled status',
+        evidenceReference: 'provider-cancelled-9933',
+      });
+
+      const cancelUpdate = (prisma.transaction.updateMany as jest.Mock).mock.calls.find(
+        (c: any) => (c?.[1]?.data ?? c?.[0]?.data)?.status === TransactionStatus.CANCELLED,
+      );
+      expect(cancelUpdate).toBeDefined();
+      const data = (cancelUpdate?.[1]?.data ?? cancelUpdate?.[0]?.data) as any;
+      const cancellation = data.metadata.cancellation;
+
+      expect(cancellation.authorizationBasis).toBe('PROVIDER_TERMINAL_NEGATIVE');
+      expect(cancellation.providerEvidence).toBeDefined();
+      expect(cancellation.overrideEvidence).toBeNull();
+      expect(cancellation.providerEvidence.gateway).toBe(PaymentGateway.ALATPAY);
+      expect(cancellation.providerEvidence.providerReference).toBe('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+      expect(cancellation.providerEvidence.providerStatusRaw).toBe('cancelled');
+      expect(cancellation.providerEvidence.providerStatusNormalized).toBe('cancelled');
+      expect(cancellation.providerEvidence.classification).toBe('AUTH_FAILURE_TERMINAL');
+      expect(typeof cancellation.providerEvidence.verifiedAt).toBe('string');
+      const evidenceJson = JSON.stringify(cancellation.providerEvidence);
+      expect(evidenceJson).not.toContain('sk_live_SECRET_TOKEN_12345');
+      expect(evidenceJson).not.toContain('AKIA_SECRET_KEY');
+      expect(evidenceJson).not.toContain('authorization');
+      expect(evidenceJson).not.toContain('apiKey');
+      expect(evidenceJson).not.toContain('gateway_response');
+
+      const auditCall = (prisma.auditLog.create as jest.Mock).mock.calls[0];
+      const auditDetails = auditCall?.[1]?.data?.details ?? auditCall?.[0]?.data?.details;
+      expect(auditDetails.authorizationBasis).toBe('PROVIDER_TERMINAL_NEGATIVE');
+      expect(auditDetails.providerEvidence.gateway).toBe(PaymentGateway.ALATPAY);
+      expect(auditDetails.providerEvidence.classification).toBe('AUTH_FAILURE_TERMINAL');
+      const auditJson = JSON.stringify(auditDetails);
+      expect(auditJson).not.toContain('sk_live_SECRET_TOKEN_12345');
+      expect(auditJson).not.toContain('AKIA_SECRET_KEY');
+      expect(auditJson).not.toContain('gateway_response');
+    });
+  });
+
+  describe('TR4_4b MANUAL_SUPPORT_OVERRIDE evidence persisted in metadata + audit', () => {
+    it('TR4_4b: evidenceOverride=MANUAL_SUPPORT_OVERRIDE + SUPPORT-12345 → authorizationBasis=MANUAL_SUPPORT_OVERRIDE, supportTicketReference preserved, providerEvidence null', async () => {
+      setupBase(PaymentGateway.PAYSTACK);
+      const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+      const pendingTx: any = {
+        id: 9944,
+        reference: 'PAY-PEND-9944',
+        status: TransactionStatus.PENDING,
+        gateway: PaymentGateway.PAYSTACK,
+        userId: MOCK_STUDENT.id,
+        invoiceId: MOCK_INVOICE.id,
+        expectedAmount: new DECIMAL(50000),
+        amount: new DECIMAL(0),
+        createdAt: new Date(),
+        paystackReference: null,
+        alatpayFinalTransactionId: null,
+        metadata: {},
+        invoice: { ...MOCK_INVOICE },
+      };
+      (prisma.transaction.findUnique as jest.Mock)
+        .mockResolvedValueOnce(pendingTx)
+        .mockResolvedValueOnce(pendingTx)
+        .mockResolvedValueOnce({ ...pendingTx, status: TransactionStatus.CANCELLED });
+      (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      if ((prisma as any).webhookEvent) {
+        (prisma.webhookEvent.findMany as jest.Mock).mockResolvedValue([]);
+      }
+
+      await TransactionCancellationService.cancelTransaction({
+        transactionId: pendingTx.id,
+        actorId: 5001,
+        actorRole: Role.ADMIN,
+        actorPermissions: [Permissions.VOID_TRANSACTIONS],
+        reason: 'ADMINISTRATIVE_CORRECTION',
+        writtenExplanation: 'Support ticket confirms false duplicate',
+        evidenceReference: 'SUPPORT-12345',
+        evidenceOverride: 'MANUAL_SUPPORT_OVERRIDE',
+      });
+
+      const cancelUpdate = (prisma.transaction.updateMany as jest.Mock).mock.calls.find(
+        (c: any) => (c?.[1]?.data ?? c?.[0]?.data)?.status === TransactionStatus.CANCELLED,
+      );
+      expect(cancelUpdate).toBeDefined();
+      const data = (cancelUpdate?.[1]?.data ?? cancelUpdate?.[0]?.data) as any;
+      const cancellation = data.metadata.cancellation;
+
+      expect(cancellation.authorizationBasis).toBe('MANUAL_SUPPORT_OVERRIDE');
+      expect(cancellation.providerEvidence).toBeNull();
+      expect(cancellation.overrideEvidence).toBeDefined();
+      expect(cancellation.overrideEvidence.basis).toBe('MANUAL_SUPPORT_OVERRIDE');
+      expect(cancellation.overrideEvidence.supportTicketReference).toBe('SUPPORT-12345');
+      expect(cancellation.overrideEvidence.actorId).toBe(5001);
+      expect(cancellation.overrideEvidence.actorRole).toBe(Role.ADMIN);
+
+      const auditCall = (prisma.auditLog.create as jest.Mock).mock.calls[0];
+      const auditDetails = auditCall?.[1]?.data?.details ?? auditCall?.[0]?.data?.details;
+      expect(auditDetails.authorizationBasis).toBe('MANUAL_SUPPORT_OVERRIDE');
+      expect(auditDetails.providerEvidence).toBeNull();
+      expect(auditDetails.overrideEvidence.basis).toBe('MANUAL_SUPPORT_OVERRIDE');
+      expect(auditDetails.overrideEvidence.supportTicketReference).toBe('SUPPORT-12345');
+    });
+  });
+
   describe('TR4_5 three MANUAL override failure paths', () => {
     it('TR4_5(a): BURSARY role + VOID perm + override + ticket pattern → MUST fail (role not ADMIN)', async () => {
       setupBase(PaymentGateway.PAYSTACK);

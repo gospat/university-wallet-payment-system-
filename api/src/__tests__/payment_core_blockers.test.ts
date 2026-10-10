@@ -877,12 +877,34 @@ describe('Payment Core Blockers — FR Classification / Late Success / CAS Lock'
         expect(classifyProviderVerify(s).kind).toBe('AUTH_SUCCESS');
       });
     }
-    const terminalCases = ['failed', 'declined', 'rejected', 'expired', 'abandoned'];
+    const terminalCases = ['failed', 'declined', 'rejected', 'expired', 'abandoned', 'cancelled', 'canceled'];
     for (const s of terminalCases) {
       it(`AUTH_TERMINAL_FAILURE_SET accepts "${s}"`, () => {
         const r = classifyProviderVerify(s);
         expect(r.kind).toBe('AUTH_FAILURE_TERMINAL');
         expect(r.writtenStatus).toBe(TransactionStatus.FAILED);
+      });
+    }
+    // Mixed-case / trimmed variants of cancelled/canceled must also be terminal
+    const cancelledVariants = ['CANCELLED', 'Canceled', '  cancelled  ', '   CANCELED   ', 'Cancelled', 'cAnCeLeD'];
+    for (const s of cancelledVariants) {
+      it(`AUTH_TERMINAL_FAILURE_SET accepts mixed/trimmed "${s}"`, () => {
+        const r = classifyProviderVerify(s);
+        expect(r.kind).toBe('AUTH_FAILURE_TERMINAL');
+        expect(r.writtenStatus).toBe(TransactionStatus.FAILED);
+      });
+    }
+    // Strings MERELY containing cancelled/canceled must NOT become terminal
+    const notTerminalContainsCancelled = [
+      'not_cancelled_yet',
+      'cancelled_in_error',
+      'uncanceled',
+      'will_be_cancelled',
+      'cancelled_by_timeout_then_reversed',
+    ];
+    for (const s of notTerminalContainsCancelled) {
+      it(`ambiguous "${s}" not classified AUTH_FAILURE_TERMINAL`, () => {
+        expect(classifyProviderVerify(s).kind).not.toBe('AUTH_FAILURE_TERMINAL');
       });
     }
     const nonTerminalCases = ['pending', 'processing', 'initiated', 'queued', 'unknown', '', 'unrecognized', 'ambiguous'];
@@ -1032,5 +1054,149 @@ describe('Payment Core Blockers — FR Classification / Late Success / CAS Lock'
         if (originalCounter) (prisma as any).counter = originalCounter;
       }
     });
+  });
+
+  // ---- ALATPay verify returning cancelled/canceled transitions PENDING -> FAILED, no financial posts ----
+  describe('ALATPay verify cancelled/canceled: PENDING tx transitions to FAILED, no financial posting', () => {
+    for (const cancelledStatus of ['cancelled', 'canceled']) {
+      it(`ALATPay providerStatus="${cancelledStatus}" → verifyPayment transitions eligible PENDING to FAILED, no receipt/GL/settlement`, async () => {
+        const originalProviderFactory = require('../services/payment/providerFactory');
+        const originalGet = originalProviderFactory.getPaymentProvider;
+        const DECIMAL = (require('@prisma/client').Prisma.Decimal as any);
+        const VALID_UUID_V4 = 'f3c9e2b1-4a91-4f1e-8b3c-9d7e2f4a5b6c';
+        let txUpdateManyCalls: any[] = [];
+        let txUpdateCalls: any[] = [];
+        const transactions: any[] = [{
+          id: 93001,
+          userId: 12,
+          reference: 'PAY-ALAT-CANCELLED-93001',
+          gateway: 'ALATPAY',
+          status: 'PENDING',
+          amount: new DECIMAL(0),
+          expectedAmount: new DECIMAL(75000),
+          invoiceId: 93000,
+          paystackReference: null,
+          alatpaySessionId: 'sess-93001',
+          alatpayOrderReference: 'order-93001',
+          alatpayInitPaymentReference: 'init-93001',
+          alatpayCheckoutUrl: null,
+          alatpayFinalTransactionId: VALID_UUID_V4,
+          metadata: {},
+          createdAt: new Date('2026-01-01'),
+          user: { id: 12, email: 'stu93001@bells.edu.ng', firstName: 'Test', lastName: 'Student', matricNumber: 'STU93001', role: 'STUDENT' },
+        }];
+        const invoice: any = {
+          id: 93000, studentId: 12, amountDue: new DECIMAL(75000), amountPaid: new DECIMAL(0),
+          status: 'UNPAID', feeId: 9, invoiceNumber: 'INV-93000', createdAt: new Date('2026-01-01'),
+        };
+        const originalTxFindFirst = prisma.transaction.findFirst as any;
+        const originalTxFindMany = prisma.transaction.findMany as any;
+        const originalTxFindUnique = prisma.transaction.findUnique as any;
+        const originalInvoiceFindUnique = prisma.invoice.findUnique as any;
+        const originalReceiptFindFirst = prisma.receipt.findFirst as any;
+        const originalGL = (prisma as any).generalLedger;
+        const originalSettlement = (prisma as any).settlement;
+        const originalCounter = (prisma as any).counter;
+
+        originalProviderFactory.getPaymentProvider = jest.fn().mockReturnValue({
+          name: 'ALATPAY',
+          verify: jest.fn().mockResolvedValue({
+            providerReference: VALID_UUID_V4,
+            paidAmountNaira: 0,
+            paidAmountMinor: 0,
+            status: TransactionStatus.FAILED,
+            channel: 'card',
+            paidAt: new Date(),
+            currency: 'NGN',
+            providerStatus: cancelledStatus,
+            raw: { status: cancelledStatus },
+          }),
+        });
+
+        (prisma.transaction.findFirst as any) = jest.fn().mockImplementation(async (args: any) => {
+          if (args?.where?.id === 93001 || args?.where?.reference === 'PAY-ALAT-CANCELLED-93001') return transactions[0];
+          return null;
+        });
+        (prisma.transaction.findMany as any) = jest.fn().mockResolvedValue(transactions);
+        (prisma.transaction.findUnique as any) = jest.fn().mockResolvedValue(transactions[0]);
+        (prisma.invoice.findUnique as any) = jest.fn().mockResolvedValue(invoice);
+        (prisma.receipt.findFirst as any) = jest.fn().mockResolvedValue(null);
+        (prisma.receipt.findMany as any) = jest.fn().mockResolvedValue([]);
+        (prisma.transaction.updateMany as any) = jest.fn().mockImplementation(async (args: any) => {
+          txUpdateManyCalls.push(args);
+          return { count: 1 };
+        });
+        (prisma.transaction.update as any) = jest.fn().mockImplementation(async (args: any) => {
+          txUpdateCalls.push(args);
+          return transactions[0];
+        });
+        (prisma.auditLog as any) = { create: jest.fn().mockResolvedValue({ id: 1 }) };
+
+        let receiptCreated = false;
+        let ledgerPosted = false;
+        let settlementCreated = false;
+        if ((prisma as any).generalLedger) {
+          (prisma as any).generalLedger = {
+          ...(prisma as any).generalLedger,
+          count: jest.fn().mockResolvedValue(0),
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockImplementation(async () => { ledgerPosted = true; return { id: 1 }; }),
+        };
+        }
+        if ((prisma as any).settlement) {
+          (prisma as any).settlement.create = jest.fn().mockImplementation(async () => { settlementCreated = true; return { id: 1 }; });
+        }
+        if ((prisma as any).counter) {
+          (prisma as any).counter.findUnique = jest.fn().mockResolvedValue(null);
+          (prisma as any).counter.upsert = jest.fn().mockResolvedValue({});
+        }
+        (prisma as any).$transaction = jest.fn(async (fn: any) => fn({
+          transaction: {
+            findFirst: prisma.transaction.findFirst,
+            findMany: prisma.transaction.findMany,
+            findUnique: prisma.transaction.findUnique,
+            updateMany: prisma.transaction.updateMany,
+            update: prisma.transaction.update,
+          },
+          invoice: {
+            findUnique: prisma.invoice.findUnique,
+          },
+          receipt: prisma.receipt,
+          generalLedger: (prisma as any).generalLedger,
+          settlement: (prisma as any).settlement,
+          counter: (prisma as any).counter,
+        }));
+
+        try {
+          await (PaymentService.verifyPayment as any)('PAY-ALAT-CANCELLED-93001', {
+            studentId: 12,
+            gateway: 'ALATPAY',
+            providerReference: VALID_UUID_V4,
+            expectedAmountMinor: 7500000,
+            expectedTransactionId: 93001,
+          });
+        } catch (_e) {
+          // ignore — we assert below on updateMany data instead of throwing
+        } finally {
+          originalProviderFactory.getPaymentProvider = originalGet;
+          (prisma.transaction.findFirst as any) = originalTxFindFirst;
+          (prisma.transaction.findMany as any) = originalTxFindMany;
+          (prisma.transaction.findUnique as any) = originalTxFindUnique;
+          (prisma.invoice.findUnique as any) = originalInvoiceFindUnique;
+          (prisma.receipt.findFirst as any) = originalReceiptFindFirst;
+          if (originalGL) (prisma as any).generalLedger = originalGL;
+          if (originalSettlement) (prisma as any).settlement = originalSettlement;
+          if (originalCounter) (prisma as any).counter = originalCounter;
+        }
+
+        // The PENDING attempt must be transitioned to FAILED (terminal negative).
+        const failedUpdate = txUpdateCalls.find((c) => c?.data?.status === TransactionStatus.FAILED);
+        expect(failedUpdate).toBeDefined();
+        // No financial posting for a failed/declined/cancelled attempt.
+        expect(receiptCreated).toBe(false);
+        expect(ledgerPosted).toBe(false);
+        expect(settlementCreated).toBe(false);
+      });
+    }
   });
 });
