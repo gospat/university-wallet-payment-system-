@@ -272,6 +272,68 @@ jest.mock('../config/database', () => {
           receipt_count: (a: any) => Promise.resolve(receipts.filter((r: any) => r.transactionId === a.where.transactionId).length),
           webhookEvent: { findMany: (a: any) => Promise.resolve(matchWebhookWhere(a).map((r) => ({ ...r }))) },
           auditLog: { create: (a: any) => { audits.push({ id: audits.length + 1, ...a.data }); return Promise.resolve({ id: audits.length }); } },
+          permission: {
+            findMany: (a: any) => {
+              const rows = Object.values(permissions).map((p) => JSON.parse(JSON.stringify(p)));
+              if (a.where?.key?.in) {
+                return Promise.resolve(rows.filter((r: any) => a.where.key.in.includes(r.key)));
+              }
+              return Promise.resolve(rows);
+            },
+          },
+          rolePermission: {
+            findMany: (a: any) => {
+              const list = rolePermissions.map((rp) => JSON.parse(JSON.stringify(rp)));
+              if (a.where?.role) {
+                return Promise.resolve(list.filter((r: any) => r.role === a.where.role));
+              }
+              return Promise.resolve(list);
+            },
+            upsert: async (a: any) => {
+              const role = a.where?.role_permissionId?.role;
+              const pid = a.where?.role_permissionId?.permissionId;
+              const existingIdx = rolePermissions.findIndex((r) => r.role === role && r.permissionId === pid);
+              if (existingIdx < 0) {
+                rolePermissions.push({ role, permissionId: pid });
+              }
+              return Promise.resolve({ role, permissionId: pid });
+            },
+            createMany: async (a: any) => {
+              let inserted = 0;
+              const dataArr: any[] = Array.isArray(a.data) ? a.data : [a.data];
+              const skipDup = !!a.skipDuplicates;
+              for (const row of dataArr) {
+                const dupe = rolePermissions.find((r) => r.role === row.role && r.permissionId === row.permissionId);
+                if (dupe && skipDup) continue;
+                if (!dupe) {
+                  rolePermissions.push({ role: row.role, permissionId: row.permissionId });
+                  inserted += 1;
+                } else if (!skipDup) {
+                  // duplicate without skipDuplicates would throw; simulate by throwing duplicate
+                  // error but caller has fallback; return count with try/catch fallback.
+                  // Keep simple incremented
+                  continue;
+                }
+              }
+              return Promise.resolve({ count: inserted });
+            },
+            create: async (a: any) => Promise.resolve({ ...a.data }),
+          },
+          counter: {
+            findUnique: (a: any) => {
+              const id = a.where?.id;
+              if (id && counters[id]) return Promise.resolve(JSON.parse(JSON.stringify(counters[id])));
+              return Promise.resolve(null);
+            },
+            upsert: (a: any) => {
+              const id = a.where?.id ?? 'receipt_number';
+              if (!counters[id]) counters[id] = { id, value: 1, updatedAt: new Date() };
+              else counters[id].updatedAt = new Date();
+              if (a.update && typeof a.update.value === 'number') counters[id].value = a.update.value;
+              if (a.update?.value && a.update.value?.increment === 1) counters[id].value = Number(counters[id].value ?? 0) + 1;
+              return Promise.resolve(JSON.parse(JSON.stringify(counters[id])));
+            },
+          },
         };
         return fn(txClient);
       }),

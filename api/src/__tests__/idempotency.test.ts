@@ -38,6 +38,12 @@ jest.mock('../config/database', () => ({
   },
 }));
 
+const matchesPendingIn = (whereStatus: any): boolean => {
+  if (whereStatus === TransactionStatus.PENDING) return true;
+  if (typeof whereStatus === 'object' && whereStatus !== null && Array.isArray(whereStatus.in) && whereStatus.in.includes(TransactionStatus.PENDING)) return true;
+  return false;
+};
+
 jest.mock('../services/paystack', () => ({
   __esModule: true,
   PaystackService: {
@@ -155,7 +161,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
   it('[idempotency-425] 2 rapid calls for same invoice — 2nd throws AppError 425 Too Early', async () => {
     (prisma.transaction.findFirst as jest.Mock).mockImplementation((args: any) => {
       const where = args?.where ?? {};
-      if (where.status === TransactionStatus.PENDING && where.invoiceId === 501) {
+      if (matchesPendingIn(where.status) && where.invoiceId === 501) {
         return Promise.resolve(null);
       }
       return Promise.resolve(null);
@@ -167,7 +173,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
 
     (prisma.transaction.findFirst as jest.Mock).mockImplementation((args: any) => {
       const where = args?.where ?? {};
-      if (where.status === TransactionStatus.PENDING && where.invoiceId === 501) {
+      if (matchesPendingIn(where.status) && where.invoiceId === 501) {
         return Promise.resolve({
           id: 9001,
           createdAt: new Date(Date.now() - 60_000),
@@ -185,7 +191,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
   it('[idempotency-reinit] PENDING row older than 5 min — PENDING preserved, 409 block, ZERO terminal FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED writes', async () => {
     (prisma.transaction.findFirst as jest.Mock).mockImplementation((args: any) => {
       const where = args?.where ?? {};
-      if (where.status === TransactionStatus.PENDING && where.invoiceId === 501) {
+      if (matchesPendingIn(where.status) && where.invoiceId === 501) {
         return Promise.resolve({
           id: 9010,
           createdAt: new Date(Date.now() - 10 * 60 * 1000),

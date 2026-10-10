@@ -1,4 +1,4 @@
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import prisma from '../config/database';
 import { bumpRolePermsVersion } from '../middlewares/auth';
 
@@ -234,7 +234,9 @@ export async function seedPermissions() {
     role: Role,
     defaultKeys: string[],
     mode: 'full' | 'diffAdd',
+    tx?: Prisma.TransactionClient,
   ) => {
+    const db: Prisma.TransactionClient | typeof prisma = tx ?? prisma;
     const rowsToCreate: { role: Role; permissionId: number }[] = [];
     for (const key of defaultKeys) {
       const permissionId = keyToIdMap.get(key);
@@ -245,7 +247,7 @@ export async function seedPermissions() {
 
     if (mode === 'full') {
       for (const row of rowsToCreate) {
-        await prisma.rolePermission.upsert({
+        await db.rolePermission.upsert({
           where: { role_permissionId: { role: row.role, permissionId: row.permissionId } },
           create: row,
           update: {},
@@ -259,7 +261,7 @@ export async function seedPermissions() {
     // role-permission customizations (e.g., remove Students VIEW from Bursary)
     // are preserved across upgrades/server-boot seeding runs.
     const existingForRole = new Set<number>();
-    const existingRows = await prisma.rolePermission.findMany({
+    const existingRows = await db.rolePermission.findMany({
       where: { role },
       select: { permissionId: true },
     });
@@ -271,7 +273,7 @@ export async function seedPermissions() {
     // createMany so we don't re-issue individual upsert calls (safe because
     // we've already filtered to rows that don't exist).
     try {
-      const createRes = await prisma.rolePermission.createMany({
+      const createRes = await db.rolePermission.createMany({
         data: missing,
         skipDuplicates: true,
       });
@@ -283,7 +285,7 @@ export async function seedPermissions() {
       let applied = 0;
       for (const row of missing) {
         try {
-          await prisma.rolePermission.create({ data: row });
+          await db.rolePermission.create({ data: row });
           applied += 1;
         } catch { /* duplicate unique key — another seed beat us; skip */ }
       }
@@ -300,34 +302,46 @@ export async function seedPermissions() {
   if (bursaryMode === 'full') {
     // FRESH installation: Bursary has never had a permission row → grant the
     // complete safe Bursary default set.
-    await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode);
-    // Fresh install does not need the one-time sentinel because the admin has
-    // never had a chance to customize anything yet. Still write the sentinel
-    // so subsequent boots that re-enter as existing-install (mode='diffAdd')
-    // do not re-run RELEASE_UPGRADE_KEYS and potentially restore perms that
-    // were later removed by admin after first boot.
+    // F4: atomic grant + sentinel inside a single prisma.$transaction so that
+    // a crash between grant and sentinel cannot leave ambiguous state that
+    // re-grants on the next boot. Counter-not-exist in pre-migration env
+    // rolls back the sentinel write; we fall back to the safe non-atomic
+    // grant-only path (the first boot is not customised yet; the sentinel
+    // write will retry once the 0005 CANCELLED migration creates Counter).
     try {
-      await prisma.counter.upsert({
-        where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
-        create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
-        update: {},
-      });
+      await prisma.$transaction(async (tx) => {
+        await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode, tx);
+        await tx.counter.upsert({
+          where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
+          create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
+          update: {},
+        });
+      }, { timeout: 15000 });
     } catch (e) {
-      // Counter model may not yet exist in DB during pre-migration seed runs.
       const msg = (e as Error)?.message ?? '';
-      if (!(msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist'))) {
-        console.warn('[seedPermissions] Bursary sentinel upsert note:', msg.slice(0, 180));
+      const counterDoesNotExist =
+        msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist');
+      if (counterDoesNotExist) {
+        // Graceful pre-migration first-boot: Counter table not available yet.
+        // Apply defaults (cannot write sentinel — server will retry tx-write
+        // on subsequent boots after the forward-only migration adds Counter).
+        console.warn('[seedPermissions:bursary-full] Counter table not available during pre-migration first boot; wrote full Bursary defaults only (sentinel deferred until counter table exists).');
+        try { await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode); } catch {}
+      } else {
+        console.warn('[seedPermissions:bursary-full] Atomic full-default grant + sentinel transaction failed:', msg.slice(0, 200));
       }
     }
   } else {
     // EXISTING installation: Bursary role has been seeded before and admins
     // may have intentionally removed individual grants (e.g., no student
     // create, no email templates etc).
-    // E2: ONE-TIME upgrade. If the release-upgrade sentinel row EXISTS in
-    // counters, then THIS release has ALREADY applied its delta in a prior
-    // server startup. We MUST NOT run RELEASE_UPGRADE_KEYS again — doing so
-    // would restore permissions (VOID_INVOICES, VOID_TRANSACTIONS) that the
-    // admin intentionally removed after the upgrade.
+    // E2 + F4: ONE-TIME upgrade. First sentinel-findUnique determines if the
+    // delta has already applied in a prior startup. The sentinel check is
+    // fail-safe: unknown DB error → alreadyApplied = true (we NEVER risk
+    // restoring VOID_INVOICES/VOID_TRANSACTIONS when admin removed them).
+    // If not applied: run grant + sentinel upsert in a SINGLE prisma.$transaction
+    // so crash between grant+sentinel cannot leave ambiguous state that
+    // re-adds on every boot. Counter not-exist graceful same as above.
     let alreadyApplied = false;
     try {
       const sentinelRow = await prisma.counter.findUnique({
@@ -344,7 +358,7 @@ export async function seedPermissions() {
       } else {
         // Unknown DB error: fail-safe NO-OP for the delta-add path so we
         // never re-restore admin-removed permissions when unsure.
-        console.warn('[seedPermissions] Bursary sentinel read failed; skipping release-upgrade delta for safety:', msg.slice(0, 180));
+        console.warn('[seedPermissions:bursary-diffAdd] Bursary sentinel read failed; skipping release-upgrade delta for safety:', msg.slice(0, 180));
         alreadyApplied = true;
       }
     }
@@ -354,23 +368,35 @@ export async function seedPermissions() {
       // removed by the BURSARY_EXCLUDED pre-sweep above and are also
       // explicitly excluded from BURSARY_RELEASE_UPGRADE_KEYS via module
       // load-time guard.
-      await safeApplyDefaults(
-        Role.BURSARY,
-        Array.from(BURSARY_RELEASE_UPGRADE_KEYS),
-        bursaryMode,
-      );
-      // Write the sentinel so FUTURE startups NEVER re-run this delta (even
-      // if the admin later removes these keys manually).
+      const deltaKeys = Array.from(BURSARY_RELEASE_UPGRADE_KEYS);
       try {
-        await prisma.counter.upsert({
-          where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
-          create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
-          update: {},
-        });
+        // F4: atomic grant + sentinel write. If anything fails inside: no
+        // partial state — the transaction rolls back entirely so future
+        // startups will re-try the whole operation atomically.
+        await prisma.$transaction(async (tx) => {
+          await safeApplyDefaults(Role.BURSARY, deltaKeys, bursaryMode, tx);
+          await tx.counter.upsert({
+            where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
+            create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
+            update: {},
+          });
+        }, { timeout: 15000 });
       } catch (e) {
         const msg = (e as Error)?.message ?? '';
-        if (!(msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist'))) {
-          console.warn('[seedPermissions] Bursary sentinel write note:', msg.slice(0, 180));
+        const counterDoesNotExist =
+          msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist');
+        if (counterDoesNotExist) {
+          // Pre-migration graceful path: Counter table not yet migrated so
+          // sentinel write is impossible; apply the delta alone (no custom
+          // admin changes can have happened yet in a pre-migration bootstrap
+          // because no runtime is running).
+          console.warn('[seedPermissions:bursary-diffAdd] Counter table missing during pre-migration boot; applied delta defaults (no sentinel; re-tries next startup until counter table exists).');
+          try { await safeApplyDefaults(Role.BURSARY, deltaKeys, bursaryMode); } catch {}
+        } else {
+          // Unknown failure: fail silently; do not leave ambiguous half-applied
+          // state; transaction rolled back automatically; next startup re-attempts
+          // the entire atomic upgrade again.
+          console.warn('[seedPermissions:bursary-diffAdd] Atomic delta grant + sentinel transaction failed; rolled back; will retry on next startup:', msg.slice(0, 200));
         }
       }
     }

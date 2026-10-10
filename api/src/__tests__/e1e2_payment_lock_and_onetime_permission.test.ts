@@ -73,7 +73,10 @@ jest.mock('../config/database', () => {
   const filterTxForWhere = (where: any) => Object.values(txns).filter((t: any) =>
     (!where?.invoiceId || t.invoiceId === where.invoiceId)
     && (!where?.userId || t.userId === where.userId)
-    && (!where?.status || t.status === where.status));
+    && (!where?.status
+      || (typeof where.status === 'string' && t.status === where.status)
+      || (typeof where.status === 'object' && where.status !== null && Array.isArray(where.status.in) && where.status.in.includes(t.status))
+    ));
 
   const buildTxClient = () => ({
     invoice: {
@@ -121,6 +124,30 @@ jest.mock('../config/database', () => {
     },
     rolePermission: {
       findMany: (a: any) => Promise.resolve(rolePermissions.filter((rp) => !a.where?.role || rp.role === a.where.role).map((r) => ({ ...r }))),
+      upsert: async (a: any) => {
+        const role = a.where?.role_permissionId?.role;
+        const pid = a.where?.role_permissionId?.permissionId;
+        const existingIdx = rolePermissions.findIndex((r) => r.role === role && r.permissionId === pid);
+        if (existingIdx < 0) {
+          rolePermissions.push({ role, permissionId: pid });
+        }
+        return Promise.resolve({ role, permissionId: pid });
+      },
+      createMany: async (a: any) => {
+        let inserted = 0;
+        const dataArr: any[] = Array.isArray(a.data) ? a.data : [a.data];
+        const skipDup = !!a.skipDuplicates;
+        for (const row of dataArr) {
+          const dupe = rolePermissions.find((r) => r.role === row.role && r.permissionId === row.permissionId);
+          if (dupe && skipDup) continue;
+          if (!dupe) {
+            rolePermissions.push({ role: row.role, permissionId: row.permissionId });
+            inserted += 1;
+          }
+        }
+        return Promise.resolve({ count: inserted });
+      },
+      create: async (a: any) => Promise.resolve({ ...a.data }),
     },
   });
 
@@ -410,17 +437,22 @@ describe('E1 Recalculate payment amounts + pending recheck UNDER database lock',
       amountDue: new Decimal(40_000), amountPaid: new Decimal(0),
       status: InvoiceStatus.UNPAID, feeId: 3,
     });
+    const matchesPendingStatus = (whereStatus: any): boolean => {
+      if (whereStatus === TransactionStatus.PENDING) return true;
+      if (typeof whereStatus === 'object' && whereStatus !== null && Array.isArray(whereStatus.in) && whereStatus.in.includes(TransactionStatus.PENDING)) return true;
+      return false;
+    };
     const original$transaction = (prisma as any).$transaction;
     let injected = false;
     (prisma as any).$transaction = jest.fn(async (fn: any) => original$transaction(async (txClient: any) => {
       const origCount = txClient.transaction.count;
       const origFindFirst = txClient.transaction.findFirst;
       txClient.transaction.count = async (a: any) => {
-        if (!injected && a?.where?.invoiceId === 82103 && a.where.status === TransactionStatus.PENDING) return Promise.resolve(1);
+        if (!injected && a?.where?.invoiceId === 82103 && matchesPendingStatus(a.where.status)) return Promise.resolve(1);
         return origCount(a);
       };
       txClient.transaction.findFirst = async (a: any) => {
-        if (!injected && a?.where?.invoiceId === 82103 && a.where.status === TransactionStatus.PENDING) {
+        if (!injected && a?.where?.invoiceId === 82103 && matchesPendingStatus(a.where.status)) {
           injected = true;
           return Promise.resolve({
             id: 999999, createdAt: new Date(Date.now() - 30_000), status: TransactionStatus.PENDING,

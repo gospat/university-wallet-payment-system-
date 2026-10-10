@@ -361,7 +361,7 @@ export class PaymentService {
   let invOpLockToken: string | null = null;
   try {
 
-    // Pre-lock sanity check — run the pending-age policy BEFORE acquiring the
+    // Pre-lock sanity check — run the unresolved-age policy BEFORE acquiring the
     // invoice operational lock so the 425/409 responses return without a lock
     // contention. HOWEVER: because this check is OUTSIDE the database row
     // lock and outside the invoice operational lock it is NOT authoritative
@@ -369,12 +369,13 @@ export class PaymentService {
     // locked prisma.$transaction below.
     {
       const FIVE_MINUTES_MS = 5 * 60 * 1000;
-      const MAX_UNRESOLVED_PENDING_PER_INVOICE = 2;
+      const MAX_UNRESOLVED_PER_INVOICE = 2;
+      const UNRESOLVED: TransactionStatus[] = [TransactionStatus.PENDING, TransactionStatus.PROCESSING];
       const [existingPending, pendingCount] = await Promise.all([
         prisma.transaction.findFirst({
           where: {
             invoiceId: inv.id,
-            status: TransactionStatus.PENDING,
+            status: { in: UNRESOLVED },
             userId: studentId,
           },
           orderBy: { createdAt: 'desc' },
@@ -383,7 +384,7 @@ export class PaymentService {
         prisma.transaction.count({
           where: {
             invoiceId: inv.id,
-            status: TransactionStatus.PENDING,
+            status: { in: UNRESOLVED },
             userId: studentId,
           },
         }),
@@ -399,7 +400,7 @@ export class PaymentService {
       } catch {
         /* best-effort release */
       }
-      if (pendingCount >= MAX_UNRESOLVED_PENDING_PER_INVOICE) {
+      if (pendingCount >= MAX_UNRESOLVED_PER_INVOICE) {
         throw new AppError(
           'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
           409,
@@ -439,8 +440,8 @@ export class PaymentService {
 
     // Invoice-level operational lock: serializes the mutation phase against
     // cancelInvoice/cancelTransaction (SC6 safety).
-    const invOpLock = await acquireInvoiceOperationLock(inv.id, 8_000);
-    let invOpLockToken: string | null = null;
+    invOpLock = await acquireInvoiceOperationLock(inv.id, 8_000);
+    invOpLockToken = null;
     if (invOpLock.ok) {
       invOpLockToken = invOpLock.token;
     }
@@ -534,12 +535,13 @@ export class PaymentService {
       // lock — whichever transaction commits second will see the first
       // transaction's PENDING row in this re-count and block appropriately.
       const FIVE_MINUTES_MS_RECHECK = 5 * 60 * 1000;
-      const MAX_UNRESOLVED_PENDING_PER_INVOICE_RECHECK = 2;
+      const MAX_UNRESOLVED_PER_INVOICE_RECHECK = 2;
+      const UNRESOLVED_RECHECK: TransactionStatus[] = [TransactionStatus.PENDING, TransactionStatus.PROCESSING];
       const [pendingRelock, pendingCountRelock] = await Promise.all([
         tx.transaction.findFirst({
           where: {
             invoiceId: inv.id,
-            status: TransactionStatus.PENDING,
+            status: { in: UNRESOLVED_RECHECK },
             userId: studentId,
           },
           orderBy: { createdAt: 'desc' },
@@ -548,12 +550,12 @@ export class PaymentService {
         tx.transaction.count({
           where: {
             invoiceId: inv.id,
-            status: TransactionStatus.PENDING,
+            status: { in: UNRESOLVED_RECHECK },
             userId: studentId,
           },
         }),
       ]);
-      if (pendingCountRelock >= MAX_UNRESOLVED_PENDING_PER_INVOICE_RECHECK) {
+      if (pendingCountRelock >= MAX_UNRESOLVED_PER_INVOICE_RECHECK) {
         throw new AppError(
           'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
           409,
@@ -873,11 +875,18 @@ export class PaymentService {
             ttlMs: invOpLock.ok ? invOpLock.ttlMs : undefined,
             opName: 'initiatePayment',
           });
-        } catch {
-          // Best-effort release. If this path errors, TTL will auto-expire
-          // key safely, and compare-and-delete ensures we never delete
-          // another caller's lock.
-          void releaseInvoiceOperationLock(inv.id).catch(() => {});
+        } catch (err) {
+          // If safe CAS-token release fails, we MUST NOT perform an ownerless
+          // delete of the lock because another caller may have legitimately
+          // re-acquired it after our TTL expired. Instead log and allow TTL
+          // to auto-expire. This preserves the invariant that a delayed
+          // releaser never removes a new owner's lock.
+          console.warn(
+            '[payment.ts:initiatePayment] Safe CAS release invoice lock failed for invId='
+              + String(inv.id)
+              + '; allowing TTL auto-expiry (ownerless release intentionally skipped). Details: '
+              + String((err as Error)?.message ?? err).slice(0, 160),
+          );
         }
       }
     }

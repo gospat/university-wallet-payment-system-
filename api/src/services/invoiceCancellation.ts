@@ -324,8 +324,16 @@ export class InvoiceCancellationService {
           ttlMs: invoiceLock.ok ? invoiceLock.ttlMs : undefined,
           opName: 'cancelInvoice',
         });
-      } catch {
-        void releaseInvoiceOperationLock(invoiceId).catch(() => {});
+      } catch (err) {
+        // CAS token release failed; never perform ownerless lock deletion
+        // because a later caller may now legitimately own the lock after
+        // our TTL expired. Warn and allow TTL auto-expiry.
+        console.warn(
+          '[invoiceCancellation.ts:cancelInvoice] Safe CAS invoice lock release failed for invId='
+            + String(invoiceId)
+            + '; allowing TTL auto-expiry (ownerless release intentionally skipped). Details: '
+            + String((err as Error)?.message ?? err).slice(0, 160),
+        );
       }
     }
   }
