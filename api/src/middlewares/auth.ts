@@ -5,6 +5,7 @@ import prisma from '../config/database';
 import { Role, AccountStatus } from '@prisma/client';
 import { catchAsync } from '../utils/catchAsync';
 import { i18n } from '../i18n/en';
+import { PERMISSION_DEFS } from '../services/permissionSeed';
 
 declare global {
   namespace Express {
@@ -104,8 +105,10 @@ export const protect = catchAsync(
       : [];
 
     const role = currentUser.role as Role;
-    let effectivePermissions: string[] = decodedPermissions;
-    if (role !== Role.ADMIN) {
+    let effectivePermissions: string[];
+    if (role === Role.ADMIN) {
+      effectivePermissions = PERMISSION_DEFS.map((p) => p.key);
+    } else {
       effectivePermissions = await resolveRolePermissionsLive(role, decodedPermissions);
     }
 

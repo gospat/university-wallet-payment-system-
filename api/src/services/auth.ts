@@ -30,9 +30,9 @@ const getRefreshSecret = (): string => {
   return process.env.JWT_REFRESH_SECRET as string;
 };
 
-const signAccessToken = (id: number, role: Role, permissions: string[]) => {
+const signAccessToken = (id: number, role: Role) => {
   return jwt.sign(
-    { id, role, permissions, type: 'access' },
+    { id, role, type: 'access' },
     process.env.JWT_SECRET as string,
     { expiresIn: ACCESS_EXPIRES_IN as any, algorithm: 'HS256' }
   );
@@ -77,11 +77,10 @@ export class AuthService {
   private static async buildTokensForUser(
     userId: number,
     role: Role,
-    permissions: string[],
     ipAddress?: string,
     userAgent?: string
   ): Promise<{ accessToken: string; refreshToken: string; expiresInMs: number }> {
-    const accessToken = signAccessToken(userId, role, permissions);
+    const accessToken = signAccessToken(userId, role);
     const { refreshJWT } = await AuthService.generateRefreshToken(userId, ipAddress, userAgent);
     return {
       accessToken,
@@ -178,7 +177,7 @@ export class AuthService {
         },
       });
 
-      const newAccessToken = signAccessToken(user.id, user.role, permissions);
+      const newAccessToken = signAccessToken(user.id, user.role);
       const newRefreshJWT = signRefreshToken(user.id, newTokenHex);
 
       return { newAccessToken, newRefreshJWT };
@@ -319,7 +318,7 @@ export class AuthService {
       return newUser;
     });
 
-    const tokens = await AuthService.buildTokensForUser(result.id, result.role, []);
+    const tokens = await AuthService.buildTokensForUser(result.id, result.role);
 
     return {
       user: result,
@@ -500,7 +499,7 @@ export class AuthService {
       })
       .catch(() => {});
 
-    const tokens = await AuthService.buildTokensForUser(user.id, user.role, permissions, ipAddress, userAgent);
+    const tokens = await AuthService.buildTokensForUser(user.id, user.role, ipAddress, userAgent);
 
     return {
       user: { ...user, permissions },
