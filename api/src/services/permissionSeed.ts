@@ -113,9 +113,39 @@ const BURSARY_EXCLUDED = new Set<string>([
   ...Array.from(ADMIN_ONLY_SENSITIVE_KEYS),
 ]);
 
-const BURSARY_PERMISSION_KEYS = ALL_PERMISSION_KEYS.filter(
+export const BURSARY_PERMISSION_KEYS = ALL_PERMISSION_KEYS.filter(
   (k) => !BURSARY_EXCLUDED.has(k),
 );
+
+// Explicit release-upgrade delta applied to EXISTING Bursary roles during
+// upgrade (diffAdd mode). This set intentionally enumerates ONLY the NEW
+// cancellation permissions introduced by this release. It MUST NOT be replaced
+// with the full BURSARY_PERMISSION_KEYS array — that would re-grant every
+// default permission that an administrator had deliberately removed on an
+// existing installation. Fresh installations still receive the full
+// BURSARY_PERMISSION_KEYS safe default set via mode='full'.
+export const BURSARY_RELEASE_UPGRADE_KEYS: readonly string[] = [
+  'VOID_INVOICES',
+  'VOID_TRANSACTIONS',
+];
+// Guard: release-upgrade keys must never contain ADMIN-ONLY sensitive keys.
+for (const k of BURSARY_RELEASE_UPGRADE_KEYS) {
+  if (ADMIN_ONLY_SENSITIVE_KEYS.has(k)) {
+    // Fail loudly at module load time on the extremely off-chance a future
+    // editor accidentally lists an admin-only key here.
+    throw new Error(
+      `[permissionSeed] BURSARY_RELEASE_UPGRADE_KEYS must not include admin-only key: ${k}`,
+    );
+  }
+}
+// Guard: release-upgrade keys must be a subset of safe Bursary defaults.
+for (const k of BURSARY_RELEASE_UPGRADE_KEYS) {
+  if (!BURSARY_PERMISSION_KEYS.includes(k)) {
+    throw new Error(
+      `[permissionSeed] BURSARY_RELEASE_UPGRADE_KEYS lists non-Bursary-default key: ${k}`,
+    );
+  }
+}
 
 export async function seedPermissions() {
   // === Pre-sweep: DELETE any BURSARY RolePermission rows for keys in BURSARY_EXCLUDED
@@ -255,7 +285,25 @@ export async function seedPermissions() {
 
   const bursaryCount = existingCountByRole.get(Role.BURSARY) ?? 0;
   const bursaryMode: 'full' | 'diffAdd' = bursaryCount === 0 ? 'full' : 'diffAdd';
-  await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode);
+  if (bursaryMode === 'full') {
+    // FRESH installation: Bursary has never had a permission row → grant the
+    // complete safe Bursary default set.
+    await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode);
+  } else {
+    // EXISTING installation: Bursary role has been seeded before and admins
+    // may have intentionally removed individual grants (e.g., no student
+    // create, no email templates etc). Do NOT re-populate every missing
+    // default key — only delta-add the newly introduced cancellation
+    // permissions that THIS release must grant. Admin-only sensitive keys
+    // continue to be removed by the BURSARY_EXCLUDED pre-sweep above and are
+    // also explicitly excluded from BURSARY_RELEASE_UPGRADE_KEYS via module
+    // load-time guard.
+    await safeApplyDefaults(
+      Role.BURSARY,
+      Array.from(BURSARY_RELEASE_UPGRADE_KEYS),
+      bursaryMode,
+    );
+  }
 
   // Expose applied statistics for diagnostics (no logging secrets — only counts).
   try {

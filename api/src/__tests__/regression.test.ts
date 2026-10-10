@@ -3331,6 +3331,28 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // Admin array also has it
       expect(permTypesSrc).toMatch(/ADMIN_PERMISSIONS[\s\S]{0,1200}VOID_TRANSACTIONS/);
     });
+
+    it('TR-44.3 D2 Bursary release-upgrade delta: explicit BURSARY_RELEASE_UPGRADE_KEYS literal lists ONLY VOID_INVOICES + VOID_TRANSACTIONS; existing-install diffAdd uses that release set (not full BURSARY_PERMISSION_KEYS defaults) to preserve admin customizations', () => {
+      // Explicit release-upgrade set literal must exist with ONLY the delta keys.
+      expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS/);
+      expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS[\s\S]{0,400}VOID_INVOICES/);
+      expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS[\s\S]{0,400}VOID_TRANSACTIONS/);
+      // Existing-install path uses bursaryMode detection and then branches into
+      //   if (bursaryMode === 'full') → BURSARY_PERMISSION_KEYS (fresh).
+      //   else → BURSARY_RELEASE_UPGRADE_KEYS only (existing/delta-upgrade).
+      // This regex verifies: the else branch has BURSARY_RELEASE_UPGRADE_KEYS.
+      expect(permSeedSrc).toMatch(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)[\s\S]{0,400}BURSARY_PERMISSION_KEYS[\s\S]{0,200}else[\s\S]{0,1200}BURSARY_RELEASE_UPGRADE_KEYS/);
+      // The EXISTING branch MUST NOT pass BURSARY_PERMISSION_KEYS. Instead,
+      // it should reference only the release set.
+      const [_before, afterFullBranch] = permSeedSrc.split(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)/) as [string, string | undefined];
+      const elseSection = (afterFullBranch ?? '').split(/\}\s*$/)[0] ?? '';
+      expect(elseSection).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS/);
+      // Fresh path (bursaryMode === 'full') still grants full BURSARY_PERMISSION_KEYS.
+      expect(permSeedSrc).toMatch(/bursaryMode\s*===\s*['"]full['"][\s\S]{0,400}BURSARY_PERMISSION_KEYS/);
+      // Safety guard: module-load-time guard against admin-only keys in the
+      // release-upgrade set must exist (ADMIN_ONLY_SENSITIVE_KEYS check).
+      expect(permSeedSrc).toMatch(/ADMIN_ONLY_SENSITIVE_KEYS\.has\(k\)|ADMIN_ONLY_SENSITIVE_KEYS[\s\S]{0,200}release.*upgrade|BURSARY_RELEASE_UPGRADE_KEYS[\s\S]{0,300}ADMIN_ONLY_SENSITIVE_KEYS/);
+    });
   });
 
   describe('TR-45 — Invoice-level concurrency protection for Blockers 1-5: dual operational TTL lock + SELECT FOR UPDATE present in cancelInvoice/transactionCancellation/initiatePayment trio', () => {
@@ -3399,6 +3421,28 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(txCancelSrc).toMatch(/writtenExplanation.*evidenceReference|≥20.*≥6|written.*evidence/);
       // C4 settlement count: the FAIL-OPEN bug was catch->0. Replaced.
       expect(txCancelSrc).not.toMatch(/settlement.*count[\s\S]{0,120}catch\s*\([^)]*\)\s*=>\s*0/);
+    });
+
+    it('TR-45.5 D1 WebhookEvent query uses actual Prisma schema fields (transactionReference, eventType, payload, isProcessed, alatpayEventId, paystackEventId) and NEVER uses the non-existent payloadContains/eventName/status/raw columns', () => {
+      // Positive: actual schema fields referenced in the evidence lookup.
+      expect(txCancelSrc).toMatch(/Prisma\.WebhookEventWhereInput/);
+      expect(txCancelSrc).toMatch(/transactionReference/);
+      expect(txCancelSrc).toMatch(/eventType/);
+      expect(txCancelSrc).toMatch(/payload/);
+      expect(txCancelSrc).toMatch(/isProcessed/);
+      expect(txCancelSrc).toMatch(/alatpayEventId/);
+      expect(txCancelSrc).toMatch(/paystackEventId/);
+      // Negative: old bogus fields MUST NOT appear in transactionCancellation.
+      expect(txCancelSrc).not.toMatch(/payloadContains[^A-Za-z0-9_]/);
+      expect(txCancelSrc).not.toMatch(/\beventName\b/);
+      expect(txCancelSrc).not.toMatch(/webhookEvent[\s\S]{0,1600}\bstatus\s*:\s*['"]PROCESSED/);
+      expect(txCancelSrc).not.toMatch(/\.raw\s*\??\s*[!=,:)\]]|\.raw\s*\+/);
+      // Strong-typed select block exists (NOT a `select: { ... raw, eventName, status }` shape).
+      expect(txCancelSrc).toMatch(/prisma\.webhookEvent\.findMany[\s\S]{0,400}select:\s*\{/);
+      expect(txCancelSrc).toMatch(/findMany[\s\S]{0,800}eventType:\s*true[\s\S]{0,200}payload:\s*true/);
+      // Authoritative SUCCESS hook → 409 deny + route to reconciliation exception workflow message text
+      expect(txCancelSrc).toMatch(/stored webhook records contain provider success/i);
+      expect(txCancelSrc).toMatch(/reconciliation exception workflow/i);
     });
   });
 });

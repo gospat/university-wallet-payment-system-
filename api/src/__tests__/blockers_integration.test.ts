@@ -296,7 +296,7 @@ jest.mock('../config/database', () => {
       webhookEvent: {
         create: jest.fn((args: any) => {
           const id = nextWebhookId++;
-          const row = { id, createdAt: new Date(), ...args.data };
+          const row = { id, createdAt: new Date(), isProcessed: false, attempts: 0, processedAt: null, lastError: null, ...args.data };
           webhookEvents.push(row);
           return Promise.resolve(row);
         }),
@@ -305,12 +305,28 @@ jest.mock('../config/database', () => {
           const ors = (args.where?.OR ?? []) as any[];
           if (ors.length > 0) {
             rows = rows.filter((h) => ors.some((orClause) => {
-              return Object.entries(orClause).every(([k, v]) => {
+              return Object.entries(orClause).every(([k, clause]) => {
+                // Match actual Prisma filter operators: { equals: X }, plus
+                // legacy raw-kv match for backward compat.
+                const expected = clause && typeof clause === 'object' && 'equals' in clause
+                  ? (clause as any).equals
+                  : clause;
+                const keyVal = (h as any)[k];
+                // payloadContains NEVER existed on the real WebhookEvent
+                // Prisma schema; kept here only as a secondary in-memory
+                // substring scan on payload/text columns if a test
+                // accidentally passes it.
                 if (k === 'payloadContains') {
-                  const blob = [typeof h.raw === 'string' ? h.raw : JSON.stringify(h.raw ?? ''), String(h.alatpayEventId ?? ''), String(h.paystackEventId ?? ''), String(h.eventName ?? '')].join(' ');
-                  return blob.includes(String(v));
+                  const blob = [
+                    typeof h.payload === 'string' ? h.payload : JSON.stringify(h.payload ?? ''),
+                    String(h.alatpayEventId ?? ''),
+                    String(h.paystackEventId ?? ''),
+                    String(h.eventType ?? ''),
+                    h.lastError ?? '',
+                  ].join(' ');
+                  return blob.includes(String(expected));
                 }
-                return String((h as any)[k] ?? '') === String(v);
+                return String(keyVal ?? '') === String(expected);
               });
             }));
           }
@@ -468,12 +484,22 @@ jest.mock('../config/database', () => {
               const ors = (a.where?.OR ?? []) as any[];
               if (ors.length > 0) {
                 rows = rows.filter((h) => ors.some((orClause) => {
-                  return Object.entries(orClause).every(([k, v]) => {
+                  return Object.entries(orClause).every(([k, clause]) => {
+                    const expected = clause && typeof clause === 'object' && 'equals' in clause
+                      ? (clause as any).equals
+                      : clause;
+                    const keyVal = (h as any)[k];
                     if (k === 'payloadContains') {
-                      const blob = [typeof h.raw === 'string' ? h.raw : JSON.stringify(h.raw ?? ''), String(h.alatpayEventId ?? ''), String(h.paystackEventId ?? ''), String(h.eventName ?? '')].join(' ');
-                      return blob.includes(String(v));
+                      const blob = [
+                        typeof h.payload === 'string' ? h.payload : JSON.stringify(h.payload ?? ''),
+                        String(h.alatpayEventId ?? ''),
+                        String(h.paystackEventId ?? ''),
+                        String(h.eventType ?? ''),
+                        h.lastError ?? '',
+                      ].join(' ');
+                      return blob.includes(String(expected));
                     }
-                    return String((h as any)[k] ?? '') === String(v);
+                    return String(keyVal ?? '') === String(expected);
                   });
                 }));
               }
@@ -518,7 +544,20 @@ jest.mock('../config/database', () => {
         },
         seedWebhookEvent: (row: any) => {
           const id = row.id ?? nextWebhookId++;
-          const hook = { id, createdAt: new Date(), status: 'PROCESSED', eventName: 'generic', raw: '', ...row };
+          const hook = {
+            id,
+            createdAt: new Date(),
+            isProcessed: false,
+            attempts: 0,
+            processedAt: null,
+            lastError: null,
+            eventType: 'charge.unknown',
+            transactionReference: null,
+            payload: {},
+            paystackEventId: null,
+            alatpayEventId: null,
+            ...row,
+          };
           webhookEvents.push(hook);
           return hook;
         },

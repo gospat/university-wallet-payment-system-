@@ -274,48 +274,164 @@ export class TransactionCancellationService {
         );
       }
 
-      // Precheck 5B: Webhook event evidence.
+      // Precheck 5B: Webhook event evidence (strongly typed Prisma query, no any cast).
       // If a stored webhook event already contains SUCCESS evidence for this
-      // transaction (provider status = success/completed/paid), cancellation
-      // must be denied outright. Even non-success raw hooks count as audit
-      // evidence — require documented written+evidence to proceed (but allow
-      // with the documentation — unlike SUCCESS hooks which are denied.)
-      let webhookEvidence: { total: number; successHooks: number; pendingHooks: number };
+      // transaction (provider status = success/completed/paid via eventType or
+      // payload), cancellation must be denied outright → reconciliation.
+      // Non-terminal webhooks (eventType=charge.unknown, PENDING/PROCESSING
+      // status inside payload, isProcessed=false without success evidence)
+      // count as unverifiable audit trail → trigger the written+evidence gate
+      // but do not outright deny.
+      // Correlation paths (disjunction per OR clause):
+      //   1. transactionReference matches initialTx.reference
+      //   2. alatpayEventId matches initialTx.alatpayFinalTransactionId / initRef
+      //   3. paystackEventId → exact match against *event id* only when we have
+      //      one stored; otherwise fall back to JSON payload inspection below
+      // Payload text-scan (case-insensitive substring) is SAFE secondary check
+      // because: (a) we already correlate on refs first, (b) we only block
+      // cancellation when we see SUCCESS evidence (never auto-fail an attempt).
+      type WebhookEvidenceSummary = {
+        total: number;
+        successHooks: number;
+        pendingHooks: number;
+      };
+      const SUCCESS_TOKENS = /success|completed|paid|successful/i;
+      const PENDING_TOKENS = /pending|processing|received|queued|initiated/i;
+      let webhookEvidence: WebhookEvidenceSummary = { total: 0, successHooks: 0, pendingHooks: 0 };
       try {
-        const ref = initialTx.reference ?? null;
-        const paystackRef = (initialTx as any).paystackReference ?? null;
-        const alatpayInitRef = (initialTx as any).alatpayInitPaymentReference ?? null;
-        const alatpayFinalRef = (initialTx as any).alatpayFinalTransactionId ?? null;
-        const whereOr: any[] = [];
-        if (typeof (prisma as any).webhookEvent?.findMany === 'function') {
-          if (ref != null) whereOr.push({ payloadContains: String(ref) });
-          if (paystackRef != null) whereOr.push({ paystackEventId: String(paystackRef) });
-          if (alatpayInitRef != null) whereOr.push({ payloadContains: String(alatpayInitRef) });
-          if (alatpayFinalRef != null) whereOr.push({ alatpayEventId: String(alatpayFinalRef) });
-          const hooks = whereOr.length > 0
-            ? await (prisma as any).webhookEvent.findMany({
-                where: { OR: whereOr },
-                take: 25,
-                select: { id: true, alatpayEventId: true, paystackEventId: true, eventName: true, status: true, raw: true },
-              })
-            : [];
-          let s = 0; let p = 0;
+        const ref = initialTx.reference ? String(initialTx.reference) : null;
+        const paystackTxRef =
+          typeof (initialTx as any).paystackReference === 'string' ? String((initialTx as any).paystackReference) : null;
+        const alatpayInitRef =
+          typeof (initialTx as any).alatpayInitPaymentReference === 'string'
+            ? String((initialTx as any).alatpayInitPaymentReference)
+            : null;
+        const alatpayFinalRef =
+          typeof initialTx.alatpayFinalTransactionId === 'string'
+            ? String(initialTx.alatpayFinalTransactionId)
+            : null;
+
+        // Build a type-safe where-clause.
+        // Note: paystackEventId in the schema is the WEBHOOK event id, which
+        // is distinct from a tx's paystackReference (the tx init reference).
+        // So we only use alatpayEventId here (alatpay event id matches the
+        // final tx UUID because alatpay webhook uses alatpayEventId = that UUID).
+        // For reference-matching we rely on transactionReference column and
+        // a safe JSON-string payload scan (for secondary verification).
+        const whereOrList: Prisma.WebhookEventWhereInput['OR'] = [];
+        if (ref != null) {
+          whereOrList.push({ transactionReference: { equals: ref } });
+        }
+        if (alatpayFinalRef != null) {
+          whereOrList.push({ alatpayEventId: { equals: alatpayFinalRef } });
+        }
+        // Initial alatpay init reference is the OrderId/Customer.TransactionId
+        // stored on the tx; webhook ingestion stores that into transactionReference
+        // already, but we also allow a direct alatpayEventId match if init ref
+        // was ever promoted to an event id in a prior-version ingestion.
+        if (alatpayInitRef != null && alatpayInitRef.length >= 6) {
+          whereOrList.push({ transactionReference: { equals: alatpayInitRef } });
+        }
+        // If we have no where-clause at all (tx has no refs at all), skip the
+        // DB call (there is nothing to correlate). Still fail-closed via
+        // pendingHooks += 1 because we cannot verify webhook evidence.
+        if (whereOrList.length === 0) {
+          webhookEvidence = { total: -1, successHooks: 0, pendingHooks: 1 };
+        } else {
+          type WebhookRowForEvidence = Pick<
+            (typeof prisma.webhookEvent) extends {
+              findMany: (arg: infer _A) => Promise<infer R>;
+            }
+              ? R extends (infer Elem)[]
+                ? Elem
+                : never
+              : never,
+            never
+          >;
+          const rows = await prisma.webhookEvent.findMany({
+            where: { OR: whereOrList },
+            orderBy: { createdAt: 'desc' },
+            take: 25,
+            select: {
+              id: true,
+              eventType: true,
+              transactionReference: true,
+              alatpayEventId: true,
+              paystackEventId: true,
+              payload: true,
+              isProcessed: true,
+              lastError: true,
+              attempts: true,
+              createdAt: true,
+            },
+          });
+          const hooks = rows as unknown as Array<{
+            id: number;
+            eventType: string;
+            transactionReference: string | null;
+            alatpayEventId: string | null;
+            paystackEventId: string | null;
+            payload: unknown;
+            isProcessed: boolean;
+            lastError: string | null;
+            attempts: number;
+            createdAt: Date;
+          }>;
+          let s = 0;
+          let p = 0;
+          // Optional SECONDARY scan: if tx has refs that don't match
+          // transactionReference (rare legacy ingests where webhook row was
+          // written with null transactionReference), do a JSON substring
+          // search against the payload TEXT of already-matched rows.
+          const additionalLookups: string[] = [];
+          if (paystackTxRef != null && paystackTxRef.length >= 6) additionalLookups.push(paystackTxRef);
+          if (alatpayInitRef != null && alatpayInitRef.length >= 6) additionalLookups.push(alatpayInitRef);
+          const hasSecondary = additionalLookups.length > 0;
           for (const h of hooks) {
-            const s1 = [h.status, h.eventName, typeof h.raw === 'string' ? h.raw : JSON.stringify(h.raw ?? '')]
-              .join(' ')
-              .toLowerCase();
-            if (/success|completed|paid|successful/i.test(s1)) s += 1;
-            else if (/pending|processing|received|queued/i.test(s1)) p += 1;
+            // Build a normalized combined text for evidence scanning:
+            //  eventType + (payload as JSON/text) + lastError
+            const payloadText =
+              typeof h.payload === 'string'
+                ? h.payload
+                : h.payload && typeof h.payload === 'object'
+                  ? JSON.stringify(h.payload)
+                  : '';
+            const combined = [h.eventType, payloadText, h.lastError ?? ''].join('\n').toLowerCase();
+            // Also enforce payload contains tx refs for secondary correlation.
+            let correlated = true;
+            if (hasSecondary && h.transactionReference == null) {
+              // Row has no stored transactionReference — this can happen for
+              // legacy or malformed ingests. Require that at least one of our
+              // known tx refs actually APPEAR in the payload text, otherwise
+              // this webhook row is "unrelated" and must not count.
+              correlated = additionalLookups.some((lookup) => payloadText.includes(lookup));
+            }
+            if (!correlated) continue;
+            // Classify
+            const eventTypeTerminalSuccess = h.eventType === 'charge.success';
+            const tokenSuccess = SUCCESS_TOKENS.test(combined);
+            const terminalSuccess = eventTypeTerminalSuccess || tokenSuccess;
+            if (terminalSuccess) {
+              s += 1;
+              continue;
+            }
+            // Pending / unverifiable classification:
+            //   eventType = charge.unknown OR payload has pending/processing/
+            //   received/queued OR (not success AND NOT explicitly charge.failed
+            //   AND NOT isProcessed)
+            const explicitFailed = h.eventType === 'charge.failed' || /failed|declined|rejected|expired|cancelled/i.test(h.eventType);
+            const pendingByEventType = h.eventType === 'charge.unknown' || PENDING_TOKENS.test(h.eventType);
+            const pendingByPayload = PENDING_TOKENS.test(combined);
+            const pendingByState = !explicitFailed && !h.isProcessed && h.attempts < 10;
+            if (pendingByEventType || pendingByPayload || pendingByState) {
+              p += 1;
+            }
           }
           webhookEvidence = { total: hooks.length, successHooks: s, pendingHooks: p };
-        } else {
-          // WebhookEvent model missing in this DB version → cannot verify.
-          // Fail CLOSED: set an explicit "unverifiable" sentinel — but do not
-          // outright block if caller provides strong documentation. Treat as
-          // hasPendingEvidence=true (requires written+evidence per next block).
-          webhookEvidence = { total: -1, successHooks: 0, pendingHooks: 1 };
         }
       } catch (err: any) {
+        // FAIL CLOSED: any Prisma validation / DB transport error → 500 so
+        // caller retries; we never silently interpret evidence as "zero hooks".
         const msg = (err && typeof err.message === 'string') ? err.message : String(err);
         throw new AppError(
           `Unable to inspect webhook evidence for transaction ${transactionId} before cancellation (${msg.slice(0, 120)}). Please try again.`,
