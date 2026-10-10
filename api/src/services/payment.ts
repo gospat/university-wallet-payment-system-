@@ -36,6 +36,7 @@ import { parseAlatpayCustomerMetadata, makeAlatpayWebhookJobId, isBullmqSafeJobI
 import { getRedis } from '../config/redis';
 import {
   acquireInvoiceOperationLock,
+  releaseInvoiceOperationLockByToken,
   releaseInvoiceOperationLock,
 } from '../utils/invoiceLock';
 
@@ -358,6 +359,8 @@ export class PaymentService {
     let dedupeLockReleased = false;
     let opLockReleased = false;
     let txRow: any = null;
+    let invOpLock: any = null;
+    let invOpLockToken: string | null = null;
     try {
 
     // A5.1 Idempotency guard (FR-A7): check for recent PENDING rows on this invoice
@@ -485,8 +488,12 @@ export class PaymentService {
     // (amount calculation → PENDING row creation → provider.initialize →
     // Transaction update) against cancelInvoice/cancelTransaction so the
     // SC6 race safety holds.
-    const invOpLockOk = await acquireInvoiceOperationLock(inv.id, 8_000);
-    if (!invOpLockOk) {
+    const invOpLock = await acquireInvoiceOperationLock(inv.id, 8_000);
+    let invOpLockToken: string | null = null;
+    if (invOpLock.ok) {
+      invOpLockToken = invOpLock.token;
+    }
+    if (!invOpLock.ok) {
       throw new AppError(
         'Another operation (invoice cancellation, reconciliation, or payment) is in progress for this invoice. Please wait a moment and try again.',
         429,
@@ -512,9 +519,30 @@ export class PaymentService {
   txRow = await prisma.$transaction(async (tx) => {
       if (process.env.NODE_ENV !== 'test') {
         try {
-          await tx.$executeRawUnsafe('SELECT id FROM invoices WHERE id = ? FOR UPDATE;', [inv.id]);
-        } catch {
-          /* swallow */
+          // Acquire an InnoDB row lock for the invoice row BEFORE any status
+          // reads or writes. $executeRawUnsafe with the parameter-binding
+          // overload (sql string + positional bindings array) sends the id
+          // through MySQL2 prepared-statement parameterization → safe.
+          const boundInvoiceId: number = Number(inv.id);
+          const lockRes: any = await tx.$executeRawUnsafe(
+            'SELECT id FROM invoices WHERE id = ? FOR UPDATE',
+            boundInvoiceId,
+          );
+          // $executeRaw returns affectedRows count numeric for MySQL.
+          // SELECT ... FOR UPDATE in MySQL returns `affectedRows = 0` when
+          // the SELECT returns row set (it's a read). Use a best-effort check;
+          // the invRelock findUnique directly below is the authoritative guard.
+          void lockRes;
+        } catch (err: any) {
+          // FAIL CLOSED. If we cannot obtain the required InnoDB row lock for
+          // this invoice, we MUST NOT proceed to create a PENDING transaction —
+          // for all we know, the concurrent cancelInvoice transaction already
+          // wrote CANCELLED and we are reading stale data outside the lock.
+          const msg: string = (err && typeof err.message === 'string') ? err.message : String(err);
+          throw new AppError(
+            `Unable to obtain database row lock for invoice ${inv.id} during payment initialization (${msg.slice(0, 120)}). Please try again.`,
+            500,
+          );
         }
       }
       const invRelock = await tx.invoice.findUnique({
@@ -788,7 +816,18 @@ export class PaymentService {
       }
       if (!opLockReleased) {
         opLockReleased = true;
-        await releaseInvoiceOperationLock(inv.id);
+        try {
+          await releaseInvoiceOperationLockByToken(inv.id, invOpLockToken, {
+            acquiredAtMs: invOpLock.ok ? invOpLock.acquiredAtMs : undefined,
+            ttlMs: invOpLock.ok ? invOpLock.ttlMs : undefined,
+            opName: 'initiatePayment',
+          });
+        } catch {
+          // Best-effort release. If this path errors, TTL will auto-expire
+          // key safely, and compare-and-delete ensures we never delete
+          // another caller's lock.
+          void releaseInvoiceOperationLock(inv.id).catch(() => {});
+        }
       }
     }
   }

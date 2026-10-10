@@ -239,11 +239,41 @@ function setupBase(gateway: PaymentGateway = PaymentGateway.PAYSTACK) {
   (prisma.transaction.findMany as jest.Mock).mockResolvedValue([]);
   const Redis = require('ioredis');
   if (Redis.mock) {
+    const store = new Map<string, string>();
     Redis.mockImplementation(() => ({
       on: jest.fn(),
-      call: jest.fn(async (cmd: string, ..._args: any[]) => {
-        if (cmd === 'SET') return 'OK';
-        if (cmd === 'DEL') return 1;
+      call: jest.fn(async (cmd: string, ...args: any[]) => {
+        if (cmd === 'SET') {
+          const key = String(args[0]);
+          const value = String(args[1]);
+          const flags = args.slice(2).map((x: any) => String(x).toUpperCase());
+          if (flags.includes('NX') && store.has(key)) return null;
+          store.set(key, value);
+          return 'OK';
+        }
+        if (cmd === 'GET') {
+          const key = String(args[0]);
+          return store.has(key) ? store.get(key) : null;
+        }
+        if (cmd === 'DEL') {
+          let n = 0;
+          for (const raw of args) {
+            const k = String(raw);
+            if (store.has(k)) { store.delete(k); n++; }
+          }
+          return n;
+        }
+        if (cmd === 'EVAL') {
+          const numKeys = Number(args[1]);
+          const keys = args.slice(2, 2 + numKeys).map(String);
+          const argv = args.slice(2 + numKeys).map(String);
+          if (keys.length === 1 && argv.length === 1) {
+            const k = keys[0]; const expect = argv[0];
+            if (store.has(k) && store.get(k) === expect) { store.delete(k); return 1; }
+            return 0;
+          }
+          return 0;
+        }
         return null;
       }),
       status: 'ready',
@@ -1116,7 +1146,7 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
       providerFactory.getPaymentProvider = jest.fn(() => singleton);
       const Redis = require('ioredis');
       if (Redis.mock) {
-        const lockedKeys = new Set<string>();
+        const lockedKeys = new Map<string, string>();
         Redis.mockImplementation(() => {
           return {
             on: jest.fn(),
@@ -1127,15 +1157,34 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
               if (cmd === 'SET' && args.includes('NX') && args.includes('EX')) {
                 lockSetCallCount += 1;
                 const key = String(args[0]);
+                const value = String(args[1]);
                 if (lockedKeys.has(key)) return null;
-                lockedKeys.add(key);
+                lockedKeys.set(key, value);
                 return 'OK';
+              }
+              if (cmd === 'GET') {
+                const key = String(args[0]);
+                return lockedKeys.has(key) ? lockedKeys.get(key) ?? null : null;
               }
               if (cmd === 'DEL') {
                 const key = String(args[0]);
                 const had = lockedKeys.has(key);
                 lockedKeys.delete(key);
                 return had ? 1 : 0;
+              }
+              if (cmd === 'EVAL') {
+                const numKeys = Number(args[1]);
+                const keys = args.slice(2, 2 + numKeys).map(String);
+                const argv = args.slice(2 + numKeys).map(String);
+                if (keys.length === 1 && argv.length === 1) {
+                  const k = keys[0]; const expect = argv[0];
+                  if (lockedKeys.has(k) && lockedKeys.get(k) === expect) {
+                    lockedKeys.delete(k);
+                    return 1;
+                  }
+                  return 0;
+                }
+                return 0;
               }
               return null;
             }),

@@ -12,6 +12,7 @@ import { AppError } from '../utils/AppError';
 import { Permissions } from '../types/permissions';
 import {
   acquireInvoiceOperationLock,
+  releaseInvoiceOperationLockByToken,
   releaseInvoiceOperationLock,
 } from '../utils/invoiceLock';
 
@@ -151,8 +152,8 @@ export class TransactionCancellationService {
 
     // Shared invoice-level TTL lock so concurrent cancelInvoice / initiatePayment
     // / cancelTransaction do not race. 8s is enough for 1 DB $tx + audit.
-    const lockOk = await acquireInvoiceOperationLock(invoiceId, 8_000);
-    if (!lockOk) {
+    const invLock = await acquireInvoiceOperationLock(invoiceId, 8_000);
+    if (!invLock.ok) {
       throw new AppError(
         'Another operation (invoice cancel, payment initiation, or reconciliation) is in progress for this invoice. Please wait and try again.',
         429,
@@ -184,9 +185,21 @@ export class TransactionCancellationService {
 
       // Precheck 3: No receipt exists for this tx (receipt generation is a
       // terminal financial event → cancel would erase evidence of receipted tx).
-      const receiptCount = await prisma.receipt.count({
-        where: { transactionId },
-      });
+      let receiptCount: number;
+      try {
+        receiptCount = await prisma.receipt.count({
+          where: { transactionId },
+        });
+      } catch (err: any) {
+        const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+        // FAIL CLOSED: database error reading receipts is NOT equivalent to 0
+        // receipts. Throw 500 so the operator retries; we must never assume
+        // zero receipts exist if the database could not confirm it.
+        throw new AppError(
+          `Unable to confirm transaction ${transactionId} has no receipts before cancellation (${msg.slice(0, 120)}). Please try again.`,
+          500,
+        );
+      }
       if (receiptCount > 0) {
         throw new AppError(
           `Transaction already has ${receiptCount} receipt(s). Receipted transactions must be reversed through the financial reversal workflow, not cancelled.`,
@@ -195,35 +208,132 @@ export class TransactionCancellationService {
       }
 
       // Precheck 4: No GL financial entries have been posted
-      const glCount = await (prisma as any).generalLedger.count({
-        where: { transactionId },
-      });
-      if (Number(glCount ?? 0) > 0) {
+      let glCount: number;
+      try {
+        const rawGl = await (prisma as any).generalLedger.count({
+          where: { transactionId },
+        });
+        glCount = Number(rawGl ?? 0);
+        if (Number.isNaN(glCount)) glCount = -1;
+      } catch (err: any) {
+        const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+        throw new AppError(
+          `Unable to confirm transaction ${transactionId} has no General Ledger postings before cancellation (${msg.slice(0, 120)}). Please try again.`,
+          500,
+        );
+      }
+      if (glCount < 0 || glCount > 0) {
+        // Negative sentinel → NaN result; treat as unverifiable (fail closed).
+        if (glCount < 0) {
+          throw new AppError(
+            `Unable to verify General Ledger state for transaction ${transactionId} before cancellation (invalid numeric result). Please try again.`,
+            500,
+          );
+        }
         throw new AppError(
           `Transaction has ${glCount} General Ledger posting(s). Transactions with GL entries must be reversed using the reversal workflow, not cancelled.`,
           409,
         );
       }
 
-      // Precheck 5: No settlement exists
-      const settlementCount = await prisma.settlement.count?.({
-        where: { transactionId },
-      }).catch(() => 0) ?? 0;
-      if (Number(settlementCount) > 0) {
+      // Precheck 5: No settlement exists.
+      // NOTE: previous code used `.catch(() => 0) ?? 0` → DB error → 0 count.
+      // This was a fail-open bug: if settlement DB was unreachable we allowed
+      // cancelling transactions that may already have been settled. Corrected
+      // below to explicitly fail closed.
+      let settlementCount: number;
+      try {
+        if (typeof (prisma.settlement as any)?.count !== 'function') {
+          // Model may not exist in early-migration test databases. Treat as
+          // unverifiable — fail closed with explicit 500.
+          settlementCount = -1;
+        } else {
+          const rawSettle = await prisma.settlement.count({
+            where: { transactionId },
+          });
+          settlementCount = Number(rawSettle ?? 0);
+          if (Number.isNaN(settlementCount)) settlementCount = -1;
+        }
+      } catch (err: any) {
+        const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+        throw new AppError(
+          `Unable to confirm transaction ${transactionId} has no settlement records before cancellation (${msg.slice(0, 120)}). Please try again.`,
+          500,
+        );
+      }
+      if (settlementCount < 0 || settlementCount > 0) {
+        if (settlementCount < 0) {
+          throw new AppError(
+            `Unable to verify settlement state for transaction ${transactionId} before cancellation. Cancellation aborted to avoid erasing settlement evidence. Please try again later.`,
+            500,
+          );
+        }
         throw new AppError(
           `Transaction already has settlement record(s). Settled transactions cannot be cancelled.`,
           409,
         );
       }
 
+      // Precheck 5B: Webhook event evidence.
+      // If a stored webhook event already contains SUCCESS evidence for this
+      // transaction (provider status = success/completed/paid), cancellation
+      // must be denied outright. Even non-success raw hooks count as audit
+      // evidence — require documented written+evidence to proceed (but allow
+      // with the documentation — unlike SUCCESS hooks which are denied.)
+      let webhookEvidence: { total: number; successHooks: number; pendingHooks: number };
+      try {
+        const ref = initialTx.reference ?? null;
+        const paystackRef = (initialTx as any).paystackReference ?? null;
+        const alatpayInitRef = (initialTx as any).alatpayInitPaymentReference ?? null;
+        const alatpayFinalRef = (initialTx as any).alatpayFinalTransactionId ?? null;
+        const whereOr: any[] = [];
+        if (typeof (prisma as any).webhookEvent?.findMany === 'function') {
+          if (ref != null) whereOr.push({ payloadContains: String(ref) });
+          if (paystackRef != null) whereOr.push({ paystackEventId: String(paystackRef) });
+          if (alatpayInitRef != null) whereOr.push({ payloadContains: String(alatpayInitRef) });
+          if (alatpayFinalRef != null) whereOr.push({ alatpayEventId: String(alatpayFinalRef) });
+          const hooks = whereOr.length > 0
+            ? await (prisma as any).webhookEvent.findMany({
+                where: { OR: whereOr },
+                take: 25,
+                select: { id: true, alatpayEventId: true, paystackEventId: true, eventName: true, status: true, raw: true },
+              })
+            : [];
+          let s = 0; let p = 0;
+          for (const h of hooks) {
+            const s1 = [h.status, h.eventName, typeof h.raw === 'string' ? h.raw : JSON.stringify(h.raw ?? '')]
+              .join(' ')
+              .toLowerCase();
+            if (/success|completed|paid|successful/i.test(s1)) s += 1;
+            else if (/pending|processing|received|queued/i.test(s1)) p += 1;
+          }
+          webhookEvidence = { total: hooks.length, successHooks: s, pendingHooks: p };
+        } else {
+          // WebhookEvent model missing in this DB version → cannot verify.
+          // Fail CLOSED: set an explicit "unverifiable" sentinel — but do not
+          // outright block if caller provides strong documentation. Treat as
+          // hasPendingEvidence=true (requires written+evidence per next block).
+          webhookEvidence = { total: -1, successHooks: 0, pendingHooks: 1 };
+        }
+      } catch (err: any) {
+        const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+        throw new AppError(
+          `Unable to inspect webhook evidence for transaction ${transactionId} before cancellation (${msg.slice(0, 120)}). Please try again.`,
+          500,
+        );
+      }
+      // Explicit success hook evidence → block entirely; reconciliation must handle.
+      if (webhookEvidence.successHooks > 0) {
+        throw new AppError(
+          `Stored webhook records contain provider SUCCESS evidence for transaction ${transactionId}. Cancellation denied; use the reconciliation exception workflow to resolve with authoritative provider verification.`,
+          409,
+        );
+      }
+      const hasPendingOrUnverifiedWebhooks = webhookEvidence.total < 0 || webhookEvidence.pendingHooks > 0;
+
       // Precheck 6: Invoice amountPaid has not been credited by this tx
       if (initialTx.invoice) {
         if (Number(initialTx.invoice.amountPaid ?? 0) > 0) {
-          // There is *some* posting against the invoice. Make sure THIS tx
-          // is not the one who posted it.
-          // If we ever support partial cancel on partial-paid invoices,
-          // tighten this check. Currently we forbid any cancel against
-          // invoice already with amountPaid>0 AND this tx has raw amount>0.
           if (Number(initialTx.amount ?? 0) > 0) {
             throw new AppError(
               `Invoice ${initialTx.invoice.invoiceNumber ?? initialTx.invoice.id} already has amountPaid > 0 and this attempt recorded an amount. Use refund/reversal workflow instead.`,
@@ -233,22 +343,41 @@ export class TransactionCancellationService {
         }
       }
 
-      // Precheck 7: if success-reference columns are populated we need to
-      // require explicit written explanation (case: provider returned SUCCESS
-      // but internal status never transitioned; this is dangerous to cancel
-      // silently. Still allowed because financial posting checks passed, but
-      // requires user evidence/written explanation for audit).
+      // Precheck 7: Authoritative evidence requirements (C4 fail-closed).
+      // CANCEL != FAILED. Unknown state MUST NOT be converted into cancellation.
+      // The following cases each require explicit, documented audit evidence:
+      //   a) tx status=PENDING or PROCESSING (still live attempt window)
+      //   b) hasSuccessRef (provider returned SUCCESS but internal never transitioned)
+      //   c) has pending/non-terminal webhook evidence OR webhook state unverifiable
+      //   d) the provider UUID (ALATPAY final) or paystack reference is missing
+      //      — by itself NOT PROOF of failure. Still requires evidence.
+      // Elapsed time, closed popup, missing callback are NEVER sufficient.
+      const txStatus: string = String(initialTx.status);
+      const liveAttempt = txStatus === 'PENDING' || txStatus === 'PROCESSING';
+      const providerRefMissing =
+        (!initialTx.alatpayFinalTransactionId || String(initialTx.alatpayFinalTransactionId).length === 0) &&
+        (!(initialTx as any).paystackReference || String((initialTx as any).paystackReference).length === 0);
       const hasSuccessRef =
         (initialTx.status === TransactionStatus.SUCCESS as any) ||
-        (initialTx.alatpayFinalTransactionId && (initialTx.alatpayFinalTransactionId as string).length > 0) ||
-        ((initialTx as any).paystackReference && (initialTx as any).paystackReference.length > 0 &&
+        (initialTx.alatpayFinalTransactionId && String(initialTx.alatpayFinalTransactionId).length > 0) ||
+        ((initialTx as any).paystackReference && String((initialTx as any).paystackReference).length > 0 &&
           initialTx.status === TransactionStatus.SUCCESS);
-      if (hasSuccessRef) {
+      const requireEvidence =
+        liveAttempt || hasSuccessRef || hasPendingOrUnverifiedWebhooks || providerRefMissing;
+
+      if (requireEvidence) {
         const written = (writtenExplanation ?? '').trim().length;
         const ev = (evidenceReference ?? '').trim().length;
+        const reasons: string[] = [];
+        if (liveAttempt) reasons.push(`status=${initialTx.status} (still within provider processing window — time elapsed/popup closed are NOT proof of failure)`);
+        if (hasSuccessRef) reasons.push('provider success references are present on the attempt');
+        if (hasPendingOrUnverifiedWebhooks) reasons.push('pending/unverified webhook evidence exists');
+        if (providerRefMissing) reasons.push('final provider transaction reference is unavailable (missing UUID ≠ failed payment)');
         if (written < 20 || ev < 6) {
           throw new AppError(
-            'This attempt contains provider success references or a SUCCESS-like status. To cancel, provide both written explanation (>=20 chars) and evidence reference (>=6 chars) for the audit trail.',
+            `Cancellation requires documented audit evidence: ${reasons.join('; ')}. ` +
+              `Provide both written explanation (≥20 characters) and evidence reference (≥6 characters) for the permanent cancellation record. ` +
+              `Note: closed popup, elapsed time, missing callback, or missing provider UUID alone do not establish payment failure — use provider verifyPayment or reconciliation workflow first when possible.`,
             409,
           );
         }
@@ -264,8 +393,35 @@ export class TransactionCancellationService {
       const result = await prisma.$transaction(async (tx) => {
         if (process.env.NODE_ENV !== 'test') {
           try {
-            await tx.$executeRawUnsafe('SELECT id FROM invoices WHERE id = ? FOR UPDATE;', [invoiceId]);
-          } catch { /* swallow */ }
+            const boundInvoiceId: number = Number(invoiceId);
+            const boundTxId: number = Number(transactionId);
+            // Two row locks for the two objects the cancel touches:
+            // 1. Invoice FOR UPDATE prevents concurrent payment initialization
+            //    posting amountPaid or status changes mid-cancel.
+            // 2. Transaction FOR UPDATE prevents concurrent verifyPayment
+            //    webhook or reconciler claiming the tx (updateMany status PENDING)
+            //    while we're cancelling it.
+            // Both use positional ? parameterized queries with bindings.
+            const lockInvRes: any = await tx.$executeRawUnsafe(
+              'SELECT id FROM invoices WHERE id = ? FOR UPDATE',
+              boundInvoiceId,
+            );
+            const lockTxRes: any = await tx.$executeRawUnsafe(
+              'SELECT id FROM transactions WHERE id = ? FOR UPDATE',
+              boundTxId,
+            );
+            void lockInvRes; void lockTxRes;
+          } catch (err: any) {
+            // FAIL CLOSED. If we cannot obtain the required row locks for
+            // either the invoice OR the transaction row we MUST NOT proceed —
+            // a concurrent operation (verify, settlement, payment init, or
+            // reconciliation) may hold one. Let caller retry.
+            const msg: string = (err && typeof err.message === 'string') ? err.message : String(err);
+            throw new AppError(
+              `Unable to obtain database row locks for transaction ${transactionId} during cancellation (${msg.slice(0, 120)}). Please try again.`,
+              500,
+            );
+          }
         }
         // Precheck 8: re-read tx inside tx for optimistic concurrency
         const liveTx = await tx.transaction.findUnique({
@@ -281,14 +437,67 @@ export class TransactionCancellationService {
         }
 
         // Precheck 9: no receipt / GL row created concurrently between our
-        // initial read above and this $tx.
-        const receiptRecheck = await tx.receipt.count({ where: { transactionId } });
+        // initial read above and this $tx. FAIL CLOSED on database errors.
+        let receiptRecheck: number;
+        try {
+          receiptRecheck = await tx.receipt.count({ where: { transactionId } });
+        } catch (err: any) {
+          const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+          throw new AppError(
+            `Unable to recheck receipts for transaction ${transactionId} inside cancellation transaction (${msg.slice(0, 120)}). Please try again.`,
+            500,
+          );
+        }
         if (receiptRecheck > 0) {
           throw new AppError('A receipt was created concurrently. Cancellation aborted.', 409);
         }
-        const glRecheck = await (tx as any).generalLedger.count({ where: { transactionId } }).catch(() => 0);
-        if (Number(glRecheck ?? 0) > 0) {
+        let glRecheck: number;
+        try {
+          const rawGl = await (tx as any).generalLedger.count({ where: { transactionId } });
+          glRecheck = Number(rawGl ?? 0);
+          if (Number.isNaN(glRecheck)) glRecheck = -1;
+        } catch (err: any) {
+          const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+          throw new AppError(
+            `Unable to recheck General Ledger for transaction ${transactionId} inside cancellation transaction (${msg.slice(0, 120)}). Please try again.`,
+            500,
+          );
+        }
+        if (glRecheck < 0 || glRecheck > 0) {
+          if (glRecheck < 0) {
+            throw new AppError(
+              `Unable to verify General Ledger state during cancellation (invalid numeric result). Cancellation aborted. Please try again.`,
+              500,
+            );
+          }
           throw new AppError('General Ledger entries were posted concurrently. Cancellation aborted.', 409);
+        }
+        // Precheck 9b: settlement recheck inside transaction (also fail closed,
+        // no catch→0 swallow).
+        let settlementRecheck: number;
+        try {
+          if (typeof (tx.settlement as any)?.count !== 'function') {
+            settlementRecheck = -1;
+          } else {
+            const rawSettle = await tx.settlement.count({ where: { transactionId } });
+            settlementRecheck = Number(rawSettle ?? 0);
+            if (Number.isNaN(settlementRecheck)) settlementRecheck = -1;
+          }
+        } catch (err: any) {
+          const msg = (err && typeof err.message === 'string') ? err.message : String(err);
+          throw new AppError(
+            `Unable to recheck settlements for transaction ${transactionId} inside cancellation transaction (${msg.slice(0, 120)}). Please try again.`,
+            500,
+          );
+        }
+        if (settlementRecheck < 0 || settlementRecheck > 0) {
+          if (settlementRecheck < 0) {
+            throw new AppError(
+              `Unable to verify settlements during cancellation transaction. Cancellation aborted. Please try again.`,
+              500,
+            );
+          }
+          throw new AppError('Settlement record(s) appeared concurrently. Cancellation aborted.', 409);
         }
         // Precheck 10: invoice amountPaid recheck (did another payment just post?)
         if (liveTx.invoice) {
@@ -434,7 +643,15 @@ export class TransactionCancellationService {
         cancellation: result.cancellationMeta,
       };
     } finally {
-      await releaseInvoiceOperationLock(invoiceId);
+      try {
+        await releaseInvoiceOperationLockByToken(invoiceId, invLock.ok ? invLock.token : null, {
+          acquiredAtMs: invLock.ok ? invLock.acquiredAtMs : undefined,
+          ttlMs: invLock.ok ? invLock.ttlMs : undefined,
+          opName: 'cancelTransaction',
+        });
+      } catch {
+        void releaseInvoiceOperationLock(invoiceId).catch(() => {});
+      }
     }
   }
 }

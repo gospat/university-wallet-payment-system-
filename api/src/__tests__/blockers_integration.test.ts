@@ -67,7 +67,63 @@ jest.mock('../config/database', () => {
   const receipts: any[] = [];
   const gls: any[] = [];
   const settlements: any[] = [];
+  const webhookEvents: any[] = [];
   let nextTxnId = 9000;
+  let nextWebhookId = 1;
+
+  // Shared in-memory Redis KV for SET/DEL/EVAL. Lives inside jest.mock closure
+  // so it survives per-test resets. The ioredis `call` mock defined below
+  // performs SET NX/DEL and atomic COMPARE-AND-DELETE against this map.
+  const _redisKV = new Map<string, string>();
+  const runRedisCall = async (cmd: string, ...args: any[]): Promise<any> => {
+    if (cmd === 'SET') {
+      const key = String(args[0]);
+      const value = String(args[1]);
+      const flags = args.slice(2).map((x) => String(x).toUpperCase());
+      const hasNX = flags.includes('NX');
+      if (hasNX && _redisKV.has(key)) return null;
+      _redisKV.set(key, value);
+      if (flags.includes('EX')) {
+        const ttlSec = Number(args[flags.indexOf('EX') + 2]);
+        if (!Number.isNaN(ttlSec) && ttlSec > 0) {
+          const expireAt = Date.now() + ttlSec * 1000;
+          setTimeout(() => { if (_redisKV.get(key) === value) _redisKV.delete(key); }, ttlSec * 1000 + 10);
+          void expireAt;
+        }
+      }
+      return 'OK';
+    }
+    if (cmd === 'GET') {
+      const key = String(args[0]);
+      return _redisKV.has(key) ? _redisKV.get(key) : null;
+    }
+    if (cmd === 'DEL') {
+      let n = 0;
+      for (const raw of args) {
+        const k = String(raw);
+        if (_redisKV.has(k)) { _redisKV.delete(k); n++; }
+      }
+      return n;
+    }
+    if (cmd === 'EVAL') {
+      const script = String(args[0]);
+      const numKeys = Number(args[1]);
+      const keys = args.slice(2, 2 + numKeys).map(String);
+      const argv = args.slice(2 + numKeys).map(String);
+      // COMPARE_DELETE_LUA detector: script contains GET KEYS[1] == ARGV[1] ? DEL : 0
+      if (/redis\.call\(['"]GET['"]\s*,\s*KEYS\[1\]\s*\)\s*==\s*ARGV\[1\]/.test(script) || /GET\s*KEYS\[1\].*==.*ARGV\[1\][\s\S]{0,120}DEL/.test(script) || keys.length === 1 && argv.length === 1) {
+        const k = keys[0];
+        const expected = argv[0];
+        if (_redisKV.has(k) && _redisKV.get(k) === expected) {
+          _redisKV.delete(k);
+          return 1;
+        }
+        return 0;
+      }
+      return 0;
+    }
+    return null;
+  };
 
   return {
     __esModule: true,
@@ -237,6 +293,31 @@ jest.mock('../config/database', () => {
           return Promise.resolve(n);
         }),
       },
+      webhookEvent: {
+        create: jest.fn((args: any) => {
+          const id = nextWebhookId++;
+          const row = { id, createdAt: new Date(), ...args.data };
+          webhookEvents.push(row);
+          return Promise.resolve(row);
+        }),
+        findMany: jest.fn((args: any) => {
+          let rows = webhookEvents.slice();
+          const ors = (args.where?.OR ?? []) as any[];
+          if (ors.length > 0) {
+            rows = rows.filter((h) => ors.some((orClause) => {
+              return Object.entries(orClause).every(([k, v]) => {
+                if (k === 'payloadContains') {
+                  const blob = [typeof h.raw === 'string' ? h.raw : JSON.stringify(h.raw ?? ''), String(h.alatpayEventId ?? ''), String(h.paystackEventId ?? ''), String(h.eventName ?? '')].join(' ');
+                  return blob.includes(String(v));
+                }
+                return String((h as any)[k] ?? '') === String(v);
+              });
+            }));
+          }
+          if (typeof args.take === 'number' && rows.length > args.take) rows = rows.slice(0, args.take);
+          return Promise.resolve(rows.map((r) => ({ ...r })));
+        }),
+      },
       auditLog: {
         create: jest.fn((args: any) => {
           const id = audits.length + 1;
@@ -378,6 +459,28 @@ jest.mock('../config/database', () => {
           wallet: {
             update: jest.fn().mockResolvedValue({ id: 1 }),
           },
+          settlement: {
+            count: (a: any) => Promise.resolve(settlements.filter((s: any) => s.transactionId === a.where.transactionId).length),
+          },
+          webhookEvent: {
+            findMany: (a: any) => {
+              let rows = webhookEvents.slice();
+              const ors = (a.where?.OR ?? []) as any[];
+              if (ors.length > 0) {
+                rows = rows.filter((h) => ors.some((orClause) => {
+                  return Object.entries(orClause).every(([k, v]) => {
+                    if (k === 'payloadContains') {
+                      const blob = [typeof h.raw === 'string' ? h.raw : JSON.stringify(h.raw ?? ''), String(h.alatpayEventId ?? ''), String(h.paystackEventId ?? ''), String(h.eventName ?? '')].join(' ');
+                      return blob.includes(String(v));
+                    }
+                    return String((h as any)[k] ?? '') === String(v);
+                  });
+                }));
+              }
+              if (typeof a.take === 'number' && rows.length > a.take) rows = rows.slice(0, a.take);
+              return Promise.resolve(rows.map((r) => ({ ...r })));
+            },
+          },
           auditLog: {
             create: (a: any) => {
               audits.push({ id: audits.length + 1, ...a.data });
@@ -396,7 +499,10 @@ jest.mock('../config/database', () => {
           receipts.length = 0;
           gls.length = 0;
           settlements.length = 0;
+          webhookEvents.length = 0;
           nextTxnId = 9000;
+          nextWebhookId = 1;
+          _redisKV.clear();
           _testResetInitiateLocks();
           _testResetInvoiceLocks();
         },
@@ -410,12 +516,21 @@ jest.mock('../config/database', () => {
           txns[id] = { id, createdAt: new Date(), updatedAt: new Date(), metadata: {}, ...row };
           return txns[id];
         },
+        seedWebhookEvent: (row: any) => {
+          const id = row.id ?? nextWebhookId++;
+          const hook = { id, createdAt: new Date(), status: 'PROCESSED', eventName: 'generic', raw: '', ...row };
+          webhookEvents.push(hook);
+          return hook;
+        },
         getTx: (id: number) => txns[id],
         getInv: (id: number) => invoices[id],
         getAudits: () => audits,
         getReceipts: () => receipts,
         getGls: () => gls,
+        getWebhookEvents: () => webhookEvents,
         setBursaryPerms: (list: string[]) => { perms.BURSARY = list; },
+        _redisKV,
+        _redisCall: runRedisCall,
       },
     },
   };
@@ -459,14 +574,27 @@ jest.mock('../config/queue', () => ({
 }));
 
 jest.mock('ioredis', () => {
-  // Stub Redis client. Call returns undefined → invoice lock uses in-process Map fallback.
-  return jest.fn().mockImplementation(() => ({
-    on: jest.fn(),
-    call: jest.fn(),
-    status: 'ready',
-    disconnect: jest.fn(),
-    quit: jest.fn(),
-  }));
+  // In-memory Redis KV shared with the parent prisma mock via require.
+  // Avoids jest circular: use lazy require inside call to look up the redis
+  // helper exposed on the prisma default.__testAPI object.
+  return jest.fn().mockImplementation(() => {
+    return {
+      on: jest.fn(),
+      status: 'ready',
+      disconnect: jest.fn(),
+      quit: jest.fn(),
+      call: jest.fn(async (cmd: string, ...args: any[]) => {
+        const prismaMod = jest.requireActual('../config/database');
+        const prisma = require('../config/database').default;
+        const api = (prisma as any).__testAPI;
+        if (api && typeof api._redisCall === 'function') return api._redisCall(cmd, ...args);
+        if (cmd === 'SET') return 'OK';
+        if (cmd === 'DEL') return 1;
+        if (cmd === 'EVAL') return 0;
+        return null;
+      }),
+    };
+  });
 });
 
 // Test-only: disable invoice-op TTL lock for SC1–SC5/SC7 so lock-contention 429s
@@ -706,7 +834,8 @@ describe('SC4 B3 PENDING unpaid eligible transaction cancel workflow', () => {
       actorRole: Role.ADMIN,
       actorPermissions: [],
       reason: 'TEST_TRANSACTION',
-      evidenceReference: 'ev-blocker-sc4-document',
+      writtenExplanation: 'SC4 test cancellation: explicit written evidence for live PENDING attempt with no provider confirmation — recorded per evidence policy.',
+      evidenceReference: 'EV-SC4-20261010-TEST-DOC',
       req: { ip: '10.0.0.1', headers: { 'user-agent': 'jest/sc4' } } as any,
     });
 
@@ -714,7 +843,7 @@ describe('SC4 B3 PENDING unpaid eligible transaction cancel workflow', () => {
     const tx = testAPI().getTx(8003);
     expect(tx.status).toBe(TransactionStatus.CANCELLED);
     expect(tx.metadata?.cancellation?.reason).toBe('TEST_TRANSACTION');
-    expect(tx.metadata?.cancellation?.evidenceReference).toBe('ev-blocker-sc4-document');
+    expect(tx.metadata?.cancellation?.evidenceReference).toBe('EV-SC4-20261010-TEST-DOC');
     expect(tx.metadata?.cancellation?.preservedReferences?.reference).toBe('PAY-BLOCKER-SC4');
     expect(tx.metadata?.cancellation?.statusBefore).toBe('PENDING');
 

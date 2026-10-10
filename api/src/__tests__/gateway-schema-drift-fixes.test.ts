@@ -58,17 +58,49 @@ jest.mock('../services/paystack', () => ({
   computePaymentBreakdown: jest.fn(),
 }));
 
-jest.mock('ioredis', () => jest.fn().mockImplementation(() => ({
-  on: jest.fn(),
-  call: jest.fn(async (cmd: string, ..._args: any[]) => {
-    if (cmd === 'SET') return 'OK';
-    if (cmd === 'DEL') return 1;
-    return null;
-  }),
-  status: 'ready',
-  disconnect: jest.fn(),
-  quit: jest.fn(),
-})));
+jest.mock('ioredis', () => jest.fn().mockImplementation(() => {
+  const store = new Map<string, string>();
+  return {
+    on: jest.fn(),
+    call: jest.fn(async (cmd: string, ...args: any[]) => {
+      if (cmd === 'SET') {
+        const key = String(args[0]);
+        const value = String(args[1]);
+        const flags = args.slice(2).map((x: any) => String(x).toUpperCase());
+        if (flags.includes('NX') && store.has(key)) return null;
+        store.set(key, value);
+        return 'OK';
+      }
+      if (cmd === 'GET') {
+        const key = String(args[0]);
+        return store.has(key) ? store.get(key) : null;
+      }
+      if (cmd === 'DEL') {
+        let n = 0;
+        for (const raw of args) {
+          const k = String(raw);
+          if (store.has(k)) { store.delete(k); n++; }
+        }
+        return n;
+      }
+      if (cmd === 'EVAL') {
+        const numKeys = Number(args[1]);
+        const keys = args.slice(2, 2 + numKeys).map(String);
+        const argv = args.slice(2 + numKeys).map(String);
+        if (keys.length === 1 && argv.length === 1) {
+          const k = keys[0]; const expect = argv[0];
+          if (store.has(k) && store.get(k) === expect) { store.delete(k); return 1; }
+          return 0;
+        }
+        return 0;
+      }
+      return null;
+    }),
+    status: 'ready',
+    disconnect: jest.fn(),
+    quit: jest.fn(),
+  };
+}));
 
 jest.mock('../services/payment/providerFactory', () => {
   const actualPrisma = jest.requireActual('@prisma/client');

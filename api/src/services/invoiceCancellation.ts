@@ -6,6 +6,7 @@ import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
 import {
   acquireInvoiceOperationLock,
+  releaseInvoiceOperationLockByToken,
   releaseInvoiceOperationLock,
 } from '../utils/invoiceLock';
 
@@ -91,8 +92,8 @@ export class InvoiceCancellationService {
 
     const { invoiceId, actorId, reason, writtenExplanation, req } = input;
 
-    const lockOk = await acquireInvoiceOperationLock(invoiceId, 8_000);
-    if (!lockOk) {
+    const invoiceLock = await acquireInvoiceOperationLock(invoiceId, 8_000);
+    if (!invoiceLock.ok) {
       throw new AppError(
         'Another operation is currently in progress for this invoice. Please wait a moment and try again.',
         429,
@@ -201,9 +202,22 @@ export class InvoiceCancellationService {
     const result = await prisma.$transaction(async (tx) => {
       if (process.env.NODE_ENV !== 'test') {
         try {
-          await tx.$executeRawUnsafe('SELECT id FROM invoices WHERE id = ? FOR UPDATE;', [invoiceId]);
-        } catch {
-          /* swallow dialects that do not support this */
+          const boundInvoiceId: number = Number(invoiceId);
+          const lockRes: any = await tx.$executeRawUnsafe(
+            'SELECT id FROM invoices WHERE id = ? FOR UPDATE',
+            boundInvoiceId,
+          );
+          void lockRes;
+        } catch (err: any) {
+          // FAIL CLOSED on DB lock acquisition: we cannot confirm exclusive
+          // access to the invoice row; throw instead of proceeding with a possibly
+          // stale precheck results (payment initialization might already have begun
+          // and grabbed the lock before us).
+          const msg: string = (err && typeof err.message === 'string') ? err.message : String(err);
+          throw new AppError(
+            `Unable to obtain database row lock for invoice ${invoiceId} during cancellation (${msg.slice(0, 120)}). Please try again.`,
+            500,
+          );
         }
       }
       const unsafeTxRecheck = await tx.transaction.count({
@@ -304,7 +318,15 @@ export class InvoiceCancellationService {
       auditedAt: result.audit.createdAt,
     };
     } finally {
-      await releaseInvoiceOperationLock(invoiceId);
+      try {
+        await releaseInvoiceOperationLockByToken(invoiceId, invoiceLock.ok ? invoiceLock.token : null, {
+          acquiredAtMs: invoiceLock.ok ? invoiceLock.acquiredAtMs : undefined,
+          ttlMs: invoiceLock.ok ? invoiceLock.ttlMs : undefined,
+          opName: 'cancelInvoice',
+        });
+      } catch {
+        void releaseInvoiceOperationLock(invoiceId).catch(() => {});
+      }
     }
   }
 }

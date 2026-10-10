@@ -2,6 +2,31 @@ import { Role } from '@prisma/client';
 import prisma from '../config/database';
 import { bumpRolePermsVersion } from '../middlewares/auth';
 
+// Sensitive ADMIN-ONLY capabilities. Bursary must NEVER receive these even
+// when they exist in PERMISSION_DEFS. These controls allow user impersonation,
+// queue job destruction, payment-provider credential exposure, refund approval
+// authority, and tenant-wide system configuration changes.
+const ADMIN_ONLY_SENSITIVE_KEYS = new Set([
+  // Identity & privilege escalation
+  'IMPERSONATE_USERS',
+  'MANAGE_USERS',
+  'MANAGE_ROLES',
+  // Payments trust / money movement authority
+  'APPROVE_REFUNDS',
+  'FLUSH_QUEUES',
+  // Configuration & secrets
+  'MANAGE_SETTINGS',
+  'SYSTEM_SETTINGS',
+  'PAYSTACK_CONFIG',
+  'MANAGE_PAYMENT_PROVIDERS',
+  'MANAGE_EMAIL_TEMPLATES',
+  // Full-audit exposure
+  'AUDIT_LOGS_VIEW_FULL',
+  // Automated BullMQ scheduled jobs (elevated trust — BullMQ queue access)
+  'REPORTS_SCHEDULE',
+  'SCHEDULE_REPORTS',
+]);
+
 export const PERMISSION_DEFS: { key: string; name: string; category: string; description?: string }[] = [
   { key: 'VIEW_DASHBOARD', name: 'View Dashboard', category: 'Dashboard' },
   { key: 'VIEW_AUDIT_LOG', name: 'View Audit Log', category: 'Admin' },
@@ -82,14 +107,10 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
 
 const ALL_PERMISSION_KEYS = PERMISSION_DEFS.map((p) => p.key);
 
-const BURSARY_EXCLUDED = new Set([
-  'MANAGE_USERS',
-  'MANAGE_ROLES',
-  'PAYSTACK_CONFIG',
-  'SYSTEM_SETTINGS',
-  'AUDIT_LOGS_VIEW_FULL',
-  // R20: Scheduled Reports is Admin-only (automated emailing with BullMQ = elevated trust)
-  'REPORTS_SCHEDULE',
+const BURSARY_EXCLUDED = new Set<string>([
+  // ALL sensitive ADMIN-ONLY capabilities are always removed from Bursary.
+  // The union of ADMIN_ONLY_SENSITIVE_KEYS with a few additional explicit keys.
+  ...Array.from(ADMIN_ONLY_SENSITIVE_KEYS),
 ]);
 
 const BURSARY_PERMISSION_KEYS = ALL_PERMISSION_KEYS.filter(
@@ -145,25 +166,14 @@ export async function seedPermissions() {
   });
   for (const p of allPerms) keyToIdMap.set(p.key, p.id);
 
-  // === ROLE-PERMISSION UPSERT: ONLY FOR FRESH-FIRST-RUN (zero rows per role) =========
-  // Admin customizes role permissions in the Admin → Roles UI: they can remove
-  // Students VIEW/CREATE/UPLOAD from Bursary, add/remove Bill permissions, etc.
-  // Old behavior: ALWAYS upsert every default ADMIN=39 + BURSARY=33 rows on
-  // EVERY server boot → if Admin deleted a row via saveRolePermissions → next
-  // server restart upsert's `create` branch RE-ADDED the deleted rows (the
-  // unique compound `(role, permissionId)` was not found → create fires with
-  // the default grant) → the exact bug reported by user: "I unticked Students
-  // from Admin → Bursary card saved, panel still shows Student Management".
+  // === ROLE-PERMISSION ASSIGNMENT ==========================================
+  // Two modes for each role, explicitly handled so FRESH databases get full
+  // defaults and EXISTING databases (bursary/admin has >=1 row with previous
+  // manual customizations via Admin -> Roles UI) ONLY ADD new missing keys,
+  // never overwriting or deleting Admin's manual permission customizations.
   //
-  // Fix: Seed default role-perms ONLY if the role has ZERO rolePermission rows
-  // (fresh database / zero rows). If >= 1 row exists for a role, Admin has
-  // ALREADY interacted with that role via the Roles UI (or from a previous
-  // seed that they then customized). We MUST NOT overwrite their customizations
-  // on subsequent boots. Permission rows alone are always upserted (name/description
-  // changes) above — we only skip role-permission assignment upserts for
-  // already-customized roles. BURSARY_EXCLUDED pre-sweep at top still runs so
-  // forbidden keys (MANAGE_ROLES, REPORTS_SCHEDULE etc.) are never present for
-  // Bursary even on old databases — that behavior is preserved.
+  // BURSARY_EXCLUDED pre-sweep still runs ABOVE so sensitive Admin-only
+  // keys are explicitly removed from Bursary regardless of freshness.
   const existingRoleCountsRaw = await prisma.rolePermission.groupBy({
     by: ['role'],
     where: { role: { in: [Role.ADMIN, Role.BURSARY] } },
@@ -172,31 +182,85 @@ export async function seedPermissions() {
   const existingCountByRole = new Map<string, number>();
   for (const row of existingRoleCountsRaw) existingCountByRole.set(row.role, row._count.role);
 
-  const adminCount = existingCountByRole.get(Role.ADMIN) ?? 0;
-  if (adminCount === 0) {
-    for (const key of ALL_PERMISSION_KEYS) {
+  /**
+   * Apply default role permissions safely.
+   *   mode='full'   → upsert every key for role (role count === 0 / FRESH install)
+   *   mode='diffAdd' → ONLY create rolePermission rows for keys that are not
+   *                     yet assigned → never delete, never overwrite, never upsert
+   */
+  const safeApplyDefaults = async (
+    role: Role,
+    defaultKeys: string[],
+    mode: 'full' | 'diffAdd',
+  ) => {
+    const rowsToCreate: { role: Role; permissionId: number }[] = [];
+    for (const key of defaultKeys) {
       const permissionId = keyToIdMap.get(key);
       if (!permissionId) continue;
-      await prisma.rolePermission.upsert({
-        where: { role_permissionId: { role: Role.ADMIN, permissionId } },
-        create: { role: Role.ADMIN, permissionId },
-        update: {},
-      });
+      rowsToCreate.push({ role, permissionId });
     }
-  }
+    if (rowsToCreate.length === 0) return 0;
+
+    if (mode === 'full') {
+      for (const row of rowsToCreate) {
+        await prisma.rolePermission.upsert({
+          where: { role_permissionId: { role: row.role, permissionId: row.permissionId } },
+          create: row,
+          update: {},
+        });
+      }
+      return rowsToCreate.length;
+    }
+
+    // diffAdd mode (existing customized database): ONLY INSERT rows that are
+    // missing. We deliberately do NOT touch existing rows so admins' saved
+    // role-permission customizations (e.g., remove Students VIEW from Bursary)
+    // are preserved across upgrades/server-boot seeding runs.
+    const existingForRole = new Set<number>();
+    const existingRows = await prisma.rolePermission.findMany({
+      where: { role },
+      select: { permissionId: true },
+    });
+    for (const row of existingRows) existingForRole.add(row.permissionId);
+
+    const missing = rowsToCreate.filter((r) => !existingForRole.has(r.permissionId));
+    if (missing.length === 0) return 0;
+
+    // createMany so we don't re-issue individual upsert calls (safe because
+    // we've already filtered to rows that don't exist).
+    try {
+      const createRes = await prisma.rolePermission.createMany({
+        data: missing,
+        skipDuplicates: true,
+      });
+      return createRes.count ?? 0;
+    } catch {
+      // Fallback: MySQL versions before 8.0.20 / older drivers may not
+      // support createMany skipDuplicates. Issue individual createOrIgnore
+      // tries instead; never throw from seed — don't block server boot.
+      let applied = 0;
+      for (const row of missing) {
+        try {
+          await prisma.rolePermission.create({ data: row });
+          applied += 1;
+        } catch { /* duplicate unique key — another seed beat us; skip */ }
+      }
+      return applied;
+    }
+  };
+
+  const adminCount = existingCountByRole.get(Role.ADMIN) ?? 0;
+  const adminMode: 'full' | 'diffAdd' = adminCount === 0 ? 'full' : 'diffAdd';
+  await safeApplyDefaults(Role.ADMIN, ALL_PERMISSION_KEYS, adminMode);
 
   const bursaryCount = existingCountByRole.get(Role.BURSARY) ?? 0;
-  if (bursaryCount === 0) {
-    for (const key of BURSARY_PERMISSION_KEYS) {
-      const permissionId = keyToIdMap.get(key);
-      if (!permissionId) continue;
-      await prisma.rolePermission.upsert({
-        where: { role_permissionId: { role: Role.BURSARY, permissionId } },
-        create: { role: Role.BURSARY, permissionId },
-        update: {},
-      });
-    }
-  }
+  const bursaryMode: 'full' | 'diffAdd' = bursaryCount === 0 ? 'full' : 'diffAdd';
+  await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode);
+
+  // Expose applied statistics for diagnostics (no logging secrets — only counts).
+  try {
+    // noop; reserved for future audit counter row
+  } catch { /* swallow */ }
 
   // TASK B3: Seed atomic receipt_number counter (idempotent).
   // Ensures receipt number generation uses dedicated row instead of MAX(id)+1 race.

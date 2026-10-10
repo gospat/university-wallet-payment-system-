@@ -3307,6 +3307,21 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(permSeedSrc).toMatch(/Permission\.upsert/);
       // bumpRolePermsVersion() call AFTER loop (invalidation)
       expect(permSeedSrc).toMatch(/for\s*\([\s\S]{0,400}bumpRolePermsVersion\s*\(\s*\)/);
+      // C1: ADMIN-only sensitive permission sentinel set. Must be explicitly
+      // enumerated and BURSARY_EXCLUDED must be a super-set of it so new
+      // sensitive Admin-only capabilities are never unintentionally granted
+      // to Bursary during permission resets.
+      expect(permSeedSrc).toMatch(/ADMIN_ONLY_SENSITIVE_KEYS/);
+      expect(permSeedSrc).toMatch(/BURSARY_EXCLUDED[\s\S]{0,200}ADMIN_ONLY_SENSITIVE_KEYS/);
+      // C1: role-permission application is TWO-PHASE:
+      //   * fresh databases (roleCount===0): apply full defaults (mode='full').
+      //   * existing (upgraded) databases: diffAdd only — missing default rows
+      //     are inserted with skipDuplicates, NEVER deleting customized role
+      //     perm rows. Otherwise upgraded Bursary never receives newly added
+      //     keys such as VOID_TRANSACTIONS and custom deletions are lost.
+      expect(permSeedSrc).toMatch(/safeApplyDefaults/);
+      expect(permSeedSrc).toMatch(/diffAdd|mode:\s*['"]diffAdd['"]/);
+      expect(permSeedSrc).toMatch(/mode:\s*['"]full['"]/);
     });
 
     it('TR-44.2 types/permissions Finance enum contains VOID_TRANSACTIONS literal, and BURSARY + ADMIN permission arrays INCLUDE it (so role default assignment contains the new key)', () => {
@@ -3330,6 +3345,12 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(invoiceLockSrc).toMatch(/acquireInvoiceOperationLock/);
       expect(invoiceLockSrc).toMatch(/releaseInvoiceOperationLock/);
       expect(invoiceLockSrc).toMatch(/SET\s*NX|SetNX|ioredis.*set\s*\(\s*['"`]NX/);
+      // C3: ownership tokens. Value stored in Redis is a random owner token,
+      // NOT Date.now() timestamp. Release is token-gated via Lua compare-and-delete.
+      expect(invoiceLockSrc).toMatch(/COMPARE_DELETE_LUA/);
+      expect(invoiceLockSrc).toMatch(/redis\.call\(['"]DEL['"]/);
+      expect(invoiceLockSrc).toMatch(/releaseInvoiceOperationLockByToken/);
+      expect(invoiceLockSrc).toMatch(/randomUUID/);
     });
 
     it('TR-45.2 cancelInvoice service locks invoice BEFORE any read or update (findFirst) and FOR UPDATE raw SQL inside prisma.$transaction before recheck', () => {
@@ -3338,6 +3359,12 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(cancelInvSrc).toMatch(/finally[\s\S]{0,200}releaseInvoiceOperationLock/);
       // FOR UPDATE raw SQL call (MySQL InnoDB row lock, inside $transaction tx client via tx.$queryRaw or prisma.$queryRaw)
       expect(cancelInvSrc).toMatch(/FOR\s+UPDATE/);
+      // C2: SELECT FOR UPDATE acquisition is FAIL CLOSED. There is NO empty
+      // catch { /* swallow */ } block around the lock query. An AppError 500
+      // must be raised so the operation aborts instead of proceeding without
+      // the InnoDB serialization guarantee.
+      expect(cancelInvSrc).not.toMatch(/FOR\s+UPDATE[\s\S]{0,300}catch\s*\([^)]*\)\s*\{\s*\/\*[^*]*swallow/);
+      expect(cancelInvSrc).toMatch(/Unable to obtain database row lock|database row lock.*Unable/);
     });
 
     it('TR-45.3 initiatePayment service ALSO participates in the SAME invoice operation lock (shared with cancelInvoice) AND performs re-read inside $transaction with FOR UPDATE to prevent PENDING on CANCELLED invoice', () => {
@@ -3347,12 +3374,31 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // After FOR UPDATE, invRelock re-reads status then rejects PAID/CANCELLED/REFUNDED/REVERSED by throwing 409 within same tx.
       expect(paymentSrc).toMatch(/invRelock\.status\s*===\s*['"]PAID['"][\s\S]{0,800}throw\s+new\s+AppError\([\s\S]{0,150}409/);
       expect(paymentSrc).toMatch(/invRelock\.status\s*===\s*['"]CANCELLED['"]/);
+      // C2: initiatePayment FOR UPDATE is also fail-closed. No swallowed catch.
+      expect(paymentSrc).not.toMatch(/FOR\s+UPDATE[\s\S]{0,300}catch\s*\([^)]*\)\s*\{\s*\/\*[^*]*swallow/);
+      expect(paymentSrc).toMatch(/Unable to obtain database row lock.*invoice|database row lock.*initialization/);
     });
 
     it('TR-45.4 Transaction cancellation service ALSO takes invoice lock + FOR UPDATE inside $transaction (full operation triad protected)', () => {
       expect(txCancelSrc).toMatch(/acquireInvoiceOperationLock/);
       expect(txCancelSrc).toMatch(/releaseInvoiceOperationLock/);
       expect(txCancelSrc).toMatch(/FOR\s+UPDATE/);
+      // C2+: Transaction cancellation now locks BOTH objects the mutation
+      // touches: invoice row AND transaction row (two separate SELECT … FOR UPDATE
+      // raw queries). Otherwise verifyPayment can race on the tx row while
+      // admin cancels. Fail-closed: any lock acquisition error → AppError 500.
+      expect(txCancelSrc).toMatch(/transactions.*FOR\s+UPDATE|SELECT.*transactions.*FOR\s+UPDATE|transactionId.*FOR\s+UPDATE/);
+      expect(txCancelSrc).toMatch(/Unable to obtain database row lock.*transaction|transaction.*database row lock.*Unable/);
+      // C4: fail-closed financial evidence checks before the $transaction
+      // commits. receipt/gl/settlement counts MUST NOT fall back to 0 on DB
+      // error. We look for explicit 500 wrappers around each count() call
+      // and for evidence reference / written explanation length gating.
+      expect(txCancelSrc).toMatch(/webhookEvidence/);
+      expect(txCancelSrc).toMatch(/pending|unverified.*webhook|pendingOrUnverifiedWebhooks/);
+      expect(txCancelSrc).toMatch(/missing provider UUID alone do not establish payment failure|missing UUID.*not.*failure/);
+      expect(txCancelSrc).toMatch(/writtenExplanation.*evidenceReference|≥20.*≥6|written.*evidence/);
+      // C4 settlement count: the FAIL-OPEN bug was catch->0. Replaced.
+      expect(txCancelSrc).not.toMatch(/settlement.*count[\s\S]{0,120}catch\s*\([^)]*\)\s*=>\s*0/);
     });
   });
 });
