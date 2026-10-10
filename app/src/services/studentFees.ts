@@ -357,6 +357,12 @@ export const studentFeeApi = {
     const r = await api.post(`/students/payments/${encodeURIComponent(String(realId))}/reverify`, {});
     return unwrap<any>(r);
   },
+  async getContinueOption(transactionId: number | string): Promise<any> {
+    const realId = Number(transactionId);
+    if (!Number.isFinite(realId) || realId <= 0) throw new Error('Invalid transaction ID');
+    const r = await api.get(`/students/payments/${encodeURIComponent(String(realId))}/continue-option`);
+    return (r?.data as any) ?? r;
+  },
 };
 
 export default studentFeeApi;

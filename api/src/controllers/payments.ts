@@ -111,8 +111,117 @@ export const confirmPayload = catchAsync(async (req: Request, res: Response) => 
   res.status(200).json({ status: 'success', data: result });
 });
 
+const ContinueOptionTxParam = z.object({ transactionId: z.coerce.number().int().positive() });
+export const getContinueOptionValidator = [validateParams(ContinueOptionTxParam)];
+
+export const getContinueOption = catchAsync(async (req: Request, res: Response) => {
+  const userId = Number((req as any).user?.id);
+  const txId = Number(req.params.transactionId);
+
+  const tx = await prisma.transaction.findUnique({
+    where: { id: txId },
+    select: {
+      id: true,
+      userId: true,
+      status: true,
+      gateway: true,
+      reference: true,
+      expectedAmount: true,
+      paystackReference: true,
+      alatpaySessionId: true,
+      alatpayCheckoutUrl: true,
+      alatpayOrderReference: true,
+      alatpayInitPaymentReference: true,
+      metadata: true,
+    },
+  });
+
+  if (!tx) {
+    throw new AppError('Transaction not found', 404);
+  }
+  if (Number(tx.userId) !== Number(userId)) {
+    throw new AppError('Unauthorized access to this transaction', 403);
+  }
+
+  const nonTerminal = ['PENDING', 'PROCESSING'];
+  const statusStr = String(tx.status ?? '').toUpperCase();
+
+  if (!nonTerminal.includes(statusStr)) {
+    return res.status(200).json({
+      canResume: false,
+      reason: 'Transaction is no longer in an unresolved pending state.',
+      resumeMode: 'none',
+      payload: null,
+    });
+  }
+
+  const gateway = String(tx.gateway ?? '').toUpperCase();
+  const expectedAmountNaira = tx.expectedAmount != null ? Number(tx.expectedAmount) : undefined;
+  const bellsReference = tx.reference;
+  const transactionStatus = String(tx.status);
+
+  if (gateway === 'ALATPAY') {
+    const checkoutFromMetadata = (tx.metadata as any)?.alatpay?.checkout_url ?? null;
+    const storedCheckout = tx.alatpayCheckoutUrl || checkoutFromMetadata;
+    const hasSession = !!tx.alatpaySessionId && String(tx.alatpaySessionId).trim().length > 0;
+    const hasCheckout = !!storedCheckout && String(storedCheckout).trim().length > 0;
+
+    if (hasSession && (hasCheckout || hasSession)) {
+      return res.status(200).json({
+        canResume: true,
+        reason: null,
+        resumeMode: 'alatpay_native',
+        payload: {
+          alatpayCheckoutUrl: storedCheckout || null,
+          alatpaySessionId: tx.alatpaySessionId || null,
+          alatpayInitPaymentReference: tx.alatpayInitPaymentReference || null,
+          alatpayOrderReference: tx.alatpayOrderReference || null,
+          alatpayPublicKey: null,
+          paystackAuthorizationUrl: null,
+          paystackReference: null,
+          bellsReference,
+          transactionStatus,
+          expectedAmountNaira,
+        },
+      });
+    }
+  }
+
+  if (gateway === 'PAYSTACK') {
+    const hasPaystackRef = !!tx.paystackReference && String(tx.paystackReference).trim().length > 0;
+    const authFromMeta = (tx.metadata as any)?.paystack?.authorization_url ?? null;
+    if (hasPaystackRef || authFromMeta) {
+      return res.status(200).json({
+        canResume: true,
+        reason: null,
+        resumeMode: 'paystack_redirect',
+        payload: {
+          alatpayCheckoutUrl: null,
+          alatpaySessionId: null,
+          alatpayInitPaymentReference: null,
+          alatpayOrderReference: null,
+          alatpayPublicKey: null,
+          paystackAuthorizationUrl: authFromMeta || null,
+          paystackReference: tx.paystackReference || null,
+          bellsReference,
+          transactionStatus,
+          expectedAmountNaira,
+        },
+      });
+    }
+  }
+
+  return res.status(200).json({
+    canResume: false,
+    reason: 'Stored checkout session data not available for safe resume. Please Check Payment Status or contact Support.',
+    resumeMode: 'none',
+    payload: null,
+  });
+});
+
 export default {
   initiatePayment,
   verifyPayment,
   confirmPayload,
+  getContinueOption,
 };

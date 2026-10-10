@@ -15,6 +15,8 @@ import {
   releaseInvoiceOperationLockByToken,
   releaseInvoiceOperationLock,
 } from '../utils/invoiceLock';
+import { getPaymentProvider } from '../services/payment/providerFactory';
+import { VerifyResult } from '../services/payment/types';
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
@@ -59,6 +61,7 @@ export const CancelTransactionBodySchema = z
       .refine((v) => v == null || v.length === 0 || v.length >= 4, {
         message: 'If provided, evidence reference must be at least 4 characters',
       }),
+    evidenceOverride: z.literal('MANUAL_SUPPORT_OVERRIDE').optional(),
   })
   .superRefine((val, ctx) => {
     if (val.reason === 'OTHER') {
@@ -83,6 +86,7 @@ type TransactionCancelInput = {
   reason: CancelTransactionReason;
   writtenExplanation?: string;
   evidenceReference?: string;
+  evidenceOverride?: 'MANUAL_SUPPORT_OVERRIDE';
   req?: Pick<Request, 'ip' | 'headers'>;
 };
 
@@ -98,6 +102,40 @@ const ELIGIBLE_INVOICE_STATUSES_FOR_TX_CANCEL: InvoiceStatus[] = [
   InvoiceStatus.FAILED,
   InvoiceStatus.PARTIALLY_PAID,
 ];
+
+type ProviderVerifyClassification =
+  | { kind: 'AUTH_FAILURE_TERMINAL' }
+  | { kind: 'NON_TERMINAL' }
+  | { kind: 'PENDING' };
+
+function classifyProviderVerify(verifyResult: VerifyResult): ProviderVerifyClassification {
+  const ps = String(verifyResult.providerStatus ?? '').toLowerCase().trim();
+  const terminalNegativePatterns = [
+    'declined', 'failed', 'expired', 'abandoned', 'rejected',
+    'cancelled', 'canceled', 'voided', 'not_paid', 'unpaid',
+    'error', 'invalid', 'timeout', 'expire',
+  ];
+  for (const tok of terminalNegativePatterns) {
+    if (ps.includes(tok)) {
+      return { kind: 'AUTH_FAILURE_TERMINAL' };
+    }
+  }
+  if (verifyResult.status === TransactionStatus.FAILED) {
+    return { kind: 'AUTH_FAILURE_TERMINAL' };
+  }
+  const pendingPatterns = ['pending', 'processing', 'received', 'queued', 'initiated', 'ongoing'];
+  for (const tok of pendingPatterns) {
+    if (ps.includes(tok)) {
+      return { kind: 'PENDING' };
+    }
+  }
+  if (verifyResult.status === TransactionStatus.PENDING || verifyResult.status === TransactionStatus.PROCESSING) {
+    return { kind: 'PENDING' };
+  }
+  return { kind: 'NON_TERMINAL' };
+}
+
+const STRICT_SUPPORT_TICKET_REGEX = /^(SUPPORT-[0-9]{5,}|[A-Z]{2,}-TKT-[0-9]{4,}|REC-[A-Z0-9]{6,})$/;
 
 export class TransactionCancellationService {
   static assertAuthorized(role: Role, permissions: string[]) {
@@ -118,9 +156,11 @@ export class TransactionCancellationService {
     const {
       transactionId,
       actorId,
+      actorRole,
       reason,
       writtenExplanation,
       evidenceReference,
+      evidenceOverride,
       req,
     } = input;
 
@@ -459,15 +499,11 @@ export class TransactionCancellationService {
         }
       }
 
-      // Precheck 7: Authoritative evidence requirements (C4 fail-closed).
-      // CANCEL != FAILED. Unknown state MUST NOT be converted into cancellation.
-      // The following cases each require explicit, documented audit evidence:
-      //   a) tx status=PENDING or PROCESSING (still live attempt window)
-      //   b) hasSuccessRef (provider returned SUCCESS but internal never transitioned)
-      //   c) has pending/non-terminal webhook evidence OR webhook state unverifiable
-      //   d) the provider UUID (ALATPAY final) or paystack reference is missing
-      //      — by itself NOT PROOF of failure. Still requires evidence.
-      // Elapsed time, closed popup, missing callback are NEVER sufficient.
+      // Precheck 6B: Evidence policy gate for LIVE UNRESOLVED attempts (FR-4)
+      // Live unresolved = tx still within processing window OR has unverified
+      // webhook evidence OR missing final provider ref. Fail-closed unless
+      // we have (i) authoritative provider-negative terminal evidence OR
+      // (ii) strictly-gated MANUAL_SUPPORT_OVERRIDE policy.
       const txStatus: string = String(initialTx.status);
       const liveAttempt = txStatus === 'PENDING' || txStatus === 'PROCESSING';
       const providerRefMissing =
@@ -478,6 +514,68 @@ export class TransactionCancellationService {
         (initialTx.alatpayFinalTransactionId && String(initialTx.alatpayFinalTransactionId).length > 0) ||
         ((initialTx as any).paystackReference && String((initialTx as any).paystackReference).length > 0 &&
           initialTx.status === TransactionStatus.SUCCESS);
+      const liveUnresolved =
+        liveAttempt || hasPendingOrUnverifiedWebhooks || providerRefMissing;
+
+      if (liveUnresolved) {
+        let providerNegativeTerminal = false;
+
+        if (initialTx.gateway) {
+          let bestProviderRef: string | null = null;
+          if (initialTx.alatpayFinalTransactionId && String(initialTx.alatpayFinalTransactionId).length > 0) {
+            bestProviderRef = String(initialTx.alatpayFinalTransactionId);
+          } else if ((initialTx as any).alatpayInitPaymentReference && String((initialTx as any).alatpayInitPaymentReference).length > 0) {
+            bestProviderRef = String((initialTx as any).alatpayInitPaymentReference);
+          } else if ((initialTx as any).paystackReference && String((initialTx as any).paystackReference).length > 0) {
+            bestProviderRef = String((initialTx as any).paystackReference);
+          } else if (initialTx.reference && String(initialTx.reference).length > 0) {
+            bestProviderRef = String(initialTx.reference);
+          }
+
+          if (bestProviderRef) {
+            try {
+              const provider = getPaymentProvider(initialTx.gateway as PaymentGateway);
+              const verifyResult = await provider.verify(bestProviderRef);
+              const cls = classifyProviderVerify(verifyResult);
+              if (cls.kind === 'AUTH_FAILURE_TERMINAL') {
+                providerNegativeTerminal = true;
+              }
+            } catch (_err) {
+              providerNegativeTerminal = false;
+            }
+          }
+        }
+
+        const overrideGate =
+          evidenceOverride === 'MANUAL_SUPPORT_OVERRIDE' &&
+          actorRole === Role.ADMIN &&
+          (input.actorPermissions ?? []).includes(Permissions.VOID_TRANSACTIONS) &&
+          evidenceReference != null &&
+          STRICT_SUPPORT_TICKET_REGEX.test(String(evidenceReference).trim());
+
+        if (!providerNegativeTerminal && !overrideGate) {
+          throw new AppError(
+            `Cancellation requires authoritative provider-negative evidence (declined/expired/abandoned/rejected/failed) via verifyPayment, or MANUAL_SUPPORT_OVERRIDE with ADMIN role + VOID_TRANSACTIONS permission + strict support ticket reference. ` +
+            `Free-text explanation (popup close, elapsed time, missing callback, missing UUID, typed reference) alone is NOT sufficient financial evidence for a live unresolved attempt. ` +
+            `Please run Check Payment Status (verifyPayment) first to obtain explicit terminal negative evidence, or apply the strictly-gated manual override policy with a recognized ticket/reference pattern.`,
+            412,
+          );
+        }
+      }
+
+      // Precheck 7: Authoritative evidence requirements (C4 fail-closed).
+      // CANCEL != FAILED. Unknown state MUST NOT be converted into cancellation.
+      // The following cases each require explicit, documented audit evidence:
+      //   a) tx status=PENDING or PROCESSING (still live attempt window)
+      //   b) hasSuccessRef (provider returned SUCCESS but internal never transitioned)
+      //   c) has pending/non-terminal webhook evidence OR webhook state unverifiable
+      //   d) the provider UUID (ALATPAY final) or paystack reference is missing
+      //      — by itself NOT PROOF of failure. Still requires evidence.
+      // Elapsed time, closed popup, missing callback are NEVER sufficient.
+      // NOTE: For LIVE UNRESOLVED attempts, the length-only check is IRRELEVANT.
+      // They already passed through the strict Precheck 6B gate above.
+      // Length-only documentation checks apply only to NON-live terminal-unbalanced
+      // cases (FAILED/UNDERPAID/OVERPAID with no pending webhooks).
       const requireEvidence =
         liveAttempt || hasSuccessRef || hasPendingOrUnverifiedWebhooks || providerRefMissing;
 
@@ -489,7 +587,12 @@ export class TransactionCancellationService {
         if (hasSuccessRef) reasons.push('provider success references are present on the attempt');
         if (hasPendingOrUnverifiedWebhooks) reasons.push('pending/unverified webhook evidence exists');
         if (providerRefMissing) reasons.push('final provider transaction reference is unavailable (missing UUID ≠ failed payment)');
-        if (written < 20 || ev < 6) {
+
+        const isNonLiveTerminal =
+          !liveUnresolved &&
+          (txStatus === 'FAILED' || txStatus === 'UNDERPAID' || txStatus === 'OVERPAID');
+
+        if (isNonLiveTerminal && (written < 20 || ev < 6)) {
           throw new AppError(
             `Cancellation requires documented audit evidence: ${reasons.join('; ')}. ` +
               `Provide both written explanation (≥20 characters) and evidence reference (≥6 characters) for the permanent cancellation record. ` +

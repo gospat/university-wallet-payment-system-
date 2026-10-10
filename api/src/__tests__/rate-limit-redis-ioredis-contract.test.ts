@@ -336,6 +336,7 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
     billStudentDirect: noop, billStudentDirectValidator: passArr,
     generateFeeAssignedInvoices: noop, confirmPayload: noop, confirmPayloadValidator: passArr,
     getDirectBillInvoice: noop, getDirectBillInvoiceValidator: passArr,
+    getContinueOption: noop, getContinueOptionValidator: passArr,
   }));
   jest.mock('../controllers/fees', () => ({
     listFeesCatalogue: jest.fn((_r: any, res: any) => res.status(200).json([])),
@@ -348,7 +349,7 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
     listMyFeeAssignments: noop, billStudent: noop, generateInvoices: noop,
     listFeeAssignments: noop, getFeeAssignment: noop, createFeeAssignment: noop,
     updateFeeAssignment: noop, deleteFeeAssignment: noop, manualStudentInvoice: noop,
-    createDirectStudentBill: noop,
+    createDirectStudentBill: noop, cancelInvoice: noop,
   }));
   jest.mock('../controllers/auth', () => ({
     signup: noop, login: noop, refresh: passArr, logout: passArr, logoutAll: noop, me: noop,
@@ -547,6 +548,7 @@ describe('8 limiters + webhook regression', () => {
       billStudentDirect: noop, billStudentDirectValidator: passArr,
       generateFeeAssignedInvoices: noop, confirmPayload: noop, confirmPayloadValidator: passArr,
       getDirectBillInvoice: noop, getDirectBillInvoiceValidator: passArr,
+      getContinueOption: noop, getContinueOptionValidator: passArr,
     }));
     jest.mock('../controllers/fees', () => ({
       listFeesCatalogue: noop, listFees: noop, createFee: noop, updateFee: noop,
@@ -558,7 +560,7 @@ describe('8 limiters + webhook regression', () => {
       listMyFeeAssignments: noop, billStudent: noop, generateInvoices: noop,
       listFeeAssignments: noop, getFeeAssignment: noop, createFeeAssignment: noop,
       updateFeeAssignment: noop, deleteFeeAssignment: noop, manualStudentInvoice: noop,
-      createDirectStudentBill: noop,
+      createDirectStudentBill: noop, cancelInvoice: noop,
     }));
     jest.mock('../controllers/auth', () => ({
       signup: noop, login: noop, refresh: passArr, logout: passArr, logoutAll: noop, me: noop,

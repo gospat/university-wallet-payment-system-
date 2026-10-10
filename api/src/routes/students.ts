@@ -49,6 +49,8 @@ import {
 import {
   confirmPayload,
   confirmPayloadValidator,
+  getContinueOption,
+  getContinueOptionValidator,
   initiatePayment,
   initiatePaymentValidator,
   verifyPayment,
@@ -111,6 +113,13 @@ router.get(
   restrictTo(Role.STUDENT),
   ...(verifyPaymentValidator as any),
   verifyPayment,
+);
+router.get(
+  '/payments/:transactionId/continue-option',
+  protect,
+  restrictTo(Role.STUDENT),
+  ...(getContinueOptionValidator as any),
+  getContinueOption,
 );
 
 // ---------- Student-initiated reverification (Task 3) -----------------------

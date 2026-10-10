@@ -307,7 +307,7 @@ export async function seedPermissions() {
     // re-grants on the next boot. Counter-not-exist in pre-migration env
     // rolls back the sentinel write; we fall back to the safe non-atomic
     // grant-only path (the first boot is not customised yet; the sentinel
-    // write will retry once the 0005 CANCELLED migration creates Counter).
+    // write will retry on next boot once the Prisma client and DB schema have converged (Counter table already created by 0001_audit_gl_counter_receipts; transient unavailability can occur during rolling deploy drift when client and live DB schema are temporarily out of sync).
     try {
       await prisma.$transaction(async (tx) => {
         await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode, tx);
@@ -322,10 +322,11 @@ export async function seedPermissions() {
       const counterDoesNotExist =
         msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist');
       if (counterDoesNotExist) {
-        // Graceful pre-migration first-boot: Counter table not available yet.
+        // Graceful rolling-deploy drift first-boot: Counter table not available yet
+        // due to temporary Prisma client / live DB schema divergence.
         // Apply defaults (cannot write sentinel — server will retry tx-write
-        // on subsequent boots after the forward-only migration adds Counter).
-        console.warn('[seedPermissions:bursary-full] Counter table not available during pre-migration first boot; wrote full Bursary defaults only (sentinel deferred until counter table exists).');
+        // on subsequent boots once client and DB schema have converged).
+        console.warn('[seedPermissions:bursary-full] Counter table not available during schema-drift first boot; wrote full Bursary defaults only (sentinel deferred until counter table exists during rolling deploy convergence).');
         try { await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode); } catch {}
       } else {
         console.warn('[seedPermissions:bursary-full] Atomic full-default grant + sentinel transaction failed:', msg.slice(0, 200));
@@ -352,8 +353,9 @@ export async function seedPermissions() {
     } catch (e) {
       const msg = (e as Error)?.message ?? '';
       if (msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist')) {
-        // Counter table doesn't exist yet — pre-migration seed. Fall back to
-        // running the delta (it will be the first run anyway so it is safe).
+        // Counter table doesn't exist yet — rolling-deploy drift during schema
+        // convergence. Fall back to running the delta (it will be the first
+        // run anyway so it is safe).
         alreadyApplied = false;
       } else {
         // Unknown DB error: fail-safe NO-OP for the delta-add path so we
@@ -386,11 +388,11 @@ export async function seedPermissions() {
         const counterDoesNotExist =
           msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist');
         if (counterDoesNotExist) {
-          // Pre-migration graceful path: Counter table not yet migrated so
-          // sentinel write is impossible; apply the delta alone (no custom
-          // admin changes can have happened yet in a pre-migration bootstrap
-          // because no runtime is running).
-          console.warn('[seedPermissions:bursary-diffAdd] Counter table missing during pre-migration boot; applied delta defaults (no sentinel; re-tries next startup until counter table exists).');
+          // Rolling-deploy drift graceful path: Counter table not yet converged
+          // so sentinel write is impossible; apply the delta alone (no custom
+          // admin changes can have happened yet in a deploy-drift bootstrap
+          // because no runtime is running with stable schema).
+          console.warn('[seedPermissions:bursary-diffAdd] Counter table missing during rolling-deploy schema drift boot; applied delta defaults (no sentinel; re-tries next startup until counter table exists during convergence).');
           try { await safeApplyDefaults(Role.BURSARY, deltaKeys, bursaryMode); } catch {}
         } else {
           // Unknown failure: fail silently; do not leave ambiguous half-applied
@@ -416,7 +418,7 @@ export async function seedPermissions() {
       update: {},
     });
   } catch (e) {
-    // Counter model may not yet exist in db during pre-migration seed runs; swallow.
+    // Counter model may not yet exist in db during rolling-deploy schema drift seed runs; swallow.
     const msg = (e as Error)?.message ?? '';
     if (msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist')) {
       // ignore

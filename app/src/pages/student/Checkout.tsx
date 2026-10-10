@@ -44,6 +44,13 @@ const CheckoutPage: React.FC = () => {
   const [alatpayNativeModal, setAlatpayNativeModal] = useState<any>(null);
   const [alatpayRefs, setAlatpayRefs] = useState<any>(null);
 
+  const [pendingTx, setPendingTx] = useState<any>(null);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [continuing, setContinuing] = useState(false);
+  const [continueOption, setContinueOption] = useState<any>(null);
+  const [showUnresolved, setShowUnresolved] = useState(false);
+  const [lastInitiatedResult, setLastInitiatedResult] = useState<any>(null);
+
   useEffect(() => {
     (async () => {
       if (!invoiceId) {
@@ -89,6 +96,8 @@ const CheckoutPage: React.FC = () => {
     setCheckoutMode(undefined);
     setAlatpayNativeModal(null);
     setAlatpayRefs(null);
+    setShowUnresolved(false);
+    setLastInitiatedResult(null);
     try {
       const init = await studentFeeApi.initiatePayment({
         invoiceId: invoiceId || '',
@@ -97,6 +106,7 @@ const CheckoutPage: React.FC = () => {
         idempotencyKey: `INV-${invoiceId || 'X'}-${Date.now()}`,
       });
       const initData = (init as any)?.data ?? init;
+      setLastInitiatedResult(initData);
       const gl = initData?.gateway_label ?? initData?.gatewayLabel ?? undefined;
       if (gl) setGatewayLabel(gl);
       const checkoutPopupMode: 'hosted_url_iframe' | 'alatpay_native_modal_v1' | undefined = initData?.checkout_popup_mode === 'alatpay_native_modal_v1'
@@ -106,6 +116,7 @@ const CheckoutPage: React.FC = () => {
       const alatpayRef = initData?.alatpay_refs ?? null;
       const url = (init as any)?.authorization_url || (init as any)?.data?.authorization_url || '';
       const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
+      setPendingTx({ reference: ref, transactionId: initData?.transactionId ?? null });
       if (checkoutPopupMode === 'alatpay_native_modal_v1' && alatpayCheckout) {
         const bellsReference = alatpayRef?.bells_reference || ref;
         try {
@@ -125,7 +136,9 @@ const CheckoutPage: React.FC = () => {
               const m = e?.message || t.failedInit;
               setMsg(typeof m === 'string' ? m : t.failedInit);
             },
-            onClosed: () => {},
+            onClosed: () => {
+              setShowUnresolved(true);
+            },
           });
         } catch (_e: any) {
           const m = _e?.message || t.failedInit;
@@ -157,6 +170,151 @@ const CheckoutPage: React.FC = () => {
       setMsg(typeof m === 'string' ? m : t.failedInit);
     } finally {
       setProceeding(false);
+    }
+  };
+
+  const checkStatus = async () => {
+    if (!lastInitiatedResult && !pendingTx) {
+      setMsg('No pending payment reference available.');
+      return;
+    }
+    const ref =
+      (lastInitiatedResult?.reference) ||
+      (pendingTx?.reference) ||
+      (lastInitiatedResult?.alatpay_refs?.bells_reference);
+    if (!ref) {
+      setMsg('No pending payment reference available.');
+      return;
+    }
+    setCheckingStatus(true);
+    setMsg(null);
+    try {
+      const providerReference = lastInitiatedResult?.alatpay_refs?.final_transaction_id ?? null;
+      const result: any = await studentFeeApi.verifyPayment(ref, { providerReference });
+      const ui = result?.uiState ?? result?.data?.uiState ?? result?.status ?? 'pending';
+      const txStatus = result?.transaction?.status ?? result?.data?.transaction?.status ?? null;
+      if (ui === 'success' || txStatus === 'SUCCESS') {
+        const bellsRef = ref;
+        navigate(`/student/payments/callback/${encodeURIComponent(bellsRef)}`);
+        return;
+      }
+      if (ui === 'failed' || txStatus === 'FAILED') {
+        setMsg('Payment failed. Please try a new payment or contact Support.');
+        return;
+      }
+      alert(
+        'Payment is still being processed by the provider. Please try again later or contact Support if it remains unresolved for more than 24 hours.'
+      );
+    } catch (_err: any) {
+      const rawStatus = _err?.response?.data?.rawStatus ?? null;
+      const status = _err?.response?.data?.status ?? null;
+      if (status === 'pending_confirmation' || rawStatus === 'PENDING' || (status && String(status).includes('pending'))) {
+        alert(
+          'Payment is still being processed by the provider. Please try again later or contact Support if it remains unresolved for more than 24 hours.'
+        );
+      } else {
+        const m = _err?.payload?.message || _err?.message || 'Unable to check payment status.';
+        setMsg(typeof m === 'string' ? m : 'Unable to check payment status.');
+      }
+    } finally {
+      setCheckingStatus(false);
+    }
+  };
+
+  const continuePayment = async () => {
+    const txId =
+      (pendingTx?.transactionId) ||
+      (lastInitiatedResult?.transactionId) ||
+      (lastInitiatedResult?.data?.transactionId);
+    if (!txId) {
+      setMsg('Transaction identifier is not available for Continue. Please use Check Payment Status or start a new payment.');
+      return;
+    }
+    setContinuing(true);
+    setMsg(null);
+    setContinueOption(null);
+    try {
+      const option: any = await studentFeeApi.getContinueOption(txId);
+      setContinueOption(option);
+      if (!option?.canResume) {
+        const reason = option?.reason || 'Unable to continue this payment session.';
+        setMsg(reason);
+        alert(reason);
+        setContinuing(false);
+        return;
+      }
+      const payload = option.payload || {};
+      if (option.resumeMode === 'alatpay_native') {
+        const alatpayCheckout = lastInitiatedResult?.alatpay_public_checkout ?? null;
+        if (!alatpayCheckout) {
+          const cannotResume = 'Original ALATPay checkout session data is no longer available in this browser tab. Please use Check Payment Status or start a new payment.';
+          setMsg(cannotResume);
+          alert(cannotResume);
+          setContinuing(false);
+          return;
+        }
+        const bellsReference = payload.bellsReference || pendingTx?.reference || lastInitiatedResult?.reference || '';
+        try {
+          await launchAlatpayNativeModal(alatpayCheckout, {
+            onReportTransaction: (report) => {
+              const base = `/student/payments/callback/${encodeURIComponent(bellsReference)}`;
+              const finalUuid = report?.extractedFinalTxId ?? null;
+              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
+                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
+                navigate(`${base}?${qs}`);
+              } else {
+                navigate(base);
+              }
+            },
+            onError: (e) => {
+              const m = e?.message || t.failedInit;
+              setMsg(typeof m === 'string' ? m : t.failedInit);
+            },
+            onClosed: () => {
+              setShowUnresolved(true);
+            },
+          });
+        } catch (_e: any) {
+          const m = _e?.message || t.failedInit;
+          setMsg(typeof m === 'string' ? m : t.failedInit);
+        } finally {
+          setContinuing(false);
+        }
+        return;
+      }
+      if (option.resumeMode === 'paystack_redirect') {
+        const authUrl = payload.paystackAuthorizationUrl || null;
+        if (typeof authUrl === 'string' && authUrl.startsWith('http')) {
+          setCheckoutMode('hosted_url_iframe');
+          setCheckoutModalUrl(authUrl);
+          setCheckoutModalRef(payload.paystackReference || payload.bellsReference || undefined);
+          setCheckoutModalAmount(payload.expectedAmountNaira || amt);
+          setCheckoutModalInvoiceId(invoiceId);
+          setCheckoutModalGateway('Paystack');
+          setCheckoutModalOpen(true);
+          setContinuing(false);
+          return;
+        }
+        const ref = payload.paystackReference || payload.bellsReference || null;
+        if (ref) {
+          navigate(`/student/payments/callback/${encodeURIComponent(ref)}`);
+          setContinuing(false);
+          return;
+        }
+        const cannotResume = 'Stored Paystack redirect URL is not available for safe resume. Please Check Payment Status or contact Support.';
+        setMsg(cannotResume);
+        alert(cannotResume);
+        setContinuing(false);
+        return;
+      }
+      const genericNoResume = option.reason || 'Unable to continue this payment session.';
+      setMsg(genericNoResume);
+      alert(genericNoResume);
+    } catch (_err: any) {
+      const m = _err?.payload?.message || _err?.message || 'Unable to retrieve continue option.';
+      setMsg(typeof m === 'string' ? m : 'Unable to retrieve continue option.');
+    } finally {
+      setContinuing(false);
     }
   };
 
@@ -295,13 +453,71 @@ const CheckoutPage: React.FC = () => {
                 </button>
               </div>
             </section>
+
+            {showUnresolved && (
+              <section className="bg-amber-50 border border-amber-200 rounded-2xl shadow-sm p-6">
+                <h2 className="text-lg font-bold text-amber-900 flex items-center gap-2">
+                  <AlertTriangle className="h-5 w-5 text-amber-600" /> Unresolved Payment Attempt
+                </h2>
+                <p className="text-sm text-amber-800 mt-1">
+                  You recently closed a payment popup or checkout window before confirmation completed. Your payment may still be in progress. Use the actions below before starting a new payment.
+                </p>
+                <div className="mt-4 text-xs font-mono text-amber-900/80 bg-amber-100/60 border border-amber-200 rounded-lg px-3 py-2">
+                  Reference:&nbsp;
+                  <span className="font-bold">
+                    {pendingTx?.reference ||
+                      lastInitiatedResult?.reference ||
+                      lastInitiatedResult?.alatpay_refs?.bells_reference ||
+                      '—'}
+                  </span>
+                  {gatewayLabel && (
+                    <span className="ml-4">
+                      Via:&nbsp;<span className="font-bold">{gatewayLabel}</span>
+                    </span>
+                  )}
+                </div>
+                <div className="mt-5 flex items-center gap-3 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={checkStatus}
+                    disabled={checkingStatus}
+                    aria-label="Check Payment Status"
+                    className="inline-flex items-center gap-2 bg-white hover:bg-amber-100 disabled:opacity-60 text-amber-900 font-bold px-5 py-2.5 rounded-lg shadow-sm border border-amber-300"
+                  >
+                    {checkingStatus ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CreditCard className="h-4 w-4" />
+                    )}
+                    {checkingStatus ? 'Checking…' : 'Check Payment Status'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={continuePayment}
+                    disabled={continuing || checkingStatus}
+                    aria-label="Continue Payment"
+                    className="inline-flex items-center gap-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white font-bold px-5 py-2.5 rounded-lg shadow-sm"
+                  >
+                    {continuing ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ArrowRight className="h-4 w-4" />
+                    )}
+                    {continuing ? 'Continuing…' : 'Continue Payment'}
+                  </button>
+                </div>
+              </section>
+            )}
           </div>
         )}
         </div>
       </div>
       <HostedCheckoutModal
         isOpen={checkoutModalOpen}
-        onClose={() => setCheckoutModalOpen(false)}
+        onClose={() => {
+          setCheckoutModalOpen(false);
+          setShowUnresolved(true);
+        }}
         checkoutUrl={checkoutModalUrl}
         gatewayLabel={checkoutModalGateway}
         invoiceId={checkoutModalInvoiceId}

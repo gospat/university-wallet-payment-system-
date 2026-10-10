@@ -49,56 +49,139 @@ const JSON_DB_NULL = Prisma.JsonNull;
 // unavailable or command throws. Locks short (3s) because it's just there to
 // serialize parallel Pay-Now double-clicks / tab races / page refreshes that
 // would otherwise both pass the pending-count guard before any row persists.
-const INITIATE_LOCK_TTL_SEC = Number(process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE) || (process.env.NODE_ENV === 'test' ? 0 : 3);
-const _fallbackInitiateLocks = new Map<string, number>();
+let INITIATE_LOCK_TTL_SEC: number = Number(process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE) || (process.env.NODE_ENV === 'test' ? 0 : 3);
+export function _testOverrideInitiateLockTtl(sec: number): void { INITIATE_LOCK_TTL_SEC = Math.max(0, sec); }
+const AUTH_SUCCESS_SET = new Set(['success', 'completed', 'paid']);
+const AUTH_TERMINAL_FAILURE_SET = new Set(['failed', 'declined', 'rejected', 'expired', 'abandoned']);
+const NON_TERMINAL_SET = new Set(['pending', 'processing', 'initiated', 'queued', 'unknown', '', 'unrecognized', 'ambiguous']);
+
+export type ProviderClassifyKind = 'AUTH_SUCCESS' | 'AUTH_FAILURE_TERMINAL' | 'NON_TERMINAL' | 'TRANSPORT_EXCEPTION';
+
+export function classifyProviderVerify(
+  rawStatus: unknown,
+  didThrow?: { error: boolean },
+): {
+  kind: ProviderClassifyKind;
+  writtenStatus: TransactionStatus | null;
+  normalizedRaw: string;
+} {
+  if (didThrow?.error) {
+    return { kind: 'TRANSPORT_EXCEPTION', writtenStatus: null, normalizedRaw: '__transport_exception__' };
+  }
+  let normalized: string;
+  if (rawStatus === null || rawStatus === undefined) {
+    normalized = '';
+  } else if (typeof rawStatus === 'string') {
+    normalized = rawStatus.trim().toLowerCase();
+  } else if (typeof (rawStatus as any).status === 'string') {
+    normalized = String((rawStatus as any).status).trim().toLowerCase();
+  } else {
+    normalized = String(rawStatus).trim().toLowerCase();
+  }
+  if (AUTH_SUCCESS_SET.has(normalized)) {
+    return { kind: 'AUTH_SUCCESS', writtenStatus: TransactionStatus.SUCCESS, normalizedRaw: normalized };
+  }
+  if (rawStatus != null && typeof rawStatus === 'object' && (rawStatus as any).status === TransactionStatus.SUCCESS) {
+    return { kind: 'AUTH_SUCCESS', writtenStatus: TransactionStatus.SUCCESS, normalizedRaw: normalized };
+  }
+  if (AUTH_TERMINAL_FAILURE_SET.has(normalized)) {
+    return { kind: 'AUTH_FAILURE_TERMINAL', writtenStatus: TransactionStatus.FAILED, normalizedRaw: normalized };
+  }
+  if (NON_TERMINAL_SET.has(normalized)) {
+    return { kind: 'NON_TERMINAL', writtenStatus: null, normalizedRaw: normalized };
+  }
+  return { kind: 'NON_TERMINAL', writtenStatus: null, normalizedRaw: normalized };
+}
+
+const COMPARE_DELETE_LUA = `
+  if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+  else
+    return 0
+  end
+`;
+
+type FallbackInitiateLock = { token: string; expireAtMs: number };
+const _fallbackInitiateLocks = new Map<string, FallbackInitiateLock>();
 
 /** ONLY to be used by Jest tests to reset the in-process degraded dedup lock map between test runs. */
 export function _testResetInitiateLocks() {
   _fallbackInitiateLocks.clear();
 }
 
-async function releaseInitiateDedupeLock(studentId: number, invoiceId: number): Promise<void> {
+export async function releaseInitiateDedupeLock(
+  studentId: number,
+  invoiceId: number,
+  ownerToken: string | null | undefined,
+): Promise<boolean> {
+  if (ownerToken == null) return false;
   const key = `initiates:lock:${studentId}:${invoiceId}`;
   try {
     const r = getRedis();
     if (r && typeof r.call === 'function' && INITIATE_LOCK_TTL_SEC > 0) {
-      await r.call('DEL', key);
-      return;
+      const evalRes: any = await r.call('EVAL', COMPARE_DELETE_LUA, 1, key, ownerToken);
+      return evalRes === 1 || evalRes === true || (typeof evalRes === 'string' && Number(evalRes) === 1);
     }
   } catch {
     /* fall through */
   }
-  if (INITIATE_LOCK_TTL_SEC === 0) return;
-  _fallbackInitiateLocks.delete(key);
+  if (INITIATE_LOCK_TTL_SEC === 0) return true;
+  const existing = _fallbackInitiateLocks.get(key);
+  if (existing && existing.token === ownerToken) {
+    _fallbackInitiateLocks.delete(key);
+    return true;
+  }
+  return false;
 }
 
-async function acquireInitiateDedupeLock(studentId: number, invoiceId: number): Promise<boolean> {
+export async function acquireInitiateDedupeLock(
+  studentId: number,
+  invoiceId: number
+): Promise<boolean> {
   const key = `initiates:lock:${studentId}:${invoiceId}`;
-  const expireAtMs = Date.now() + (INITIATE_LOCK_TTL_SEC > 0 ? INITIATE_LOCK_TTL_SEC : 1) * 1000;
-  // Redis path
+  if (INITIATE_LOCK_TTL_SEC === 0) return true;
+  if (_fallbackInitiateLocks.has(key)) return false;
+  const res = await acquireInitiateDedupeLockWithOwner(studentId, invoiceId);
+  return res.ok;
+}
+
+export async function acquireInitiateDedupeLockWithOwner(
+  studentId: number,
+  invoiceId: number,
+): Promise<{ ok: boolean; ownerToken: string | null; acquiredAtMs?: number; ttlMs?: number }> {
+  const key = `initiates:lock:${studentId}:${invoiceId}`;
+  const acquiredAtMs = Date.now();
+  const ttlMs = (INITIATE_LOCK_TTL_SEC > 0 ? INITIATE_LOCK_TTL_SEC : 1) * 1000;
+  const ownerToken =
+    (crypto as any).randomUUID != null
+      ? (crypto as any).randomUUID()
+      : `lock:${acquiredAtMs}:${Math.random().toString(36).slice(2, 14)}`;
   try {
     const r = getRedis();
     if (r && typeof r.call === 'function' && INITIATE_LOCK_TTL_SEC > 0) {
-      const result: any = await r.call('SET', key, String(Date.now()), 'NX', 'EX', INITIATE_LOCK_TTL_SEC);
-      if (result === 'OK' || result === 'SET' || result === true || result === 1) return true;
-      return false;
+      const result: any = await r.call('SET', key, ownerToken, 'NX', 'EX', INITIATE_LOCK_TTL_SEC);
+      if (result === 'OK' || result === 'SET' || result === true || result === 1) {
+        return { ok: true, ownerToken, acquiredAtMs, ttlMs };
+      }
+      return { ok: false, ownerToken: null };
     }
   } catch {
     /* fall through to degraded in-process map */
   }
-  // In-process degraded path.
-  // In NODE_ENV=test with explicit TTL override = 0 (Jest default), the degraded
-  // lock is deliberately disabled. This lets idempotency tests directly exercise
-  // the DB-level PENDING-age + ceiling guards (425 / 409) without contention from
-  // the short-TTL concurrency lock. Production always has INITIATE_LOCK_TTL_SEC > 0.
-  if (INITIATE_LOCK_TTL_SEC === 0) return true;
+  if (INITIATE_LOCK_TTL_SEC === 0) {
+    return { ok: true, ownerToken: `bypass:${ownerToken}`, acquiredAtMs, ttlMs };
+  }
   const now = Date.now();
   for (const [k, v] of _fallbackInitiateLocks.entries()) {
-    if (v < now) _fallbackInitiateLocks.delete(k);
+    if (v.expireAtMs < now) _fallbackInitiateLocks.delete(k);
   }
-  if (_fallbackInitiateLocks.has(key)) return false;
-  _fallbackInitiateLocks.set(key, expireAtMs);
-  return true;
+  const existing = _fallbackInitiateLocks.get(key);
+  if (existing && existing.expireAtMs > now) {
+    return { ok: false, ownerToken: null };
+  }
+  const expireAtMs = now + ttlMs;
+  _fallbackInitiateLocks.set(key, { token: ownerToken, expireAtMs });
+  return { ok: true, ownerToken, acquiredAtMs, ttlMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +430,9 @@ export class PaymentService {
   // Redis/in-process lock. Otherwise two parallel requests can both see
   // count=0 and create two PENDING provider transactions. A 429 is returned
   // for the losing request instead of a duplicate.
-  const dedupeLockOk = await acquireInitiateDedupeLock(studentId, inv.id);
+  const dedupeLockRes = await (false ? acquireInitiateDedupeLock(studentId, inv.id) : acquireInitiateDedupeLockWithOwner(studentId, inv.id)) as any;
+  const dedupeLockOk = dedupeLockRes.ok;
+  const dedupeLockToken = dedupeLockRes.ownerToken;
   if (!dedupeLockOk) {
     throw new AppError(
       'Another payment initiation request is currently in progress for this invoice. Please wait a moment and try again.',
@@ -395,7 +480,7 @@ export class PaymentService {
       try {
         if (!dedupeLockReleased) {
           dedupeLockReleased = true;
-          await releaseInitiateDedupeLock(studentId, inv.id);
+          await releaseInitiateDedupeLock(studentId, inv.id, dedupeLockToken);
         }
       } catch {
         /* best-effort release */
@@ -865,7 +950,7 @@ export class PaymentService {
     } finally {
       if (!dedupeLockReleased) {
         dedupeLockReleased = true;
-        try { await releaseInitiateDedupeLock(studentId, inv.id); } catch { /* best-effort */ }
+        try { await releaseInitiateDedupeLock(studentId, inv.id, dedupeLockToken); } catch { /* best-effort */ }
       }
       if (!opLockReleased) {
         opLockReleased = true;
@@ -1106,15 +1191,28 @@ export class PaymentService {
         ref;
     }
 
-    // 1. Call provider verify (throws AppError on failure).
-    const verifyResult = await provider.verify(providerRefToVerify);
-    const providerRef = String(verifyResult.providerReference ?? providerRefToVerify);
-    let paidMinor = Number(verifyResult.paidAmountMinor);
-    let paidNaira = Number(verifyResult.paidAmountNaira);
-    const channel = verifyResult.channel;
-    const paidAt = verifyResult.paidAt;
-    const providerStatus = String(verifyResult.providerStatus ?? '').toLowerCase();
-    const rawPayload = verifyResult.raw ?? {};
+    // 1. Call provider verify (transport exceptions classified separately).
+    let verifyResult: any = null;
+    let providerTransportThrew = false;
+    let providerRawStatus: unknown = '';
+    try {
+      verifyResult = await provider.verify(providerRefToVerify);
+      providerRawStatus = verifyResult?.providerStatus ?? (verifyResult as any)?.status ?? '';
+    } catch {
+      providerTransportThrew = true;
+    }
+    const classify = classifyProviderVerify(
+      providerTransportThrew ? '__transport_exception__' : (verifyResult?.providerStatus ?? (verifyResult as any)?.status ?? ''),
+      { error: providerTransportThrew },
+    );
+    const providerRef = verifyResult ? String(verifyResult.providerReference ?? providerRefToVerify) : providerRefToVerify;
+    let paidMinor = verifyResult ? Number(verifyResult.paidAmountMinor) : 0;
+    let paidNaira = verifyResult ? Number(verifyResult.paidAmountNaira) : 0;
+    const channel = verifyResult?.channel;
+    const paidAt = verifyResult?.paidAt ?? new Date();
+    const providerStatus = classify.normalizedRaw;
+    const rawPayload = verifyResult?.raw ?? {};
+    void verifyResult;
 
     // ============================================================
     // 1a. ALATPay gross-vs-fee normalization (customer-borne fee).
@@ -1239,6 +1337,8 @@ export class PaymentService {
     // 3. Atomic $transaction: everything after this is idempotent/race-safe.
     // ---------------------------------------------------------------------
     const result = await prisma.$transaction(async (tx) => {
+      const originalStatusFromInitialTx: TransactionStatus = (initialTx.status as TransactionStatus) ?? TransactionStatus.PENDING;
+
       // 3a. Lock transaction row (FOR UPDATE emulation: updateMany WHERE status=PENDING
       //     with set status = PROCESSING; if 0 rows changed the tx is already done).
       const pendingUpdate = await tx.transaction.updateMany({
@@ -1267,10 +1367,21 @@ export class PaymentService {
       });
       if (!latest) throw new AppError(i18n.errors.payment.transactionNotFound, 404);
 
-      // 3c. Expected amount (kobo) — compare with 1-kobo tolerance.
+      // FR-2: isAlreadySettled — idempotency guard for late-success propagation.
+      async function isAlreadySettled(txPrisma: any, txRow: any): Promise<boolean> {
+        if (!txRow) return false;
+        const existingReceipt = await txPrisma.receipt.findFirst({ where: { transactionId: txRow.id } });
+        if (existingReceipt) return true;
+        const existingGl = await txPrisma.generalLedger.findFirst({ where: { transactionId: txRow.id } });
+        if (existingGl) return true;
+        return false;
+      }
+
+      // 3c. Expected amount + delta ONLY computed inside AUTH_SUCCESS branch.
       const expectedNaira = money(Number(latest.expectedAmount ?? 0));
       const expectedKobo = kobo.fromNaira(expectedNaira);
-      const deltaKobo = Math.abs(paidMinor - expectedKobo);
+      let deltaKobo = 0;
+      let underOrOver: 'UNDERPAID' | 'OVERPAID' | null = null;
 
       const amountBreakdown = latest.metadata?.amount ?? {};
       const baseAmount = money(Number(amountBreakdown.base ?? 0));
@@ -1278,26 +1389,63 @@ export class PaymentService {
       void Number(amountBreakdown.serviceCharge ?? 0);
       void Number(amountBreakdown.gatewayFee ?? 0);
 
-      // --- UNDERPAID / OVERPAID PATH (no ledger, no receipt) ---------------
-      const txnSuccess = providerStatus === 'success' || providerStatus === 'completed' || providerStatus === 'paid' || verifyResult.status === TransactionStatus.SUCCESS;
-      if (!txnSuccess || deltaKobo > 1) {
+      // =============================================================
+      // BRANCH-A: TRANSPORT_EXCEPTION — write NOTHING terminal.
+      // If we flipped PENDING→PROCESSING, revert to original non-terminal status.
+      // =============================================================
+      if (classify.kind === 'TRANSPORT_EXCEPTION') {
         if (!alreadyProcessed) {
-          const newStatus: TransactionStatus =
-            !txnSuccess
-              ? TransactionStatus.FAILED
-              : paidMinor < expectedKobo
-                ? 'UNDERPAID' as any
-                : 'OVERPAID' as any;
+          const revertStatus: TransactionStatus = originalStatusFromInitialTx ?? TransactionStatus.PENDING;
+          await tx.transaction.update({
+            where: { id: latest.id },
+            data: { status: revertStatus },
+          });
+        }
+        const finalTx = await tx.transaction.findUnique({ where: { id: latest.id } });
+        return {
+          verified: false,
+          status: finalTx?.status,
+          amount_expected_kobo: expectedKobo,
+          amount_paid_kobo: paidMinor,
+          delta_kobo: 0,
+          reason: `${txGateway} transport exception during verify — no terminal status written`,
+        };
+      }
+
+      // =============================================================
+      // BRANCH-B: NON_TERMINAL — write NOTHING terminal. Revert PROCESSING strand.
+      // =============================================================
+      if (classify.kind === 'NON_TERMINAL') {
+        if (!alreadyProcessed) {
+          const revertStatus: TransactionStatus =
+            (originalStatusFromInitialTx && originalStatusFromInitialTx !== TransactionStatus.PROCESSING)
+              ? originalStatusFromInitialTx
+              : (classify.normalizedRaw === 'processing' ? TransactionStatus.PROCESSING : TransactionStatus.PENDING);
+          await tx.transaction.update({
+            where: { id: latest.id },
+            data: { status: revertStatus },
+          });
+        }
+        const finalTx = await tx.transaction.findUnique({ where: { id: latest.id } });
+        return {
+          verified: false,
+          status: finalTx?.status,
+          amount_expected_kobo: expectedKobo,
+          amount_paid_kobo: paidMinor,
+          delta_kobo: 0,
+          reason: `${txGateway} non-terminal status: ${classify.normalizedRaw} — status preserved non-terminal`,
+        };
+      }
+
+      // =============================================================
+      // BRANCH-C: AUTH_FAILURE_TERMINAL — ONLY write FAILED here.
+      // =============================================================
+      if (classify.kind === 'AUTH_FAILURE_TERMINAL') {
+        if (!alreadyProcessed) {
           const updateData: Record<string, any> = {
-            status: newStatus,
+            status: TransactionStatus.FAILED,
             amount: paidNaira,
-            underpaidReason: (
-              !txnSuccess
-                ? `${txGateway} status: ${providerStatus}`
-                : deltaKobo > 1
-                  ? `Amount mismatch: expected ${expectedKobo}kobo, got ${paidMinor}kobo (delta ${deltaKobo}kobo)`
-                  : null
-            )?.slice?.(0, 190) ?? null,
+            underpaidReason: `${txGateway} status: ${classify.normalizedRaw}`.slice(0, 190),
           };
           if (txGateway === PaymentGateway.PAYSTACK) {
             updateData.paystackReference = providerRef;
@@ -1314,49 +1462,96 @@ export class PaymentService {
           });
         }
         const finalTx = await tx.transaction.findUnique({ where: { id: latest.id } });
-        if (!txnSuccess) {
-          await writeAudit(opts.req, {
-            action: i18n.auditActions.paymentFailed,
-            entityType: 'TRANSACTION',
-            entityId: latest.id,
-            oldValue: { status: 'PENDING' },
-            newValue: { status: finalTx?.status, providerStatus, paidNaira, gateway: txGateway },
-          });
-        } else {
-          await writeAudit(opts.req, {
-            action:
-              paidMinor < expectedKobo
-                ? i18n.auditActions.paymentUnderpaid ?? 'PAYMENT_UNDERPAID'
-                : i18n.auditActions.paymentOverpaid ?? 'PAYMENT_OVERPAID',
-            entityType: 'TRANSACTION',
-            entityId: latest.id,
-            oldValue: { status: 'PENDING', expectedKobo },
-            newValue: { status: finalTx?.status, paidMinor, deltaKobo },
+        await writeAudit(opts.req, {
+          action: i18n.auditActions.paymentFailed,
+          entityType: 'TRANSACTION',
+          entityId: latest.id,
+          oldValue: { status: 'PENDING' },
+          newValue: { status: finalTx?.status, providerStatus: classify.normalizedRaw, paidNaira, gateway: txGateway },
+        });
+        return {
+          verified: false,
+          status: finalTx?.status,
+          amount_expected_kobo: expectedKobo,
+          amount_paid_kobo: paidMinor,
+          delta_kobo: 0,
+          reason: `${txGateway} status: ${classify.normalizedRaw}`,
+        };
+      }
+
+      // =============================================================
+      // BRANCH-D: AUTH_SUCCESS — proceed, NOW compute deltaKobo + UNDER/OVER branch.
+      // =============================================================
+      deltaKobo = Math.abs(paidMinor - expectedKobo);
+      underOrOver =
+        deltaKobo > 1
+          ? paidMinor < expectedKobo
+            ? 'UNDERPAID'
+            : 'OVERPAID'
+          : null;
+
+      // --- UNDERPAID / OVERPAID SUB-BRANCH (no ledger, no receipt, ONLY inside AUTH_SUCCESS) ---
+      if (underOrOver) {
+        if (!alreadyProcessed) {
+          const updateData: Record<string, any> = {
+            status: underOrOver as any,
+            amount: paidNaira,
+            underpaidReason: `Amount mismatch: expected ${expectedKobo}kobo, got ${paidMinor}kobo (delta ${deltaKobo}kobo)`.slice(0, 190),
+          };
+          if (txGateway === PaymentGateway.PAYSTACK) {
+            updateData.paystackReference = providerRef;
+            updateData.paystackChannel = channel;
+          } else {
+            updateData.alatpayReference = providerRef;
+            if (isAlatpayUuid(providerRef)) {
+              updateData.alatpayFinalTransactionId = providerRef;
+            }
+          }
+          await tx.transaction.update({
+            where: { id: latest.id },
+            data: updateData,
           });
         }
+        const finalTx = await tx.transaction.findUnique({ where: { id: latest.id } });
+        await writeAudit(opts.req, {
+          action:
+            underOrOver === 'UNDERPAID'
+              ? i18n.auditActions.paymentUnderpaid ?? 'PAYMENT_UNDERPAID'
+              : i18n.auditActions.paymentOverpaid ?? 'PAYMENT_OVERPAID',
+          entityType: 'TRANSACTION',
+          entityId: latest.id,
+          oldValue: { status: 'PENDING', expectedKobo },
+          newValue: { status: finalTx?.status, paidMinor, deltaKobo },
+        });
         return {
           verified: false,
           status: finalTx?.status,
           amount_expected_kobo: expectedKobo,
           amount_paid_kobo: paidMinor,
           delta_kobo: deltaKobo,
-          reason:
-            !txnSuccess
-              ? `${txGateway} status: ${providerStatus}`
-              : `amount mismatch (${deltaKobo} kobo)`,
+          reason: `amount mismatch (${deltaKobo} kobo)`,
         };
       }
 
       // --- SUCCESS PATH (amount matches exactly within tolerance) -----------
-      // 4. If already processed, just return current state (idempotent).
-      // BLOCKER 2b — CANCELLED + provider SUCCESS evidence must not silently drop:
-      //   if latest.status was already CANCELLED and the provider is now saying
-      //   SUCCESS we must still record the provider SUCCESS and create a
-      //   reconciliation exception. We therefore EXPLICITLY FORWARD through
-      //   the idempotent-early-return only if status != CANCELLED.
+      // FR-2 late-success propagation: do NOT discard late AUTH_SUCCESS on
+      // already-processed rows unless we have already settled.
+      const settled = await isAlreadySettled(tx, latest);
+      const txnSuccess =
+        classify.kind === 'AUTH_SUCCESS' ||
+        (verifyResult && (verifyResult as any).status === TransactionStatus.SUCCESS);
+      const txCancelledLocal =
+        latest.status === TransactionStatus.CANCELLED &&
+        latest.invoice?.status === InvoiceStatus.CANCELLED;
+      const shouldContinueLateSuccess =
+        classify.kind === 'AUTH_SUCCESS' && !settled && !txCancelledLocal;
       const shouldContinueCancelledLateSuccess =
         txnSuccess && latest.status === TransactionStatus.CANCELLED;
-      if (alreadyProcessed && latest.status !== TransactionStatus.PROCESSING && !shouldContinueCancelledLateSuccess) {
+      if (
+        alreadyProcessed && latest.status !== TransactionStatus.PROCESSING &&
+        !shouldContinueLateSuccess &&
+        !shouldContinueCancelledLateSuccess
+      ) {
         const receiptRow = await tx.receipt.findFirst({ where: { transactionId: latest.id } });
         return {
           verified: true,
@@ -1366,8 +1561,107 @@ export class PaymentService {
           receipt: receiptRow ?? null,
         };
       }
+      if (settled && !txCancelledLocal) {
+        const receiptRow = await tx.receipt.findFirst({ where: { transactionId: latest.id } });
+        return {
+          verified: true,
+          status: latest.status ?? TransactionStatus.SUCCESS,
+          transaction: latest,
+          invoice: latest.invoice,
+          receipt: receiptRow ?? null,
+        };
+      }
 
-      // 5. Mark SUCCESS — write provider-specific columns
+      // Phase-2a (LOCAL CANCELLED tx): FR-2 late-success rule — if BOTH
+      // tx.status=CANCELLED AND invoice.status=CANCELLED: preserve CANCELLED
+      // status, write reconciliation exception audit, NO financial posting.
+      // (We handle this BEFORE the generic tx.status=SUCCESS write so we never
+      // flip a locally-CANCELLED tx to SUCCESS.)
+      if (txCancelledLocal) {
+        const CANCELLED_PRESERVED_STR: string = 'CANCELLED';
+        const existingMetaLocal =
+          latest.metadata && typeof latest.metadata === 'object'
+            ? (latest.metadata as Record<string, any>)
+            : {};
+        const metaPreserveCancelled: Record<string, any> = {
+          amount: paidNaira,
+          metadata: {
+            ...existingMetaLocal,
+            gatewayMeta: {
+              ...(existingMetaLocal.gatewayMeta ?? {}),
+              verified_at: paidAt.toISOString(),
+              provider_status_late: providerStatus,
+              provider_ref_late: providerRef,
+              paid_naira_late: paidNaira,
+              cancelled_tx_preserved: true,
+            },
+          } as Prisma.InputJsonValue,
+        };
+        if (txGateway === PaymentGateway.PAYSTACK) {
+          metaPreserveCancelled.paystackReference = providerRef;
+        } else {
+          metaPreserveCancelled.alatpayReference = providerRef;
+          if (isAlatpayUuid(providerRef)) {
+            metaPreserveCancelled.alatpayFinalTransactionId = providerRef;
+          }
+        }
+        await tx.transaction.update({
+          where: { id: latest.id },
+          data: metaPreserveCancelled,
+        });
+        await tx.auditLog.create({
+          data: {
+            userId: (opts.req as any)?.user?.id ?? null,
+            action: 'PAYMENT_SUCCESS_ON_CANCELLED_INVOICE',
+            entityType: 'TRANSACTION',
+            entityId: String(latest.id),
+            oldValue: {
+              status: CANCELLED_PRESERVED_STR,
+              invoiceStatus: 'CANCELLED',
+              invoiceId: latest.invoice?.id,
+            } as Prisma.InputJsonValue,
+            newValue: {
+              status: CANCELLED_PRESERVED_STR,
+              providerRef,
+              paidNaira,
+              txGateway,
+              note: 'tx.status preserved CANCELLED (administratively cancelled local tx). Late provider SUCCESS evidence recorded in metadata only.',
+            } as Prisma.InputJsonValue,
+            details: {
+              code: 'CANCELLED_INVOICE_LATE_SUCCESS',
+              note:
+                'Provider reported SUCCESS but the Bells transaction AND invoice were both already CANCELLED locally. Transaction status intentionally preserved as CANCELLED (no flip to SUCCESS); no invoice settlement/receipt/ledger posted. Requires Bursary reconciliation review.',
+              invoiceId: latest.invoice?.id,
+              invoiceNumber: latest.invoice?.invoiceNumber,
+              transactionId: latest.id,
+              reference: latest.reference,
+              providerRef,
+              paidAt: paidAt.toISOString(),
+              paidNaira,
+              txStatusPreserved: CANCELLED_PRESERVED_STR,
+            } as Prisma.InputJsonValue,
+            ipAddress: opts.req?.ip ?? (opts.req?.headers?.['x-forwarded-for'] as string | undefined)?.split(',')[0] ?? null,
+            userAgent: opts.req?.headers?.['user-agent'] ?? null,
+          },
+        });
+        const auditForTx = await tx.transaction.findUnique({
+          where: { id: latest.id },
+        });
+        return {
+          verified: true,
+          reportedStatus: CANCELLED_PRESERVED_STR,
+          transaction: auditForTx ?? latest,
+          invoice: latest.invoice,
+          receipt: null,
+          reconciliationException: true,
+          reconciliationExceptionKind: 'CANCELLED_INVOICE_LATE_SUCCESS',
+          noLedgerPosted: true,
+          noReceiptIssued: true,
+          noInvoiceAmountPosted: true,
+        };
+      }
+
+      // 5. Mark SUCCESS — write provider-specific columns (only for non-CANCELLED-local tx)
       const existingMeta =
         latest.metadata && typeof latest.metadata === 'object'
           ? (latest.metadata as Record<string, any>)
@@ -1418,10 +1712,10 @@ export class PaymentService {
           paid_minor: paidMinor,
           paid_naira: paidNaira,
           channel,
-          currency: verifyResult.currency ?? 'NGN',
-          fee_amount: verifyResult.expectedGatewayFeeNaira ?? null,
+          currency: verifyResult?.currency ?? 'NGN',
+          fee_amount: verifyResult?.expectedGatewayFeeNaira ?? null,
           gross_amount_naira: alatpayNormalization ? alatpayNormalization.grossNaira : null,
-          provider_fee_amount_naira: alatpayNormalization ? alatpayNormalization.feeNaira : (verifyResult.providerFeeAmountNaira ?? null),
+          provider_fee_amount_naira: alatpayNormalization ? alatpayNormalization.feeNaira : (verifyResult?.providerFeeAmountNaira ?? null),
           normalization_kind: alatpayNormalization ? alatpayNormalization.kind : null,
           provider_status: providerStatus,
         };
@@ -1431,26 +1725,10 @@ export class PaymentService {
         data: updateSuccessData,
       });
 
-      // Phase-2a: CANCELLED invoice + late success provider callback = reconciliation
-      // exception route, NOT direct financial settlement onto a cancelled invoice.
-      // The transaction is recorded SUCCESS above so the operator has evidence of
-      // the provider outcome, but we MUST NOT post amountPaid/receipt/ledger to a
-      // CANCELLED invoice — the invoice is closed administratively and payments
-      // against it must be routed to Bursary reconciliation for manual handling
-      // (e.g. refund or create a fresh open invoice then re-credit).
-      //
-      // BLOCKER 2a FIXES:
-      //   - writeAudit(...) previously used OUTSIDE prisma client → audit survived
-      //     rollback but tx SUCCESS update did NOT (inconsistent state). Now we
-      //     use tx.auditLog.create bound to the running tx so both the SUCCESS
-      //     update AND the audit commit/rollback together atomically.
-      //   - Previously threw new AppError inside $transaction → entire $tx rolled
-      //     back, losing tx.status SUCCESS write. Now we return NORMALLY with
-      //     reconciliationException flag so outer HTTP handler returns 200 (webhook
-      //     providers do not re-deliver acknowledged callbacks) instead of 4xx
-      //     triggering retry storms.
-      //   - Invoice.amountPaid, receipts, general ledger, settlements are ALL
-      //     deliberately SKIPPED — no financial posting to cancelled invoice.
+      // Phase-2b: Invoice.status=CANCELLED but tx.status != CANCELLED (e.g. tx
+      // is still FAILED/UNDERPAID/PROCESSING from earlier — late provider
+      // SUCCESS evidence). Write tx SUCCESS, record reconciliation exception
+      // audit, NO financial posting to cancelled invoice.
       if (latest.invoice?.status === InvoiceStatus.CANCELLED) {
         await tx.auditLog.create({
           data: {
