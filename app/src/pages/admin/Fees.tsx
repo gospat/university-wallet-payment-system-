@@ -21,6 +21,8 @@ import {
   studentTypes,
 } from '../../i18n/en';
 import feeApi, {
+  type CancelInvoiceInput,
+  type CancelInvoiceReasonKey,
   type CategoryOut,
   type CloneFeeInput,
   type CreateAssignmentInput,
@@ -31,6 +33,8 @@ import feeApi, {
   type GenerateResp,
   type DirectStudentBillSuccessResp,
   type MatricStudentResp,
+  CANCEL_INVOICE_REASONS,
+  cancelInvoice as cancelInvoiceApi,
 } from '../../services/adminFees';
 import MatricStudentInput from '../../components/fees/MatricStudentInput';
 
@@ -1322,6 +1326,37 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   const [assignSubmitting, setAssignSubmitting] = useState(false);
   const [directBillModalOpen, setDirectBillModalOpen] = useState(false);
 
+  type CancelInvoiceDialogState = {
+    open: boolean;
+    submitting: boolean;
+    invoiceId: number | null;
+    invoiceNumber: string | null;
+    studentName: string | null;
+    matricNumber: string | null;
+    feeName: string | null;
+    feeCode: string | null;
+    amountDue: number | string | null;
+    amountPaid: number | string | null;
+    currentStatus: string | null;
+    reason: CancelInvoiceReasonKey | '';
+    writtenExplanation: string;
+  };
+  const [cancelInvoiceDlg, setCancelInvoiceDlg] = useState<CancelInvoiceDialogState>({
+    open: false,
+    submitting: false,
+    invoiceId: null,
+    invoiceNumber: null,
+    studentName: null,
+    matricNumber: null,
+    feeName: null,
+    feeCode: null,
+    amountDue: null,
+    amountPaid: null,
+    currentStatus: null,
+    reason: '',
+    writtenExplanation: '',
+  });
+
   // ---------------- Categories list state ----------------
   const [catsLoading, setCatsLoading] = useState(false);
   const [catsResp, setCatsResp] = useState<{ total: number; page: number; pageSize: number; } | null>(null);
@@ -1575,6 +1610,24 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
                 onMutateErr('Delete assignment failed', e);
               }
             }}
+            onCancelInvoice={(a) => {
+              if (!a.invoice?.id) return;
+              setCancelInvoiceDlg({
+                open: true,
+                submitting: false,
+                invoiceId: a.invoice.id,
+                invoiceNumber: a.invoice.invoiceNumber ?? null,
+                studentName: a.targetStudent ? `${a.targetStudent.firstName ?? ''} ${a.targetStudent.lastName ?? ''}`.trim() || null : null,
+                matricNumber: a.targetStudent?.matricNumber ?? null,
+                feeName: a.fee?.name ?? null,
+                feeCode: a.fee?.feeCode ?? null,
+                amountDue: a.overrideAmount ?? (a.invoice as any)?.amountDue ?? a.fee?.amount ?? null,
+                amountPaid: Number((a.invoice as any)?.amountPaid ?? 0),
+                currentStatus: String(a.invoice.status ?? 'UNKNOWN'),
+                reason: '',
+                writtenExplanation: '',
+              });
+            }}
           />
         )}
 
@@ -1767,6 +1820,187 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
             }, 600);
           }}
         />
+      </Modal>
+
+      <Modal
+        isOpen={cancelInvoiceDlg.open}
+        title="Cancel Invoice"
+        size="md"
+        onClose={() => {
+          if (!cancelInvoiceDlg.submitting) {
+            setCancelInvoiceDlg((s) => ({ ...s, open: false }));
+          }
+        }}
+        footer={
+          <div className="w-full flex justify-end gap-2">
+            <button
+              type="button"
+              disabled={cancelInvoiceDlg.submitting}
+              onClick={() => {
+                setCancelInvoiceDlg((s) => ({ ...s, open: false }));
+              }}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              disabled={
+                cancelInvoiceDlg.submitting ||
+                !cancelInvoiceDlg.reason ||
+                (cancelInvoiceDlg.reason === 'OTHER' && cancelInvoiceDlg.writtenExplanation.trim().length < 1)
+              }
+              onClick={async () => {
+                if (!cancelInvoiceDlg.invoiceId) return;
+                if (!cancelInvoiceDlg.reason) return;
+                if (
+                  cancelInvoiceDlg.reason === 'OTHER' &&
+                  cancelInvoiceDlg.writtenExplanation.trim().length < 1
+                ) {
+                  return;
+                }
+                setCancelInvoiceDlg((s) => ({ ...s, submitting: true }));
+                try {
+                  const body: CancelInvoiceInput = {
+                    reason: cancelInvoiceDlg.reason,
+                    writtenExplanation:
+                      cancelInvoiceDlg.reason === 'OTHER'
+                        ? cancelInvoiceDlg.writtenExplanation.trim()
+                        : undefined,
+                  };
+                  const r = await cancelInvoiceApi(cancelInvoiceDlg.invoiceId, body);
+                  notify(
+                    'Invoice cancelled',
+                    `${r.invoice.invoiceNumber ?? 'Invoice #' + r.invoice.id} has been cancelled and is no longer payable. Audit #${r.auditId}.`,
+                    'success',
+                  );
+                  setCancelInvoiceDlg({
+                    open: false,
+                    submitting: false,
+                    invoiceId: null,
+                    invoiceNumber: null,
+                    studentName: null,
+                    matricNumber: null,
+                    feeName: null,
+                    feeCode: null,
+                    amountDue: null,
+                    amountPaid: null,
+                    currentStatus: null,
+                    reason: '',
+                    writtenExplanation: '',
+                  });
+                  await loadAssignments();
+                } catch (e: any) {
+                  onMutateErr('Cancel invoice failed', e);
+                  setCancelInvoiceDlg((s) => ({ ...s, submitting: false }));
+                }
+              }}
+              className="px-4 py-2 rounded-lg text-sm font-semibold text-white shadow-sm bg-gradient-to-br from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 focus:outline-none focus:ring-2 focus:ring-red-500/30 disabled:opacity-50"
+            >
+              {cancelInvoiceDlg.submitting ? 'Cancelling…' : 'Cancel Invoice'}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-5 text-sm">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 text-xs leading-relaxed">
+            <div className="font-semibold mb-1">⚠ This action is irreversible.</div>
+            <div>
+              Cancelling this invoice will prevent the student from making any payment against it.
+              The invoice (and its full transaction history) will <strong>remain in the system for audit purposes</strong>.
+              Cancelling does not issue a refund, does not modify amountPaid, and does not create a receipt.
+            </div>
+          </div>
+
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Invoice</dt>
+              <dd className="font-mono text-gray-900 mt-0.5">{cancelInvoiceDlg.invoiceNumber ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Current status</dt>
+              <dd className="mt-0.5">
+                <span className="inline-flex items-center px-2 py-0.5 rounded border border-gray-300 bg-white text-xs font-semibold text-gray-800">
+                  {cancelInvoiceDlg.currentStatus ?? 'UNKNOWN'}
+                </span>
+              </dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Student</dt>
+              <dd className="text-gray-900 mt-0.5">{cancelInvoiceDlg.studentName ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Matric</dt>
+              <dd className="font-mono text-indigo-700 mt-0.5">{cancelInvoiceDlg.matricNumber ?? '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Fee</dt>
+              <dd className="text-gray-900 mt-0.5">
+                {cancelInvoiceDlg.feeCode ? (
+                  <span className="font-mono text-gray-900">{cancelInvoiceDlg.feeCode}</span>
+                ) : null}
+                {cancelInvoiceDlg.feeCode && cancelInvoiceDlg.feeName ? ' · ' : null}
+                {cancelInvoiceDlg.feeName ?? '—'}
+              </dd>
+            </div>
+            <div />
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Amount due</dt>
+              <dd className="text-gray-900 mt-0.5 font-semibold">{fmtNgn(cancelInvoiceDlg.amountDue ?? 0)}</dd>
+            </div>
+            <div>
+              <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Amount paid</dt>
+              <dd className={`mt-0.5 font-semibold ${
+                Number(cancelInvoiceDlg.amountPaid ?? 0) === 0
+                  ? 'text-emerald-700'
+                  : 'text-red-700'
+              }`}>
+                {fmtNgn(cancelInvoiceDlg.amountPaid ?? 0)}
+                {Number(cancelInvoiceDlg.amountPaid ?? 0) !== 0 && (
+                  <span className="text-xs font-normal block">Cannot cancel — invoice has payments</span>
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="space-y-1.5">
+            <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Cancellation reason <span className="text-red-600">*</span>
+            </label>
+            <select
+              value={cancelInvoiceDlg.reason}
+              onChange={(e) => setCancelInvoiceDlg((s) => ({
+                ...s,
+                reason: (e.target.value as CancelInvoiceReasonKey) || '',
+              }))}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+            >
+              <option value="">Select a reason…</option>
+              {CANCEL_INVOICE_REASONS.map((r) => (
+                <option key={r.key} value={r.key}>{r.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {cancelInvoiceDlg.reason === 'OTHER' && (
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                Written explanation <span className="text-red-600">*</span>
+              </label>
+              <textarea
+                rows={3}
+                maxLength={2000}
+                value={cancelInvoiceDlg.writtenExplanation}
+                onChange={(e) => setCancelInvoiceDlg((s) => ({ ...s, writtenExplanation: e.target.value }))}
+                placeholder="Explain why this invoice is being cancelled…"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+              />
+              <div className="text-[10px] text-gray-500 text-right">
+                {cancelInvoiceDlg.writtenExplanation.length} / 2000
+              </div>
+            </div>
+          )}
+        </div>
       </Modal>
     </PortalShell>
   );
@@ -2051,7 +2285,8 @@ const AssignmentsList: React.FC<{
   onGenerate: (a: FeeAssignmentOut, force?: boolean) => void;
   onToggleActive: (a: FeeAssignmentOut) => Promise<void> | void;
   onDelete: (a: FeeAssignmentOut) => Promise<void> | void;
-}> = ({ aq, loading, resp, assignments, canMutate, onEdit, onGenerate, onToggleActive, onDelete }) => {
+  onCancelInvoice: (a: FeeAssignmentOut) => void;
+}> = ({ aq, loading, resp, assignments, canMutate, onEdit, onGenerate, onToggleActive, onDelete, onCancelInvoice }) => {
   const t = adminFees.assignments;
   const tC = adminFees.common;
   const totalPages = Math.max(1, Math.ceil((resp?.total ?? 0) / (resp?.pageSize ?? 25)));
@@ -2059,6 +2294,7 @@ const AssignmentsList: React.FC<{
 
   const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['PAID','REVERSED','REFUNDED','CANCELLED']);
   const LOCK_TOOLTIP = 'Locked: invoice has already been settled.';
+  const UNSAFE_CANCEL_INVOICE_STATUSES = new Set(['PAID','PARTIALLY_PAID','REFUNDED','REVERSED','CANCELLED']);
 
   const isDirectBill = (a: FeeAssignmentOut) =>
     a.assignmentType === 'STUDENT' && a.targetStudentId != null;
@@ -2068,6 +2304,16 @@ const AssignmentsList: React.FC<{
     const status = a.invoice?.status;
     if (!status) return false;
     return TERMINAL_STATUSES.has(String(status).toUpperCase());
+  };
+
+  const canCancelInvoice = (a: FeeAssignmentOut): { ok: boolean; reason?: string } => {
+    if (!isDirectBill(a)) return { ok: false, reason: 'Only direct-bill invoices can be cancelled here' };
+    if (!a.invoice?.id) return { ok: false, reason: 'No invoice attached to this assignment yet' };
+    const status = String(a.invoice.status ?? '').toUpperCase();
+    if (UNSAFE_CANCEL_INVOICE_STATUSES.has(status)) return { ok: false, reason: `Invoice status ${status} cannot be cancelled` };
+    const amountPaid = Number((a.invoice as any)?.amountPaid ?? 0);
+    if (amountPaid > 0) return { ok: false, reason: `Cannot cancel: amount paid is ₦${amountPaid.toLocaleString()}` };
+    return { ok: true };
   };
 
   const matricOf = (a: FeeAssignmentOut) => a.targetStudent?.matricNumber ?? null;
@@ -2224,6 +2470,20 @@ const AssignmentsList: React.FC<{
                             )}
                           </span>
                         )}
+                        {direct && (() => {
+                          const cancelInfo = canCancelInvoice(a);
+                          if (!cancelInfo.ok) return null;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => onCancelInvoice(a)}
+                              title="Cancel this invoice so the student can no longer pay against it."
+                              className="inline-flex items-center px-2 py-1 rounded-md border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 hover:text-red-900 text-xs font-semibold"
+                            >
+                              Cancel Invoice
+                            </button>
+                          );
+                        })()}
                         <button
                           type="button"
                           onClick={() => { if (!locked) onToggleActive(a); }}

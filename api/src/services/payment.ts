@@ -20,7 +20,7 @@
 // =============================================================================
 import * as crypto from 'crypto';
 import { z } from 'zod';
-import { Prisma, TransactionType, TransactionStatus, Role, PaymentGateway } from '@prisma/client';
+import { Prisma, TransactionType, TransactionStatus, Role, PaymentGateway, InvoiceStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { computePaymentBreakdown } from './paystack';
@@ -1234,6 +1234,37 @@ export class PaymentService {
         data: updateSuccessData,
       });
 
+      // Phase-2a: CANCELLED invoice + late success provider callback = reconciliation
+      // exception route, NOT direct financial settlement onto a cancelled invoice.
+      // The transaction is recorded SUCCESS above so the operator has evidence of
+      // the provider outcome, but we MUST NOT post amountPaid/receipt/ledger to a
+      // CANCELLED invoice — the invoice is closed administratively and payments
+      // against it must be routed to Bursary reconciliation for manual handling
+      // (e.g. refund or create a fresh open invoice then re-credit).
+      if (latest.invoice?.status === InvoiceStatus.CANCELLED) {
+        await writeAudit(opts.req, {
+          action: 'PAYMENT_SUCCESS_ON_CANCELLED_INVOICE',
+          entityType: 'TRANSACTION',
+          entityId: latest.id,
+          oldValue: { status: 'PENDING', invoiceStatus: 'CANCELLED', invoiceId: latest.invoice.id },
+          newValue: { status: TransactionStatus.SUCCESS, providerRef, paidNaira },
+          details: {
+            note: 'Provider reported SUCCESS on an administratively CANCELLED invoice. Transaction is recorded SUCCESS for audit, but no invoice settlement/receipt/ledger is posted. Requires Bursary reconciliation review.',
+            invoiceId: latest.invoice.id,
+            invoiceNumber: latest.invoice.invoiceNumber,
+          },
+        });
+        const err: any = new AppError(
+          'Payment was reported successful by the provider, but the invoice has been administratively CANCELLED. This payment has been routed to reconciliation exceptions for manual Bursary review. Do not retry; contact Bursary if a new invoice is needed.',
+          409,
+        );
+        err.code = 'CANCELLED_INVOICE_LATE_SUCCESS';
+        err.reconciliationException = true;
+        err.transactionId = latest.id;
+        err.invoiceId = latest.invoice.id;
+        throw err;
+      }
+
       // 6. Update invoice
       if (latest.invoice) {
         const invoiceId = latest.invoice.id;
@@ -1658,7 +1689,7 @@ export class PaymentService {
         // FAILED/CANCELLED notif
         if (
           status === TransactionStatus.FAILED ||
-          status === 'CANCELLED' ||
+          status === TransactionStatus.CANCELLED ||
           (verified === false && status !== TransactionStatus.SUCCESS)
         ) {
           try {

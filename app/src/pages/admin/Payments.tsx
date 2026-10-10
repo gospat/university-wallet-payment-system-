@@ -25,6 +25,7 @@ const StatusPill: React.FC<{ status: string }> = ({ status }) => {
     SUCCESS: 'bg-green-50 text-green-700 border-green-200',
     FAILED: 'bg-red-50 text-red-700 border-red-200',
     REVERSED: 'bg-gray-100 text-gray-700 border-gray-300',
+    CANCELLED: 'bg-gray-50 text-gray-600 border-gray-200',
   };
   const cls = map[status] ?? 'bg-gray-100 text-gray-700 border-gray-200';
   return (

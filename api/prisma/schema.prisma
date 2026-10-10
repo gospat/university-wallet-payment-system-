@@ -53,6 +53,7 @@ enum TransactionStatus {
   FAILED
   UNDERPAID
   OVERPAID
+  CANCELLED
   REVERSED
 }
 

@@ -13,8 +13,34 @@ import {
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { z } from 'zod';
 import { sendStudentBillAssigned } from '../services/email';
+import {
+  CancelInvoiceBodySchema,
+  InvoiceCancellationService,
+} from '../services/invoiceCancellation';
 
 const IdParam = z.object({ id: z.coerce.number().int().positive() });
+const InvoiceIdParam = z.object({ id: z.coerce.number().int().positive() });
+
+export const cancelInvoice = [
+  validateParams(InvoiceIdParam),
+  validateBody(CancelInvoiceBodySchema),
+  catchAsync(async (req: Request, res: Response) => {
+    const actorId = (req as any).user?.id;
+    const actorRole = (req as any).user?.role;
+    if (!actorId || !actorRole) {
+      return res.status(401).json({ status: 'fail', message: 'Authentication required' });
+    }
+    const result = await InvoiceCancellationService.cancelInvoice({
+      invoiceId: Number(req.params.id),
+      actorId: Number(actorId),
+      actorRole,
+      reason: (req.body as any).reason,
+      writtenExplanation: (req.body as any).writtenExplanation,
+      req,
+    });
+    return res.status(200).json({ status: 'success', data: result });
+  }),
+];
 
 export const listFeeAssignments = [
   validateQuery(FeeAssignmentQuerySchema),

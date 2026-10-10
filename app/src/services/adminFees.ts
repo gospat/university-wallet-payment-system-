@@ -374,4 +374,35 @@ function sanitizeDirectBillBody(body: CreateDirectStudentBillInput): CreateDirec
   return out;
 }
 
+export const CANCEL_INVOICE_REASONS = [
+  { key: 'INVOICE_CREATED_IN_ERROR', label: 'Invoice created in error' },
+  { key: 'DUPLICATE_INVOICE', label: 'Duplicate invoice' },
+  { key: 'WRONG_STUDENT', label: 'Wrong student' },
+  { key: 'WRONG_FEE_ASSIGNMENT', label: 'Wrong fee assignment' },
+  { key: 'FEE_NO_LONGER_APPLICABLE', label: 'Fee no longer applicable' },
+  { key: 'ADMINISTRATIVE_CORRECTION', label: 'Administrative correction' },
+  { key: 'OTHER', label: 'Other' },
+] as const;
+
+export type CancelInvoiceReasonKey = (typeof CANCEL_INVOICE_REASONS)[number]['key'];
+
+export type CancelInvoiceInput = {
+  reason: CancelInvoiceReasonKey;
+  writtenExplanation?: string;
+};
+
+export type CancelInvoiceResponse = {
+  invoice: { id: number; invoiceNumber: string; status: string; amountDue: string | number; amountPaid: string | number; studentId: number | null };
+  auditId: number;
+  auditedAt: string;
+};
+
+export async function cancelInvoice(invoiceId: number, body: CancelInvoiceInput): Promise<CancelInvoiceResponse> {
+  const resp = await api.post(`/fee-assignments/invoices/${invoiceId}/cancel`, {
+    reason: body.reason,
+    writtenExplanation: body.writtenExplanation?.trim() ?? undefined,
+  });
+  return unwrap<CancelInvoiceResponse>(resp);
+}
+
 export default feeApi;

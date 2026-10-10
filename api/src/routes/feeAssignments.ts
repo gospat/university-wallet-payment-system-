@@ -1,6 +1,7 @@
 import express from 'express';
 import { protect, restrictTo, requirePermission } from '../middlewares/auth';
 import {
+  cancelInvoice,
   createDirectStudentBill,
   createFeeAssignment,
   deleteFeeAssignment,
@@ -10,6 +11,7 @@ import {
   manualStudentInvoice,
   updateFeeAssignment,
 } from '../controllers/feeAssignments';
+import { Role } from '@prisma/client';
 
 const router = express.Router();
 
@@ -25,7 +27,11 @@ router.post('/:id/generate-invoices', requirePermission('ASSIGN_FEES'), generate
 router.post('/manual-student', requirePermission('DIRECT_BILL_STUDENT'), manualStudentInvoice);
 router.post('/student-bill', requirePermission('DIRECT_BILL_STUDENT'), createDirectStudentBill);
 
-// TODO: Add GET /direct-bills-logs route with requirePermission('VIEW_DIRECT_BILLS_LOG') middleware
-// when the Direct Bills Log list endpoint is implemented for the sidebar view.
+router.post(
+  '/invoices/:id/cancel',
+  restrictTo(Role.ADMIN, Role.BURSARY),
+  requirePermission('VOID_INVOICES'),
+  cancelInvoice,
+);
 
 export default router;
