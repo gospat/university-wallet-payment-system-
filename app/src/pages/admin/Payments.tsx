@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import PortalShell from '../../components/PortalShell';
 import Modal from '../../components/Modal';
 import Alert from '../../components/Alert';
@@ -98,13 +99,341 @@ function isUserCancelError(err: any): boolean {
   );
 }
 
+type VerifyTxDetail = {
+  id: number;
+  reference: string;
+  status: string;
+  gateway: string;
+  amount: number | string;
+  expectedAmount: number | string;
+  description?: string | null;
+  type?: string | null;
+  createdAt: string;
+  updatedAt?: string;
+  paystackReference?: string | null;
+  paystackChannel?: string | null;
+  alatpayReference?: string | null;
+  alatpayOrderReference?: string | null;
+  alatpayInitPaymentReference?: string | null;
+  alatpayFinalTransactionId?: string | null;
+  alatpayCheckoutUrl?: string | null;
+  alatpaySessionId?: string | null;
+  underpaidReason?: string | null;
+  userId?: number | null;
+  invoiceId?: number | null;
+  user?: { id: number; firstName: string; lastName: string; email: string; matricNumber?: string | null } | null;
+  invoice?: { id: number; invoiceNumber: string; amountDue: number | string; amountPaid: number | string; status: string; fee?: { id: number; name: string; feeCode?: string } | null } | null;
+  receipts?: { id: number; receiptNumber: string; verificationToken?: string; isVoided?: boolean; generatedAt?: string }[];
+};
+
+type VerifyResult = {
+  verified: boolean;
+  bellsStatus: string;
+  providerStatus: string | null;
+  provider: string;
+  amountExpected: number | string;
+  amountConfirmed: number | string;
+  providerTransactionId: string | null;
+  verifiedAt: string;
+  reason?: string | null;
+  alreadyVerified?: boolean;
+  receipt?: any;
+  generalLedger?: any;
+  message?: string;
+};
+
+const DetailRow: React.FC<{ label: string; value?: React.ReactNode }> = ({ label, value }) => (
+  <div className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-3 py-1.5 border-b border-gray-100 last:border-0">
+    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide w-44 shrink-0">{label}</span>
+    <span className="text-sm text-gray-900 break-all font-mono">{value ?? '—'}</span>
+  </div>
+);
+
+const VerifyPaymentWorkspace: React.FC<{ baseEndpoint: string }> = ({ baseEndpoint }) => {
+  const [lookupField, setLookupField] = useState<'reference' | 'transactionId' | 'paystackRef' | 'alatpayFinalTxId'>('reference');
+  const [lookupValue, setLookupValue] = useState('');
+  const [txDetail, setTxDetail] = useState<VerifyTxDetail | null>(null);
+  const [glDetail, setGlDetail] = useState<any>(null);
+  const [alatpayFinalTxIdValid, setAlatpayFinalTxIdValid] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [verifyLoading, setVerifyLoading] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
+
+  const doLookup = async () => {
+    const value = lookupValue.trim();
+    if (!value) { setErrorMsg('Enter a value to look up.'); return; }
+    setLoading(true); setErrorMsg(''); setTxDetail(null); setGlDetail(null); setVerifyResult(null);
+    try {
+      const q = new URLSearchParams();
+      if (lookupField === 'transactionId') {
+        if (!/^\d+$/.test(value)) { setErrorMsg('Transaction ID must be numeric.'); setLoading(false); return; }
+        const resp = await api.get<{ status: string; data: { transaction: VerifyTxDetail; generalLedger: any; alatpayFinalTxIdValid: boolean } }>(`${baseEndpoint}/${value}`);
+        if (resp.data?.status === 'success') {
+          setTxDetail(resp.data.data.transaction);
+          setGlDetail(resp.data.data.generalLedger);
+          setAlatpayFinalTxIdValid(resp.data.data.alatpayFinalTxIdValid);
+        } else {
+          setErrorMsg('Transaction not found.');
+        }
+      } else {
+        // Use the list endpoint to find the transaction by reference/provider ref, then fetch detail.
+        const fieldMap: Record<string, string> = {
+          reference: 'q',
+          paystackRef: 'q',
+          alatpayFinalTxId: 'q',
+        };
+        const qParam = fieldMap[lookupField];
+        q.set(qParam, value);
+        q.set('page', '1'); q.set('pageSize', '10');
+        const resp = await api.get<{ status: string; data: { items: any[] } }>(`${baseEndpoint}?${q.toString()}`);
+        const items = resp.data?.data?.items ?? [];
+        let match: any = null;
+        if (lookupField === 'reference') {
+          match = items.find((i: any) => String(i.reference) === value) ?? items[0];
+        } else if (lookupField === 'paystackRef') {
+          match = items.find((i: any) => String(i.paystackReference) === value) ?? items[0];
+        } else if (lookupField === 'alatpayFinalTxId') {
+          match = items.find((i: any) => String(i.alatpayFinalTransactionId) === value) ?? items[0];
+        }
+        if (!match) { setErrorMsg('No transaction matched the lookup value.'); setLoading(false); return; }
+        const detailResp = await api.get<{ status: string; data: { transaction: VerifyTxDetail; generalLedger: any; alatpayFinalTxIdValid: boolean } }>(`${baseEndpoint}/${match.id}`);
+        if (detailResp.data?.status === 'success') {
+          setTxDetail(detailResp.data.data.transaction);
+          setGlDetail(detailResp.data.data.generalLedger);
+          setAlatpayFinalTxIdValid(detailResp.data.data.alatpayFinalTxIdValid);
+        } else {
+          setErrorMsg('Transaction not found.');
+        }
+      }
+    } catch (e: any) {
+      if (e?.response?.status === 404) setErrorMsg('Transaction not found.');
+      else setErrorMsg(e?.response?.data?.message || e?.message || 'Lookup failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const doVerify = async () => {
+    if (!txDetail) return;
+    setVerifyLoading(true); setVerifyResult(null); setErrorMsg('');
+    try {
+      const resp = await api.post<{ status: string; data: VerifyResult }>(`${baseEndpoint}/${txDetail.id}/verify`);
+      const data = resp.data?.data;
+      if (data) setVerifyResult(data);
+      // Refresh transaction detail after verification
+      const detailResp = await api.get<{ status: string; data: { transaction: VerifyTxDetail; generalLedger: any; alatpayFinalTxIdValid: boolean } }>(`${baseEndpoint}/${txDetail.id}`);
+      if (detailResp.data?.status === 'success') {
+        setTxDetail(detailResp.data.data.transaction);
+        setGlDetail(detailResp.data.data.generalLedger);
+        setAlatpayFinalTxIdValid(detailResp.data.data.alatpayFinalTxIdValid);
+      }
+    } catch (e: any) {
+      setErrorMsg(e?.response?.data?.message || e?.message || 'Verification request failed.');
+    } finally {
+      setVerifyLoading(false);
+    }
+  };
+
+  const resultKind = (() => {
+    if (!verifyResult) return null;
+    if (verifyResult.alreadyVerified) return 'already';
+    if (verifyResult.verified && verifyResult.bellsStatus === 'SUCCESS') return 'success';
+    if (verifyResult.bellsStatus === 'FAILED') return 'failed';
+    if (verifyResult.provider === 'ALATPAY' && !alatpayFinalTxIdValid && !verifyResult.verified) return 'unable';
+    if (verifyResult.reason === 'PROVIDER_TRANSPORT_ERROR') return 'unavailable';
+    return 'pending';
+  })();
+
+  const resultStyle: Record<string, string> = {
+    success: 'border-green-200 bg-green-50 text-green-800',
+    already: 'border-blue-200 bg-blue-50 text-blue-800',
+    pending: 'border-amber-200 bg-amber-50 text-amber-800',
+    unable: 'border-orange-200 bg-orange-50 text-orange-800',
+    unavailable: 'border-red-200 bg-red-50 text-red-800',
+    failed: 'border-red-200 bg-red-50 text-red-800',
+  };
+
+  const canVerify = txDetail && (
+    txDetail.gateway === 'PAYSTACK'
+      ? !!txDetail.paystackReference
+      : txDetail.gateway === 'ALATPAY'
+        ? !!txDetail.alatpayFinalTransactionId && alatpayFinalTxIdValid
+        : false
+  );
+
+  return (
+    <div className="w-full space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Verify Payment</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Look up a transaction and confirm its status with the payment provider. Verification is authoritative and idempotent.
+        </p>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Field label="Lookup by">
+            <select className={inputCls} value={lookupField} onChange={(e) => setLookupField(e.target.value as any)}>
+              <option value="reference">Bells Payment Reference</option>
+              <option value="transactionId">Transaction ID</option>
+              <option value="paystackRef">Paystack Reference</option>
+              <option value="alatpayFinalTxId">ALATPay Final Transaction UUID</option>
+            </select>
+          </Field>
+          <Field label="Value" className="sm:col-span-2">
+            <input
+              type="text"
+              className={inputCls}
+              placeholder={lookupField === 'reference' ? 'PAY-20261010-WKCLUP' : lookupField === 'transactionId' ? '12345' : lookupField === 'paystackRef' ? 'Paystack reference' : 'ALATPay final UUID v4'}
+              value={lookupValue}
+              onChange={(e) => setLookupValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') doLookup(); }}
+            />
+          </Field>
+        </div>
+        <div className="flex gap-3">
+          <button
+            onClick={doLookup}
+            disabled={loading}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+          >
+            {loading ? 'Looking up...' : 'Look Up Transaction'}
+          </button>
+        </div>
+        {errorMsg && (
+          <div className="rounded-lg border border-red-200 bg-red-50 text-red-800 px-4 py-3 text-sm">{errorMsg}</div>
+        )}
+      </div>
+
+      {txDetail && (
+        <>
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-1">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold text-gray-900">Transaction Details</h2>
+              <div className="flex items-center gap-2">
+                <StatusPill status={txDetail.status} />
+                <GatewayPill gateway={txDetail.gateway} />
+              </div>
+            </div>
+            <DetailRow label="Transaction ID" value={String(txDetail.id)} />
+            <DetailRow label="Bells Payment Reference" value={txDetail.reference} />
+            <DetailRow label="Student Name" value={txDetail.user ? `${txDetail.user.firstName} ${txDetail.user.lastName}` : '—'} />
+            <DetailRow label="Matric Number" value={txDetail.user?.matricNumber} />
+            <DetailRow label="Invoice Number" value={txDetail.invoice?.invoiceNumber} />
+            <DetailRow label="Fee" value={txDetail.invoice?.fee?.name} />
+            <DetailRow label="Gateway" value={txDetail.gateway} />
+            <DetailRow label="Transaction Status" value={txDetail.status} />
+            <DetailRow label="Expected Amount" value={fmtNGN(txDetail.expectedAmount)} />
+            <DetailRow label="Amount Received" value={fmtNGN(txDetail.amount)} />
+            <DetailRow label="Created" value={fmtDate(txDetail.createdAt)} />
+            <DetailRow label="Updated" value={fmtDate(txDetail.updatedAt)} />
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-1">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Provider Identifiers</h2>
+            {txDetail.gateway === 'PAYSTACK' && (
+              <DetailRow label="Paystack Reference" value={txDetail.paystackReference} />
+            )}
+            {txDetail.gateway === 'ALATPAY' && (
+              <>
+                <DetailRow label="ALATPay Order Reference" value={txDetail.alatpayOrderReference} />
+                <DetailRow label="ALATPay Init Reference" value={txDetail.alatpayInitPaymentReference} />
+                <DetailRow
+                  label="ALATPay Final Transaction UUID"
+                  value={
+                    txDetail.alatpayFinalTransactionId ? (
+                      <span className={alatpayFinalTxIdValid ? 'text-green-700' : 'text-red-700'}>
+                        {txDetail.alatpayFinalTransactionId}
+                        {' '}
+                        <span className="text-xs">({alatpayFinalTxIdValid ? 'valid UUID v4' : 'NOT a valid UUID — cannot verify'})</span>
+                      </span>
+                    ) : (
+                      <span className="text-orange-700">Not captured</span>
+                    )
+                  }
+                />
+              </>
+            )}
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-1">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Financial Evidence</h2>
+            <DetailRow
+              label="Receipt"
+              value={txDetail.receipts && txDetail.receipts.length > 0 ? (
+                <span className="text-green-700">{txDetail.receipts[0].receiptNumber} (voided: {String(txDetail.receipts[0].isVoided)})</span>
+              ) : <span className="text-gray-400">None</span>}
+            />
+            <DetailRow
+              label="General Ledger"
+              value={glDetail ? (
+                <span className="text-green-700">{glDetail.entryType} — {fmtNGN(glDetail.amount)}</span>
+              ) : <span className="text-gray-400">No posting</span>}
+            />
+            <DetailRow label="Underpaid Reason" value={txDetail.underpaidReason} />
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4">
+            <h2 className="text-lg font-semibold text-gray-900">Provider Verification</h2>
+            {txDetail.gateway === 'ALATPAY' && !alatpayFinalTxIdValid && (
+              <div className="rounded-lg border border-orange-200 bg-orange-50 text-orange-800 px-4 py-3 text-sm">
+                Provider verification unavailable because the final ALATPay transaction identifier was not captured.
+                The payment remains unresolved. Check webhook/reconciliation evidence or use the authorized
+                cancellation/reconciliation workflow.
+              </div>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={doVerify}
+                disabled={!canVerify || verifyLoading}
+                className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {verifyLoading ? 'Checking provider...' : 'Check Provider Status'}
+              </button>
+            </div>
+
+            {verifyResult && (
+              <div className={`rounded-lg border px-4 py-4 ${resultStyle[resultKind ?? 'pending']}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-semibold text-base">
+                    {resultKind === 'success' && 'SUCCESS — Payment confirmed by provider.'}
+                    {resultKind === 'already' && 'Already verified and financially posted.'}
+                    {resultKind === 'pending' && 'PENDING — Provider has not confirmed a final payment result.'}
+                    {resultKind === 'unable' && 'UNABLE TO VERIFY — Final provider transaction ID is unavailable. No financial status was changed.'}
+                    {resultKind === 'unavailable' && 'PROVIDER UNAVAILABLE — Provider verification could not be completed. No financial status was changed.'}
+                    {resultKind === 'failed' && 'FAILED — Authoritative terminal provider failure.'}
+                  </span>
+                </div>
+                {verifyResult.message && <p className="text-sm opacity-90 mb-3">{verifyResult.message}</p>}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+                  <DetailRow label="Provider" value={verifyResult.provider} />
+                  <DetailRow label="Provider Status" value={verifyResult.providerStatus} />
+                  <DetailRow label="Bells Status" value={verifyResult.bellsStatus} />
+                  <DetailRow label="Amount Expected" value={fmtNGN(verifyResult.amountExpected)} />
+                  <DetailRow label="Amount Confirmed" value={fmtNGN(verifyResult.amountConfirmed)} />
+                  <DetailRow label="Provider Transaction ID" value={verifyResult.providerTransactionId} />
+                  <DetailRow label="Verification Time" value={fmtDate(verifyResult.verifiedAt)} />
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
 const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userText: string; onLogout: () => void; goBack: () => void; dashboardTo: string }> = ({ role, brand, userText, onLogout, goBack, dashboardTo }) => {
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
+  const viewMode = searchParams.get('view') ?? 'list';
+  const isVerifyView = viewMode === 'verify';
   void goBack;
   void dashboardTo;
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const baseEndpoint = role === 'ADMIN' ? '/admin/payments' : '/bursary/payments';
-  const activePath = `/${role.toLowerCase()}/payments`;
+  const activePath = `/${role.toLowerCase()}/payments${searchParams.toString() ? `?${searchParams.toString()}` : ''}`;
 
   useEffect(() => {
     setErrorMsg('');
@@ -259,6 +588,9 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
 
   return (
     <PortalShell brand={brand} userText={userText} role={role} onLogout={onLogout} activePath={activePath} navCounters={navCounts} userPermissions={user?.permissions as string[] | undefined} showGlobalSearch userEmail={user?.email}>
+      {isVerifyView ? (
+        <VerifyPaymentWorkspace baseEndpoint={baseEndpoint} />
+      ) : (
       <div className="w-full space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">All Payments</h1>
@@ -432,6 +764,7 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           </div>
         </div>
       </div>
+      )}
       <Modal
         isOpen={cancelDialogOpen}
         title={`Cancel Payment Attempt #${cancelTarget?.id ?? ''} ${cancelTarget?.reference ? `(${cancelTarget.reference})` : ''}`}

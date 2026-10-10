@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { AlatpayPopupUnavailableError, isAlatpayUuid } from '../utils/alatpay';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
+import { Role } from '@prisma/client';
 
 export const initiatePaymentValidator = validateBody(InitiatePaymentSchema);
 
@@ -242,9 +243,244 @@ export const getContinueOption = catchAsync(async (req: Request, res: Response) 
   });
 });
 
+// =============================================================================
+// ADMIN / BURSARY — Verify Payment workspace
+// -----------------------------------------------------------------------------
+// Shared controllers used by both /admin/payments and /bursary/payments.
+//
+// Security invariants:
+//   • The transaction is loaded server-side by :id. The browser is NEVER
+//     allowed to substitute a gateway/provider identifier for the stored
+//     trusted reference.
+//   • For ALATPay, provider verification is ONLY attempted when the stored
+//     alatpayFinalTransactionId is a strict UUID v4. Order/init/WEMA-PAY
+//     references are NEVER used as a fallback (they are not authoritative
+//     final transaction IDs).
+//   • For Paystack, the stored paystackReference is the only identifier used.
+//   • PaymentService.verifyPayment performs the authoritative, idempotent
+//     financial posting (atomic claim, amount validation, invoice credit,
+//     receipt, GL, settlement). Transport errors and non-terminal provider
+//     statuses never move the transaction to FAILED.
+// =============================================================================
+export const getTransactionForVerify = catchAsync(async (req: Request, res: Response) => {
+  const txId = Number(req.params.id);
+  if (!Number.isFinite(txId) || txId <= 0) {
+    return res.status(400).json({ status: 'error', message: 'Invalid transaction ID.' });
+  }
+  const tx = await prisma.transaction.findUnique({
+    where: { id: txId },
+    select: {
+      id: true,
+      reference: true,
+      status: true,
+      gateway: true,
+      amount: true,
+      expectedAmount: true,
+      description: true,
+      type: true,
+      createdAt: true,
+      updatedAt: true,
+      paystackReference: true,
+      paystackChannel: true,
+      alatpayReference: true,
+      alatpayOrderReference: true,
+      alatpayInitPaymentReference: true,
+      alatpayFinalTransactionId: true,
+      alatpayCheckoutUrl: true,
+      alatpaySessionId: true,
+      underpaidReason: true,
+      metadata: true,
+      userId: true,
+      invoiceId: true,
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          matricNumber: true,
+        },
+      },
+      invoice: {
+        select: {
+          id: true,
+          invoiceNumber: true,
+          amountDue: true,
+          amountPaid: true,
+          status: true,
+          fee: { select: { id: true, name: true, feeCode: true } },
+        },
+      },
+      receipts: {
+        select: { id: true, receiptNumber: true, verificationToken: true, isVoided: true, generatedAt: true },
+        orderBy: { generatedAt: 'desc' },
+        take: 1,
+      },
+    },
+  });
+  if (!tx) {
+    return res.status(404).json({ status: 'error', message: 'Transaction not found.' });
+  }
+
+  const gl = await prisma.generalLedger.findFirst({
+    where: { transactionId: tx.id },
+    select: { id: true, entryType: true, amount: true, createdAt: true },
+  });
+
+  let alatpayFinalTxIdValid = false;
+  if (tx.gateway === 'ALATPAY' && tx.alatpayFinalTransactionId) {
+    alatpayFinalTxIdValid = isAlatpayUuid(tx.alatpayFinalTransactionId);
+  }
+
+  return res.status(200).json({
+    status: 'success',
+    data: {
+      transaction: tx,
+      generalLedger: gl,
+      alatpayFinalTxIdValid,
+    },
+  });
+});
+
+export const verifyPaymentByTransactionId = catchAsync(async (req: Request, res: Response) => {
+  const txId = Number(req.params.id);
+  if (!Number.isFinite(txId) || txId <= 0) {
+    return res.status(400).json({ status: 'error', message: 'Invalid transaction ID.' });
+  }
+
+  const tx = await prisma.transaction.findUnique({
+    where: { id: txId },
+    select: {
+      id: true,
+      reference: true,
+      status: true,
+      gateway: true,
+      paystackReference: true,
+      alatpayFinalTransactionId: true,
+      alatpayReference: true,
+      alatpayOrderReference: true,
+      alatpayInitPaymentReference: true,
+      expectedAmount: true,
+      amount: true,
+      invoiceId: true,
+    },
+  });
+  if (!tx) {
+    return res.status(404).json({ status: 'error', message: 'Transaction not found.' });
+  }
+
+  // Idempotency for already-successful transactions: do not call the provider
+  // again and do not create duplicate receipt/GL/invoice-credit.
+  const TERMINAL_SUCCESS = new Set(['SUCCESS']);
+  if (TERMINAL_SUCCESS.has(String(tx.status))) {
+    const receipt = await prisma.receipt.findFirst({
+      where: { transactionId: tx.id, isVoided: false },
+      select: { id: true, receiptNumber: true, verificationToken: true },
+    });
+    const gl = await prisma.generalLedger.findFirst({ where: { transactionId: tx.id } });
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        alreadyVerified: true,
+        verified: true,
+        bellsStatus: tx.status,
+        providerStatus: null,
+        provider: tx.gateway,
+        amountExpected: tx.expectedAmount,
+        amountConfirmed: tx.amount,
+        providerTransactionId: tx.gateway === 'PAYSTACK' ? tx.paystackReference : tx.alatpayFinalTransactionId,
+        verifiedAt: new Date().toISOString(),
+        receipt: receipt ?? null,
+        generalLedger: gl ? { id: gl.id } : null,
+        message: 'Already verified and financially posted.',
+      },
+    });
+  }
+
+  // Resolve the trusted provider reference server-side. NEVER accept one from
+  // the request body.
+  let providerReference: string | null = null;
+  let unableReason: string | null = null;
+
+  if (tx.gateway === 'ALATPAY') {
+    if (tx.alatpayFinalTransactionId && isAlatpayUuid(tx.alatpayFinalTransactionId)) {
+      providerReference = String(tx.alatpayFinalTransactionId).trim();
+    } else {
+      unableReason = 'ALATPAY_FINAL_TXID_REQUIRED';
+    }
+  } else if (tx.gateway === 'PAYSTACK') {
+    if (tx.paystackReference && typeof tx.paystackReference === 'string' && String(tx.paystackReference).trim()) {
+      providerReference = String(tx.paystackReference).trim();
+    } else {
+      unableReason = 'PAYSTACK_REFERENCE_REQUIRED';
+    }
+  } else {
+    unableReason = 'UNSUPPORTED_GATEWAY';
+  }
+
+  if (unableReason) {
+    return res.status(200).json({
+      status: 'unable_to_verify',
+      data: {
+        verified: false,
+        bellsStatus: tx.status,
+        provider: tx.gateway,
+        reason: unableReason,
+        providerReferenceUsed: null,
+        message:
+          unableReason === 'ALATPAY_FINAL_TXID_REQUIRED'
+            ? 'Provider verification unavailable because the final ALATPay transaction identifier was not captured. The payment remains unresolved. Check webhook/reconciliation evidence or use the authorized cancellation/reconciliation workflow.'
+            : 'Provider verification unavailable: trusted provider reference not stored. No financial status was changed.',
+      },
+    });
+  }
+
+  let result: any;
+  try {
+    result = await PaymentService.verifyPayment(tx.reference, {
+      providerReference: providerReference ?? undefined,
+      expectedTransactionId: tx.id,
+      req,
+    });
+  } catch (err: any) {
+    return res.status(200).json({
+      status: 'provider_unavailable',
+      data: {
+        verified: false,
+        bellsStatus: tx.status,
+        provider: tx.gateway,
+        providerReferenceUsed: providerReference,
+        reason: 'PROVIDER_TRANSPORT_ERROR',
+        message: 'Provider verification could not be completed. No financial status was changed.',
+      },
+    });
+  }
+
+  const bellsStatus = result?.status ?? tx.status;
+  const verified = result?.verified === true || bellsStatus === 'SUCCESS';
+  const providerStatus = result?.providerStatus ?? result?.reason ?? null;
+
+  return res.status(200).json({
+    status: verified ? 'success' : 'pending',
+    data: {
+      verified,
+      bellsStatus,
+      providerStatus,
+      provider: tx.gateway,
+      amountExpected: tx.expectedAmount,
+      amountConfirmed: result?.amount_paid_kobo != null ? Number(result.amount_paid_kobo) / 100 : tx.amount,
+      providerTransactionId: providerReference,
+      verifiedAt: new Date().toISOString(),
+      reason: result?.reason ?? null,
+    },
+  });
+});
+
 export default {
   initiatePayment,
   verifyPayment,
   confirmPayload,
   getContinueOption,
+  getTransactionForVerify,
+  verifyPaymentByTransactionId,
 };

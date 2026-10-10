@@ -13,6 +13,10 @@ import {
   CancelTransactionBodySchema,
   TransactionCancellationService,
 } from '../services/transactionCancellation';
+import {
+  getTransactionForVerify,
+  verifyPaymentByTransactionId,
+} from '../controllers/payments';
 
 const router = express.Router();
 
@@ -667,6 +671,26 @@ router.get(
       },
     });
   }),
+);
+
+// ---------------------------------------------------------------------------
+// Bursary: Verify Payment workspace
+//   GET  /bursary/payments/:id        → transaction detail (read-only)
+//   POST /bursary/payments/:id/verify → run provider verification
+// Both require VERIFY_PAYMENT. Transaction loaded server-side by :id.
+// ---------------------------------------------------------------------------
+const BursaryPaymentsIdParam = z.object({ id: z.coerce.number().int().positive() });
+router.get(
+  '/payments/:id',
+  requirePermission('VERIFY_PAYMENT'),
+  validateParams(BursaryPaymentsIdParam),
+  getTransactionForVerify,
+);
+router.post(
+  '/payments/:id/verify',
+  requirePermission('VERIFY_PAYMENT'),
+  validateParams(BursaryPaymentsIdParam),
+  verifyPaymentByTransactionId,
 );
 
 // ---------------------------------------------------------------------------

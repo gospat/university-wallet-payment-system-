@@ -34,6 +34,10 @@ import {
   CancelTransactionBodySchema,
   TransactionCancellationService,
 } from '../services/transactionCancellation';
+import {
+  getTransactionForVerify,
+  verifyPaymentByTransactionId,
+} from '../controllers/payments';
 
 const router = express.Router();
 
@@ -1373,6 +1377,27 @@ router.get(
       },
     });
   }),
+);
+
+// ---------------------------------------------------------------------------
+// Admin: Verify Payment workspace
+//   GET  /admin/payments/:id        → transaction detail (read-only)
+//   POST /admin/payments/:id/verify → run provider verification
+// Both require VERIFY_PAYMENT. The transaction is loaded server-side by :id;
+// the browser may not substitute provider identifiers.
+// ---------------------------------------------------------------------------
+const AdminPaymentsIdParam = z.object({ id: z.coerce.number().int().positive() });
+router.get(
+  '/payments/:id',
+  requirePermission('VERIFY_PAYMENT'),
+  validateParams(AdminPaymentsIdParam),
+  getTransactionForVerify,
+);
+router.post(
+  '/payments/:id/verify',
+  requirePermission('VERIFY_PAYMENT'),
+  validateParams(AdminPaymentsIdParam),
+  verifyPaymentByTransactionId,
 );
 
 // ---------------------------------------------------------------------------
