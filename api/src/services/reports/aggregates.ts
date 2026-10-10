@@ -1155,7 +1155,8 @@ export type ExceptionKind =
   | 'UNEXPECTED_GATEWAY_CHARGE'
   | 'REFUND_UNRECONCILED'
   | 'AWAITING_SETTLEMENT'
-  | 'GL_IMBALANCE';
+  | 'GL_IMBALANCE'
+  | 'CANCELLED_INVOICE_LATE_SUCCESS';
 
 export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: ExceptionKind }) {
   const dateFrom = f.dateFrom;
@@ -1293,14 +1294,37 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     HAVING ABS(imbalance) > 0.02
     LIMIT 500
   `;
+  // (l) CANCELLED_INVOICE_LATE_SUCCESS — audit log entries where provider
+  //     reported SUCCESS against administratively CANCELLED invoice. Pulled from
+  //     AuditLog.action = PAYMENT_SUCCESS_ON_CANCELLED_INVOICE so Bursary has
+  //     an auditable record-of-record for each routing-to-reconciliation case.
+  //     Transaction id, invoice id/number, providerRef, paidAt, paidNaira
+  //     preserved in oldValue/newValue/details JSON fields.
+  const l = Prisma.sql`
+    SELECT a.id AS auditId, a.createdAt, a.action,
+           CAST(JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.transactionId')) AS UNSIGNED) AS transactionId,
+           CAST(JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.invoiceId'))     AS UNSIGNED) AS invoiceId,
+           JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.invoiceNumber'))                AS invoiceNumber,
+           JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.reference'))                    AS paymentReference,
+           JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.providerRef'))                  AS providerRef,
+           JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.paidAt'))                       AS paidAt,
+           CAST(JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.paidNaira')) AS DECIMAL(20,2)) AS paidNaira,
+           JSON_UNQUOTE(JSON_EXTRACT(a.details, '\$.note'))                         AS note
+    FROM AuditLog a
+    WHERE a.action='PAYMENT_SUCCESS_ON_CANCELLED_INVOICE'
+      AND (${dateFrom ? Prisma.sql`a.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`a.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+    ORDER BY a.createdAt DESC
+    LIMIT 500
+  `;
 
   type QRes = any[];
-  const [aR, bR, cR, dR, eR, fR, gR, hR, iR, jR, kR] = (await Promise.all([
+  const [aR, bR, cR, dR, eR, fR, gR, hR, iR, jR, kR, lR] = (await Promise.all([
     prisma.$queryRaw<QRes>(a), prisma.$queryRaw<QRes>(b), prisma.$queryRaw<QRes>(c),
     prisma.$queryRaw<QRes>(dSql), prisma.$queryRaw<QRes>(e), prisma.$queryRaw<QRes>(fSql),
     prisma.$queryRaw<QRes>(g), prisma.$queryRaw<QRes>(h), prisma.$queryRaw<QRes>(i),
-    prisma.$queryRaw<QRes>(j), prisma.$queryRaw<QRes>(k),
-  ])) as [any[],any[],any[],any[],any[],any[],any[],any[],any[],any[],any[]];
+    prisma.$queryRaw<QRes>(j), prisma.$queryRaw<QRes>(k), prisma.$queryRaw<QRes>(l),
+  ])) as [any[],any[],any[],any[],any[],any[],any[],any[],any[],any[],any[],any[]];
 
   const allCats: Array<{kind: ExceptionKind; label: string; description: string; rows: any[]}> = [
     { kind: 'SUCCESS_NO_RECEIPT',        label: 'Successful tx without receipt',    description: 'Transaction marked SUCCESS but no Receipt row created', rows: Array.isArray(aR) ? aR : [] },
@@ -1314,6 +1338,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     { kind: 'REFUND_UNRECONCILED',       label: 'Refund unreconciled in GL',       description: 'Approved/paid refund without REFUND_ISSUED GL entry', rows: Array.isArray(iR) ? iR : [] },
     { kind: 'AWAITING_SETTLEMENT',       label: 'Payments awaiting settlement',    description: 'SUCCESS tx not yet settled/matched by provider', rows: Array.isArray(jR) ? jR : [] },
     { kind: 'GL_IMBALANCE',              label: 'General Ledger imbalance',        description: 'Per-tx GL entries debit/credit net > 0.02 NGN', rows: Array.isArray(kR) ? kR : [] },
+    { kind: 'CANCELLED_INVOICE_LATE_SUCCESS', label: 'Late SUCCESS on CANCELLED invoice', description: 'Provider reported SUCCESS after invoice was administratively cancelled; routed to reconciliation for review', rows: Array.isArray(lR) ? lR : [] },
   ];
   const filtered = f.kind ? allCats.filter(c => c.kind === f.kind) : allCats;
   const totalCount = filtered.reduce((s, c) => s + Number(c.rows.length ?? 0), 0);

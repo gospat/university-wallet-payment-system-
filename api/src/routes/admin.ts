@@ -30,6 +30,10 @@ import {
   EmailTemplateService,
   EmailTemplateConfigPatchSchema,
 } from '../services/emailTemplate';
+import {
+  CancelTransactionBodySchema,
+  TransactionCancellationService,
+} from '../services/transactionCancellation';
 
 const router = express.Router();
 
@@ -1857,5 +1861,43 @@ router.post('/users/:id/resend-credentials', resendCredentialsLimiter, validateP
     },
   });
 }));
+
+// --- Controlled manual transaction cancellation (BLOCKER 3) ---------------
+// Mirror of /bursary/transactions/:id/cancel for ADMIN-role mount.
+// See bursary.ts for full eligibility semantics.
+const AdminCancelTxParams = z.object({
+  id: z.coerce.number().int().positive(),
+});
+router.post(
+  '/transactions/:id/cancel',
+  requirePermission('VOID_TRANSACTIONS'),
+  validateParams(AdminCancelTxParams),
+  validateBody(CancelTransactionBodySchema),
+  catchAsync(async (req: any, res) => {
+    const transactionId = Number(req.params.id);
+    const body = req.body as z.infer<typeof CancelTransactionBodySchema>;
+    const result = await TransactionCancellationService.cancelTransaction({
+      transactionId,
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      actorPermissions: req.user.permissions ?? [],
+      reason: body.reason,
+      writtenExplanation: body.writtenExplanation,
+      evidenceReference: body.evidenceReference,
+      req: req as any,
+    });
+    res.status(200).json({
+      status: 'success',
+      data: {
+        id: transactionId,
+        cancelled: true,
+        transaction: result.transaction,
+        auditId: result.auditId,
+        auditedAt: result.auditedAt,
+        cancellation: result.cancellation,
+      },
+    });
+  }),
+);
 
 export default router;

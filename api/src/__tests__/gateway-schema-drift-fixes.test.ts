@@ -20,7 +20,32 @@ jest.mock('../config/database', () => ({
       count: jest.fn().mockResolvedValue(0),
     },
     feeAssignment: { findMany: jest.fn(), updateMany: jest.fn() },
-    $transaction: jest.fn(),
+    $transaction: jest.fn(async (fn: any) => {
+      const prisma = (require('../config/database') as any).default;
+      const txClient: any = {
+        $executeRawUnsafe: jest.fn().mockResolvedValue([]),
+        $queryRaw: jest.fn().mockResolvedValue([]),
+        user: { findFirst: (...a: any[]) => prisma.user.findFirst?.(...a) },
+        invoice: {
+          findFirst: (...a: any[]) => prisma.invoice.findFirst?.(...a),
+          findUnique: (...a: any[]) => prisma.invoice.findFirst
+            ? prisma.invoice.findFirst({ where: a?.[0]?.where, select: a?.[0]?.select })
+            : Promise.resolve(null),
+          update: (...a: any[]) => prisma.invoice.update?.(...a),
+        },
+        transaction: {
+          findFirst: (...a: any[]) => prisma.transaction.findFirst?.(...a),
+          findMany: (...a: any[]) => prisma.transaction.findMany?.(...a),
+          create: (...a: any[]) => prisma.transaction.create(...a),
+          update: (...a: any[]) => prisma.transaction.update(...a),
+        },
+        feeAssignment: {
+          findMany: (...a: any[]) => prisma.feeAssignment.findMany?.(...a),
+          updateMany: (...a: any[]) => prisma.feeAssignment.updateMany?.(...a),
+        },
+      };
+      return fn(txClient);
+    }),
   },
 }));
 
@@ -32,6 +57,18 @@ jest.mock('../services/paystack', () => ({
   },
   computePaymentBreakdown: jest.fn(),
 }));
+
+jest.mock('ioredis', () => jest.fn().mockImplementation(() => ({
+  on: jest.fn(),
+  call: jest.fn(async (cmd: string, ..._args: any[]) => {
+    if (cmd === 'SET') return 'OK';
+    if (cmd === 'DEL') return 1;
+    return null;
+  }),
+  status: 'ready',
+  disconnect: jest.fn(),
+  quit: jest.fn(),
+})));
 
 jest.mock('../services/payment/providerFactory', () => {
   const actualPrisma = jest.requireActual('@prisma/client');
@@ -114,7 +151,12 @@ function mockProvider(gw: PaymentGateway, opts: { initThrows?: any; initResult?:
 }
 
 beforeEach(() => {
+  process.env.INVOICE_OP_LOCK_DISABLE = '1';
   resetMocks();
+  const invoiceLock = require('../utils/invoiceLock');
+  if (invoiceLock._testResetInvoiceLocks) invoiceLock._testResetInvoiceLocks();
+  const pmod = require('../services/payment');
+  if (pmod._testResetInitiateLocks) pmod._testResetInitiateLocks();
   (prisma.user.findFirst as jest.Mock).mockResolvedValue(MOCK_STUDENT);
   (prisma.invoice.findFirst as jest.Mock).mockResolvedValue(MOCK_INVOICE);
   (prisma.transaction.findFirst as jest.Mock).mockResolvedValue(null);

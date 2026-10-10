@@ -10,7 +10,25 @@ jest.mock('../config/database', () => ({
     invoice: { findFirst: jest.fn() },
     transaction: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
     rolePermission: { findMany: jest.fn() },
-    $transaction: jest.fn(),
+    $transaction: jest.fn(async (fn: any) => {
+      const prisma = (require('../config/database') as any).default;
+      const txClient: any = {
+        $executeRawUnsafe: jest.fn().mockResolvedValue([]),
+        invoice: {
+          findUnique: (...args: any[]) => prisma.invoice.findFirst
+            ? prisma.invoice.findFirst({ where: args?.[0]?.where, select: args?.[0]?.select })
+            : Promise.resolve(null),
+        },
+        transaction: {
+          create: (...args: any[]) => prisma.transaction.create(...args),
+          update: (...args: any[]) => prisma.transaction.update(...args),
+          updateMany: (...args: any[]) => prisma.transaction.updateMany
+            ? prisma.transaction.updateMany(...args)
+            : Promise.resolve({ count: 0 }),
+        },
+      };
+      return fn(txClient);
+    }),
   },
 }));
 

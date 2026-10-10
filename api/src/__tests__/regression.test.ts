@@ -2506,9 +2506,9 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // Test-only bypass: when INITIATE_LOCK_TTL_SEC === 0 (test mode), degraded
       // lock returns true immediately so DB-level idempotency tests run.
       expect(paymentSrc).toMatch(/INITIATE_LOCK_TTL_SEC\s*===\s*0\)\s*return\s+true;/);
-      // Inside initiatePayment: lock called, failure throws 429.
+      // Inside initiatePayment: lock called, failure throws 429. Variable may be named lockOk or dedupeLockOk.
       expect(initiateSlice).toMatch(/acquireInitiateDedupeLock\(\s*studentId\s*,\s*inv\.id\s*\)/);
-      expect(initiateSlice).toMatch(/!lockOk\)\s*\{[\s\S]{0,300}throw\s*new\s+AppError\([\s\S]{0,200}429/);
+      expect(initiateSlice).toMatch(/!(?:lockOk|dedupeLockOk|invOpLockOk)\)\s*\{[\s\S]{0,500}throw\s*new\s+AppError\([\s\S]{0,300}429/);
       expect(initiateSlice).toMatch(/Another payment initiation request is currently in progress/);
     });
 
@@ -3264,6 +3264,95 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // verifyPayment SUCCESS path additionally checks invoice.status === CANCELLED and throws 409 (routes to reconciliation)
       expect(paymentSrc).toMatch(/latest\.invoice\?\.status\s*===\s*InvoiceStatus\.CANCELLED/);
       expect(paymentSrc).toMatch(/PAYMENT_SUCCESS_ON_CANCELLED_INVOICE/);
+    });
+  });
+
+  describe('TR-43 — Already-processed CANCELLED late-SUCCESS forwarding invariant (BLOCKER 2b alreadyProcessed bypass)', () => {
+    const fs: typeof import('fs') = require('fs');
+    const path: typeof import('path') = require('path');
+    const paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
+
+    it('TR-43.1 verifyPayment idempotent early-return EXPLICITLY BYPASSES when txnSuccess AND latest.status === CANCELLED (silent drop prevented)', () => {
+      expect(paymentSrc).toMatch(/shouldContinueCancelledLateSuccess/);
+      expect(paymentSrc).toMatch(/txnSuccess\s*&&\s*latest\.status\s*===\s*TransactionStatus\.CANCELLED/);
+      // must appear BEFORE the alreadyProcessed + PROCESSING-only guard (correct ordering: var defined then consumed in guard)
+      const flagPos = paymentSrc.indexOf('shouldContinueCancelledLateSuccess');
+      const guardPos = paymentSrc.indexOf('alreadyProcessed && latest.status !== TransactionStatus.PROCESSING');
+      expect(flagPos).toBeGreaterThan(-1);
+      expect(guardPos).toBeGreaterThan(flagPos);
+      // negation consumed in guard via `&& !shouldContinueCancelledLateSuccess`
+      expect(paymentSrc).toMatch(/!shouldContinueCancelledLateSuccess/);
+    });
+  });
+
+  describe('TR-44 — Permission seed gap closure: VOID_INVOICES + VOID_TRANSACTIONS exist in PERMISSION_DEFS and types/permissions arrays', () => {
+    const fs: typeof import('fs') = require('fs');
+    const path: typeof import('path') = require('path');
+    const permSeedSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'permissionSeed.ts'), 'utf8');
+    const permTypesSrc = fs.readFileSync(path.join(__dirname, '..', 'types', 'permissions.ts'), 'utf8');
+
+    it('TR-44.1 PERMISSION_DEFS[] contains VOID_INVOICES, VOID_TRANSACTIONS, VIEW_TRANSACTIONS, MANUAL_TRANSACTION, REVERSE_TRANSACTION, ISSUE_RECEIPTS, CANCEL_RECEIPTS literal key entries', () => {
+      [
+        `'VOID_INVOICES'`,
+        `'VOID_TRANSACTIONS'`,
+        `'VIEW_TRANSACTIONS'`,
+        `'MANUAL_TRANSACTION'`,
+        `'REVERSE_TRANSACTION'`,
+        `'ISSUE_RECEIPTS'`,
+        `'CANCEL_RECEIPTS'`,
+      ].forEach((k) => {
+        expect(permSeedSrc).toContain(k);
+      });
+      // Permission model upsert call present
+      expect(permSeedSrc).toMatch(/Permission\.upsert/);
+      // bumpRolePermsVersion() call AFTER loop (invalidation)
+      expect(permSeedSrc).toMatch(/for\s*\([\s\S]{0,400}bumpRolePermsVersion\s*\(\s*\)/);
+    });
+
+    it('TR-44.2 types/permissions Finance enum contains VOID_TRANSACTIONS literal, and BURSARY + ADMIN permission arrays INCLUDE it (so role default assignment contains the new key)', () => {
+      expect(permTypesSrc).toMatch(/VOID_TRANSACTIONS/);
+      // Bursary array: after MANUAL_TRANSACTION entry
+      expect(permTypesSrc).toMatch(/BURSARY_PERMISSIONS[\s\S]{0,1600}VOID_TRANSACTIONS/);
+      // Admin array also has it
+      expect(permTypesSrc).toMatch(/ADMIN_PERMISSIONS[\s\S]{0,1200}VOID_TRANSACTIONS/);
+    });
+  });
+
+  describe('TR-45 — Invoice-level concurrency protection for Blockers 1-5: dual operational TTL lock + SELECT FOR UPDATE present in cancelInvoice/transactionCancellation/initiatePayment trio', () => {
+    const fs: typeof import('fs') = require('fs');
+    const path: typeof import('path') = require('path');
+    const invoiceLockSrc = fs.readFileSync(path.join(__dirname, '..', 'utils', 'invoiceLock.ts'), 'utf8');
+    const cancelInvSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoiceCancellation.ts'), 'utf8');
+    const txCancelSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'transactionCancellation.ts'), 'utf8');
+    const paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
+
+    it('TR-45.1 Shared invoiceLock utility exists with acquireInvoiceOperationLock + releaseInvoiceOperationLock exported pair; has Redis SET NX fallback or degraded in-Map fallback', () => {
+      expect(invoiceLockSrc).toMatch(/acquireInvoiceOperationLock/);
+      expect(invoiceLockSrc).toMatch(/releaseInvoiceOperationLock/);
+      expect(invoiceLockSrc).toMatch(/SET\s*NX|SetNX|ioredis.*set\s*\(\s*['"`]NX/);
+    });
+
+    it('TR-45.2 cancelInvoice service locks invoice BEFORE any read or update (findFirst) and FOR UPDATE raw SQL inside prisma.$transaction before recheck', () => {
+      expect(cancelInvSrc).toMatch(/acquireInvoiceOperationLock/);
+      // Try/finally release pattern so lock always released even on throw
+      expect(cancelInvSrc).toMatch(/finally[\s\S]{0,200}releaseInvoiceOperationLock/);
+      // FOR UPDATE raw SQL call (MySQL InnoDB row lock, inside $transaction tx client via tx.$queryRaw or prisma.$queryRaw)
+      expect(cancelInvSrc).toMatch(/FOR\s+UPDATE/);
+    });
+
+    it('TR-45.3 initiatePayment service ALSO participates in the SAME invoice operation lock (shared with cancelInvoice) AND performs re-read inside $transaction with FOR UPDATE to prevent PENDING on CANCELLED invoice', () => {
+      expect(paymentSrc).toMatch(/acquireInvoiceOperationLock/);
+      expect(paymentSrc).toMatch(/releaseInvoiceOperationLock/);
+      expect(paymentSrc).toMatch(/FOR\s+UPDATE/);
+      // After FOR UPDATE, invRelock re-reads status then rejects PAID/CANCELLED/REFUNDED/REVERSED by throwing 409 within same tx.
+      expect(paymentSrc).toMatch(/invRelock\.status\s*===\s*['"]PAID['"][\s\S]{0,800}throw\s+new\s+AppError\([\s\S]{0,150}409/);
+      expect(paymentSrc).toMatch(/invRelock\.status\s*===\s*['"]CANCELLED['"]/);
+    });
+
+    it('TR-45.4 Transaction cancellation service ALSO takes invoice lock + FOR UPDATE inside $transaction (full operation triad protected)', () => {
+      expect(txCancelSrc).toMatch(/acquireInvoiceOperationLock/);
+      expect(txCancelSrc).toMatch(/releaseInvoiceOperationLock/);
+      expect(txCancelSrc).toMatch(/FOR\s+UPDATE/);
     });
   });
 });

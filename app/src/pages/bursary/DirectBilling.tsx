@@ -2,11 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { UserPlus, ListFilter, RefreshCw, Search, FileText, Pencil, Power, Trash2, X, DollarSign, CalendarClock, AlertCircle, CheckCircle2, Info } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
+import Modal from '../../components/Modal';
+import Alert from '../../components/Alert';
 import DirectBillForm from '../../components/fees/DirectBillForm';
 import { useAuth } from '../../context/AuthContext';
 import { navCounters, NavCounters } from '../../services/api';
 import feeApi, {
   type FeeAssignmentOut,
+  cancelInvoice as cancelInvoiceApi,
+  CANCEL_INVOICE_REASONS,
+  type CancelInvoiceReasonKey,
 } from '../../services/adminFees';
 import { i18n } from '../../i18n/en';
 
@@ -92,6 +97,75 @@ const BursaryDirectBillingPage: React.FC<{
   const closeAlert = () => setAlert(s => ({ ...s, open: false }));
   const flashSuccess = (title: string, message?: string) => setAlert({ open: true, kind: 'success', title, message });
   const flashDanger = (title: string, e: any) => setAlert({ ...summarizeHttpError(e, title), open: true });
+
+  const InvoiceStatusPill: React.FC<{ status?: string | null }> = ({ status }) => {
+    const s = String(status ?? '').toUpperCase();
+    if (!s) return <span className="inline-flex items-center px-2 py-0.5 rounded border border-gray-200 text-xs text-gray-500 bg-gray-50">—</span>;
+    const map: Record<string, string> = {
+      UNPAID: 'bg-slate-50 text-slate-700 border-slate-200',
+      PENDING: 'bg-amber-50 text-amber-700 border-amber-200',
+      PAID: 'bg-green-50 text-green-700 border-green-200',
+      PARTIALLY_PAID: 'bg-blue-50 text-blue-700 border-blue-200',
+      FAILED: 'bg-red-50 text-red-700 border-red-200',
+      CANCELLED: 'bg-gray-100 text-gray-700 border-gray-300',
+      REFUNDED: 'bg-purple-50 text-purple-700 border-purple-200',
+      REVERSED: 'bg-zinc-100 text-zinc-700 border-zinc-300',
+    };
+    const cls = map[s] ?? 'bg-gray-50 text-gray-700 border-gray-200';
+    return (
+      <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[11px] font-semibold uppercase tracking-wide ${cls}`}>
+        {s.replace('_', ' ')}
+      </span>
+    );
+  };
+
+  const UNSAFE_CANCEL_INVOICE_STATUSES = new Set(['PAID', 'PARTIALLY_PAID', 'REFUNDED', 'REVERSED', 'CANCELLED']);
+  const canCancelInvoice = (a: FeeAssignmentOut): { ok: boolean; reason?: string } => {
+    if (!a.invoice?.id) return { ok: false, reason: 'No invoice attached yet' };
+    const status = String(a.invoice.status ?? '').toUpperCase();
+    if (UNSAFE_CANCEL_INVOICE_STATUSES.has(status)) return { ok: false, reason: `Invoice status ${status} cannot be cancelled` };
+    const amountPaid = Number((a.invoice as any)?.amountPaid ?? 0);
+    if (amountPaid > 0) return { ok: false, reason: `Amount paid is ₦${amountPaid.toLocaleString()}; use reversal instead.` };
+    return { ok: true };
+  };
+  const [cancelInvDialogOpen, setCancelInvDialogOpen] = useState(false);
+  const [cancelInvTarget, setCancelInvTarget] = useState<FeeAssignmentOut | null>(null);
+  const [cancelInvReason, setCancelInvReason] = useState<CancelInvoiceReasonKey | ''>('');
+  const [cancelInvWritten, setCancelInvWritten] = useState<string>('');
+  const [cancelInvLoading, setCancelInvLoading] = useState(false);
+  const [cancelInvError, setCancelInvError] = useState<string>('');
+  const openCancelInvoiceDialog = (a: FeeAssignmentOut) => {
+    setCancelInvTarget(a);
+    setCancelInvReason('');
+    setCancelInvWritten('');
+    setCancelInvError('');
+    setCancelInvDialogOpen(true);
+  };
+  const closeCancelInvoiceDialog = () => {
+    setCancelInvDialogOpen(false);
+    setCancelInvTarget(null);
+  };
+  const doCancelInvoice = async () => {
+    if (!cancelInvTarget?.invoice?.id) return;
+    if (!cancelInvReason) { setCancelInvError('Cancellation reason is required.'); return; }
+    if (cancelInvReason === 'OTHER' && (cancelInvWritten.trim().length < 1)) {
+      setCancelInvError('Written explanation is required when reason is "Other".');
+      return;
+    }
+    setCancelInvLoading(true); setCancelInvError('');
+    try {
+      await cancelInvoiceApi(Number(cancelInvTarget.invoice.id), {
+        reason: cancelInvReason,
+        writtenExplanation: cancelInvReason === 'OTHER' ? cancelInvWritten.trim() : undefined,
+      });
+      closeCancelInvoiceDialog();
+      flashSuccess(`Invoice ${cancelInvTarget.invoice.invoiceNumber ?? cancelInvTarget.invoice.id} cancelled.`, 'Server-side safety checks confirmed cancellation and wrote an auditable event. Invoice balance and receipts were NOT modified.');
+      await fetchDirectAssignments();
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || String(err) || 'Cancellation failed.';
+      setCancelInvError(msg.slice(0, 600));
+    } finally { setCancelInvLoading(false); }
+  };
 
   const fetchDirectAssignments = useCallback(async () => {
     setLoading(true);
@@ -512,8 +586,8 @@ const BursaryDirectBillingPage: React.FC<{
                       <th className="px-4 py-3 text-left font-medium">Due Date</th>
                       <th className="px-4 py-3 text-left font-medium">Student</th>
                       <th className="px-4 py-3 text-left font-medium">Matric / Dept</th>
-                      <th className="px-4 py-3 text-center font-medium">Status</th>
-                      <th className="px-4 py-3 text-left font-medium">Invoice Ref</th>
+                      <th className="px-4 py-3 text-center font-medium">Active</th>
+                      <th className="px-4 py-3 text-left font-medium">Invoice</th>
                       <th className="px-4 py-3 text-left font-medium">Origin</th>
                       <th className="px-4 py-3 text-right font-medium">Actions</th>
                     </tr>
@@ -585,10 +659,15 @@ const BursaryDirectBillingPage: React.FC<{
                             {a.isActive ? 'Active' : 'Inactive'}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-gray-700 font-mono text-xs">
-                          —
-                          <div className="text-[10px] text-gray-400 mt-0.5">
-                            Assignment #{a.id}
+                        <td className="px-4 py-3">
+                          <div className="flex flex-col gap-1.5 items-start">
+                            <InvoiceStatusPill status={a.invoice?.status} />
+                            <div className="font-mono text-[11px] text-gray-800">
+                              {a.invoice?.invoiceNumber ?? '—'}
+                            </div>
+                            <div className="text-[10px] text-gray-400">
+                              Assignment #{a.id}
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">{originPill(a)}</td>
@@ -622,6 +701,26 @@ const BursaryDirectBillingPage: React.FC<{
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
+                            {(() => {
+                              const c = canCancelInvoice(a);
+                              const titleText = c.ok ? 'Cancel Invoice' : (c.reason ?? 'Invoice not eligible');
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => c.ok && openCancelInvoiceDialog(a)}
+                                  disabled={!c.ok}
+                                  title={titleText}
+                                  className={`inline-flex items-center gap-1 h-8 px-2.5 rounded-md border text-[11px] font-semibold transition-colors ${
+                                    c.ok
+                                      ? 'text-red-700 hover:text-red-800 hover:bg-red-50 border-red-200 hover:border-red-300'
+                                      : 'text-gray-400 bg-gray-50 border-gray-200 cursor-not-allowed'
+                                  }`}
+                                >
+                                  <AlertCircle className="h-3.5 w-3.5" />
+                                  Cancel
+                                </button>
+                              );
+                            })()}
                           </div>
                         </td>
                       </tr>
@@ -803,6 +902,116 @@ const BursaryDirectBillingPage: React.FC<{
           </div>
         </div>
       )}
+
+      <Modal
+        isOpen={cancelInvDialogOpen}
+        title={`Cancel Invoice ${cancelInvTarget?.invoice?.invoiceNumber ? `(${cancelInvTarget.invoice.invoiceNumber})` : cancelInvTarget?.invoice?.id ? `#${cancelInvTarget.invoice.id}` : ''}`}
+        size="lg"
+        onClose={() => { if (!cancelInvLoading) closeCancelInvoiceDialog(); }}
+        footer={
+          <div className="w-full flex justify-end gap-2">
+            <button
+              type="button"
+              disabled={cancelInvLoading}
+              onClick={closeCancelInvoiceDialog}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+            >
+              Cancel (close)
+            </button>
+            <button
+              type="button"
+              disabled={cancelInvLoading || !cancelInvTarget?.invoice?.id || !cancelInvReason || (cancelInvReason === 'OTHER' && cancelInvWritten.trim().length < 1)}
+              onClick={doCancelInvoice}
+              className="px-4 py-2 rounded-lg text-sm font-semibold text-white shadow-sm bg-gradient-to-br from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 focus:outline-none focus:ring-2 focus:ring-red-500/30 disabled:opacity-50"
+            >
+              {cancelInvLoading ? 'Cancelling…' : 'Confirm Cancel Invoice'}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-5 text-sm">
+          <Alert variant="info">
+            Invoice cancellation marks an unpaid invoice as CANCELLED for audit purposes. It does <strong>not</strong> modify
+            General Ledger balances, generate a receipt, post settlements, or refund any previously paid amount. Server-side
+            safety checks are the final arbiter and will reject cancellation if any money has been posted.
+          </Alert>
+          <Alert variant="danger">
+            <div className="text-xs leading-relaxed">
+              <div className="font-semibold mb-1">Never auto-cancel an invoice.</div>
+              Never cancel merely because a popup closed, time elapsed, a callback is missing, or you see no final provider
+              reference. Always verify independently: receipts already issued, settlements posted, General Ledger financial
+              entries, webhook evidence, and any provider dashboard reference before cancelling.
+            </div>
+          </Alert>
+          {cancelInvTarget && (
+            <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs">
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Student</dt>
+                <dd className="font-medium text-gray-900 mt-0.5">{studentFullName(cancelInvTarget)}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Matric / Dept</dt>
+                <dd className="font-medium text-gray-900 mt-0.5">{cancelInvTarget.targetStudent?.matricNumber ?? '—'}{cancelInvTarget.fee?.department ? ` · ${cancelInvTarget.fee.department}` : ''}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Fee / Charge</dt>
+                <dd className="font-medium text-gray-900 mt-0.5 truncate">{cancelInvTarget.fee?.name ?? `Ad-hoc #${cancelInvTarget.feeId}`}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Amount Due</dt>
+                <dd className="font-medium text-gray-900 mt-0.5 tabular-nums">{fmtNgn(amount(cancelInvTarget))}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Invoice Status</dt>
+                <dd className="mt-0.5"><InvoiceStatusPill status={cancelInvTarget.invoice?.status} /></dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Amount Paid</dt>
+                <dd className={`mt-0.5 font-semibold tabular-nums ${
+                  Number((cancelInvTarget.invoice as any)?.amountPaid ?? 0) === 0 ? 'text-emerald-700' : 'text-red-700'
+                }`}>
+                  {fmtNgn(Number((cancelInvTarget.invoice as any)?.amountPaid ?? 0))}
+                </dd>
+              </div>
+            </dl>
+          )}
+          <div className="space-y-1.5">
+            <label htmlFor="cancel-inv-reason" className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Cancellation reason <span className="text-red-600">*</span>
+            </label>
+            <select
+              id="cancel-inv-reason"
+              value={cancelInvReason}
+              onChange={(e) => setCancelInvReason((e.target.value as CancelInvoiceReasonKey) || '')}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+            >
+              <option value="">— Select reason —</option>
+              {CANCEL_INVOICE_REASONS.map((r) => (
+                <option key={r.key} value={r.key}>{r.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="cancel-inv-written" className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Written explanation {cancelInvReason === 'OTHER' && <span className="text-red-600">*</span>}
+            </label>
+            <textarea
+              id="cancel-inv-written"
+              rows={4}
+              maxLength={2000}
+              value={cancelInvWritten}
+              onChange={(e) => setCancelInvWritten(e.target.value ?? '')}
+              placeholder="Documented evidence, checks performed, or supporting rationale…"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 resize-y min-h-[100px]"
+            />
+          </div>
+          {cancelInvError && (
+            <Alert variant="danger">
+              <div className="text-xs whitespace-pre-wrap leading-relaxed">{cancelInvError}</div>
+            </Alert>
+          )}
+        </div>
+      </Modal>
     </PortalShell>
   );
 };

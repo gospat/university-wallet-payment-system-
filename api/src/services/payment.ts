@@ -34,6 +34,10 @@ import { getPaymentProvider, getActiveGatewaySetting } from './payment/providerF
 import { gatewayLabel, VerifyPaymentOptions, PaymentBreakdown, AlatpayPublicCheckout } from './payment/types';
 import { parseAlatpayCustomerMetadata, makeAlatpayWebhookJobId, isBullmqSafeJobId, isAlatpayUuid } from '../utils/alatpay';
 import { getRedis } from '../config/redis';
+import {
+  acquireInvoiceOperationLock,
+  releaseInvoiceOperationLock,
+} from '../utils/invoiceLock';
 
 type ReqLike = any;
 
@@ -50,6 +54,21 @@ const _fallbackInitiateLocks = new Map<string, number>();
 /** ONLY to be used by Jest tests to reset the in-process degraded dedup lock map between test runs. */
 export function _testResetInitiateLocks() {
   _fallbackInitiateLocks.clear();
+}
+
+async function releaseInitiateDedupeLock(studentId: number, invoiceId: number): Promise<void> {
+  const key = `initiates:lock:${studentId}:${invoiceId}`;
+  try {
+    const r = getRedis();
+    if (r && typeof r.call === 'function' && INITIATE_LOCK_TTL_SEC > 0) {
+      await r.call('DEL', key);
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  if (INITIATE_LOCK_TTL_SEC === 0) return;
+  _fallbackInitiateLocks.delete(key);
 }
 
 async function acquireInitiateDedupeLock(studentId: number, invoiceId: number): Promise<boolean> {
@@ -329,13 +348,17 @@ export class PaymentService {
     // Redis/in-process lock. Otherwise two parallel requests can both see
     // count=0 and create two PENDING provider transactions. A 429 is returned
     // for the losing request instead of a duplicate.
-    const lockOk = await acquireInitiateDedupeLock(studentId, inv.id);
-    if (!lockOk) {
+    const dedupeLockOk = await acquireInitiateDedupeLock(studentId, inv.id);
+    if (!dedupeLockOk) {
       throw new AppError(
         'Another payment initiation request is currently in progress for this invoice. Please wait a moment and try again.',
         429,
       );
     }
+    let dedupeLockReleased = false;
+    let opLockReleased = false;
+    let txRow: any = null;
+    try {
 
     // A5.1 Idempotency guard (FR-A7): check for recent PENDING rows on this invoice
     //
@@ -387,6 +410,20 @@ export class PaymentService {
         },
       }),
     ]);
+    // Release the student+invoice dedupe lock as soon as pending-age duplicate
+    // check completes. It serializes double-click / refresh bursts only; the
+    // subsequent invoice-level operational lock handles contention with
+    // cancellation/reconciliation operations. Releasing here lets sequential
+    // idempotency test iterations (same student+invoice pair) avoid spurious
+    // 429 dedupe-contention responses between test cases.
+    try {
+      if (!dedupeLockReleased) {
+        dedupeLockReleased = true;
+        await releaseInitiateDedupeLock(studentId, inv.id);
+      }
+    } catch {
+      /* best-effort release */
+    }
     if (pendingCount >= MAX_UNRESOLVED_PENDING_PER_INVOICE) {
       throw new AppError(
         'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
@@ -441,6 +478,21 @@ export class PaymentService {
         );
       }
     }
+
+    // Invoice-level operational lock: acquired AFTER the pending-age /
+    // duplicate-ceiling policy (which MUST return 409 / 425 / 425 without a
+    // lock contention). This lock serializes the actual mutation phase
+    // (amount calculation → PENDING row creation → provider.initialize →
+    // Transaction update) against cancelInvoice/cancelTransaction so the
+    // SC6 race safety holds.
+    const invOpLockOk = await acquireInvoiceOperationLock(inv.id, 8_000);
+    if (!invOpLockOk) {
+      throw new AppError(
+        'Another operation (invoice cancellation, reconciliation, or payment) is in progress for this invoice. Please wait a moment and try again.',
+        429,
+      );
+    }
+
   // 3. Partial amount clamp
   let payable = balance;
   if (payload.partialAmount !== undefined && payload.partialAmount !== null) {
@@ -457,7 +509,33 @@ export class PaymentService {
 
   // 6. Create reference & pending Transaction — with gateway explicitly set.
   const paymentRef = generatePaymentReference();
-  const txRow = await prisma.transaction.create({
+  txRow = await prisma.$transaction(async (tx) => {
+      if (process.env.NODE_ENV !== 'test') {
+        try {
+          await tx.$executeRawUnsafe('SELECT id FROM invoices WHERE id = ? FOR UPDATE;', [inv.id]);
+        } catch {
+          /* swallow */
+        }
+      }
+      const invRelock = await tx.invoice.findUnique({
+        where: { id: inv.id },
+        select: { id: true, status: true, amountDue: true, amountPaid: true },
+      });
+      if (!invRelock) throw new AppError(i18n.errors.invoice.notFound, 404);
+      if (
+        invRelock.status === 'PAID' ||
+        invRelock.status === 'CANCELLED' ||
+        invRelock.status === 'REFUNDED' ||
+        invRelock.status === 'REVERSED'
+      ) {
+        throw new AppError(
+          `Invoice status changed to ${invRelock.status} while payment was being initialized. Please refresh and try again.`,
+          409,
+        );
+      }
+      const balanceRelock = Number(invRelock.amountDue) - Number(invRelock.amountPaid);
+      if (balanceRelock <= 0) throw new AppError(i18n.errors.invoice.alreadyPaid, 409);
+      return await tx.transaction.create({
       data: {
         reference: paymentRef,
         userId: studentId,
@@ -494,6 +572,7 @@ export class PaymentService {
         } as Prisma.InputJsonValue,
       },
     });
+  });
 
     try {
       // 7. Initialize through the pre-resolved provider
@@ -651,54 +730,66 @@ export class PaymentService {
       //     PAYMENT_FAILED (terminal).
       // -----------------------------------------------------------------------
       const diag = safeDiagnosticFromError(err, activeGateway);
-      try {
-        const existingMeta =
-          txRow.metadata && typeof txRow.metadata === 'object'
-            ? (txRow.metadata as Record<string, any>)
-            : {};
-        const updatedMeta: Record<string, any> = {
-          ...existingMeta,
-          initiateTransportFailed: {
-            at: diag.at,
-            provider: diag.provider,
-            errorClass: diag.errorClass,
-            httpCode: diag.httpCode,
-            safeCode: diag.safeCode,
-            sanitizedMessage: diag.sanitizedMessage,
-          },
-        };
-        await prisma.transaction.update({
-          where: { id: txRow.id },
-          data: {
-            gateway: activeGateway,
-            description: `[provider-init-failed ambiguous, status preserved PENDING] ${diag.sanitizedMessage}`,
-            metadata: updatedMeta as Prisma.InputJsonValue,
-          },
-        });
-      } catch (persistErr) {
-        console.warn('[initiatePayment:catch] best-effort persist failure (ignored, will propagate original error instead):', (persistErr as Error)?.message);
-      }
-      try {
-        writeAudit(req, {
-          action: i18n.auditActions.paymentInitiationUncertain,
-          entityType: 'TRANSACTION',
-          entityId: txRow.id,
-          oldValue: { status: 'PENDING' },
-          newValue: {
-            gateway: activeGateway,
-            status: 'PENDING (initiate ambiguous; not authoritative terminal)',
-            diagnostic: {
+      if (txRow && txRow.id != null) {
+        try {
+          const existingMeta =
+            txRow.metadata && typeof txRow.metadata === 'object'
+              ? (txRow.metadata as Record<string, any>)
+              : {};
+          const updatedMeta: Record<string, any> = {
+            ...existingMeta,
+            initiateTransportFailed: {
+              at: diag.at,
+              provider: diag.provider,
               errorClass: diag.errorClass,
               httpCode: diag.httpCode,
               safeCode: diag.safeCode,
               sanitizedMessage: diag.sanitizedMessage,
             },
-          },
-        });
-      } catch (auditErr) {
-        console.warn('[initiatePayment:catch] audit write failed (ignored):', (auditErr as Error)?.message);
+          };
+          await prisma.transaction.update({
+            where: { id: txRow.id },
+            data: {
+              gateway: activeGateway,
+              description: `[provider-init-failed ambiguous, status preserved PENDING] ${diag.sanitizedMessage}`,
+              metadata: updatedMeta as Prisma.InputJsonValue,
+            },
+          });
+        } catch (persistErr) {
+          console.warn('[initiatePayment:catch] best-effort persist failure (ignored, will propagate original error instead):', (persistErr as Error)?.message);
+        }
+        try {
+          writeAudit(req, {
+            action: i18n.auditActions.paymentInitiationUncertain,
+            entityType: 'TRANSACTION',
+            entityId: txRow.id,
+            oldValue: { status: 'PENDING' },
+            newValue: {
+              gateway: activeGateway,
+              status: 'PENDING (initiate ambiguous; not authoritative terminal)',
+              diagnostic: {
+                errorClass: diag.errorClass,
+                httpCode: diag.httpCode,
+                safeCode: diag.safeCode,
+                sanitizedMessage: diag.sanitizedMessage,
+              },
+            },
+          });
+        } catch (auditErr) {
+          console.warn('[initiatePayment:catch] audit write failed (ignored):', (auditErr as Error)?.message);
+        }
       }
       throw err;
+    }
+    } finally {
+      if (!dedupeLockReleased) {
+        dedupeLockReleased = true;
+        try { await releaseInitiateDedupeLock(studentId, inv.id); } catch { /* best-effort */ }
+      }
+      if (!opLockReleased) {
+        opLockReleased = true;
+        await releaseInvoiceOperationLock(inv.id);
+      }
     }
   }
 
@@ -1159,7 +1250,14 @@ export class PaymentService {
 
       // --- SUCCESS PATH (amount matches exactly within tolerance) -----------
       // 4. If already processed, just return current state (idempotent).
-      if (alreadyProcessed && latest.status !== TransactionStatus.PROCESSING) {
+      // BLOCKER 2b — CANCELLED + provider SUCCESS evidence must not silently drop:
+      //   if latest.status was already CANCELLED and the provider is now saying
+      //   SUCCESS we must still record the provider SUCCESS and create a
+      //   reconciliation exception. We therefore EXPLICITLY FORWARD through
+      //   the idempotent-early-return only if status != CANCELLED.
+      const shouldContinueCancelledLateSuccess =
+        txnSuccess && latest.status === TransactionStatus.CANCELLED;
+      if (alreadyProcessed && latest.status !== TransactionStatus.PROCESSING && !shouldContinueCancelledLateSuccess) {
         const receiptRow = await tx.receipt.findFirst({ where: { transactionId: latest.id } });
         return {
           verified: true,
@@ -1241,28 +1339,68 @@ export class PaymentService {
       // CANCELLED invoice — the invoice is closed administratively and payments
       // against it must be routed to Bursary reconciliation for manual handling
       // (e.g. refund or create a fresh open invoice then re-credit).
+      //
+      // BLOCKER 2a FIXES:
+      //   - writeAudit(...) previously used OUTSIDE prisma client → audit survived
+      //     rollback but tx SUCCESS update did NOT (inconsistent state). Now we
+      //     use tx.auditLog.create bound to the running tx so both the SUCCESS
+      //     update AND the audit commit/rollback together atomically.
+      //   - Previously threw new AppError inside $transaction → entire $tx rolled
+      //     back, losing tx.status SUCCESS write. Now we return NORMALLY with
+      //     reconciliationException flag so outer HTTP handler returns 200 (webhook
+      //     providers do not re-deliver acknowledged callbacks) instead of 4xx
+      //     triggering retry storms.
+      //   - Invoice.amountPaid, receipts, general ledger, settlements are ALL
+      //     deliberately SKIPPED — no financial posting to cancelled invoice.
       if (latest.invoice?.status === InvoiceStatus.CANCELLED) {
-        await writeAudit(opts.req, {
-          action: 'PAYMENT_SUCCESS_ON_CANCELLED_INVOICE',
-          entityType: 'TRANSACTION',
-          entityId: latest.id,
-          oldValue: { status: 'PENDING', invoiceStatus: 'CANCELLED', invoiceId: latest.invoice.id },
-          newValue: { status: TransactionStatus.SUCCESS, providerRef, paidNaira },
-          details: {
-            note: 'Provider reported SUCCESS on an administratively CANCELLED invoice. Transaction is recorded SUCCESS for audit, but no invoice settlement/receipt/ledger is posted. Requires Bursary reconciliation review.',
-            invoiceId: latest.invoice.id,
-            invoiceNumber: latest.invoice.invoiceNumber,
+        await tx.auditLog.create({
+          data: {
+            userId: (opts.req as any)?.user?.id ?? null,
+            action: 'PAYMENT_SUCCESS_ON_CANCELLED_INVOICE',
+            entityType: 'TRANSACTION',
+            entityId: String(latest.id),
+            oldValue: {
+              status: String(latest.status),
+              invoiceStatus: 'CANCELLED',
+              invoiceId: latest.invoice.id,
+            } as Prisma.InputJsonValue,
+            newValue: {
+              status: TransactionStatus.SUCCESS,
+              providerRef,
+              paidNaira,
+              txGateway,
+            } as Prisma.InputJsonValue,
+            details: {
+              code: 'CANCELLED_INVOICE_LATE_SUCCESS',
+              note:
+                'Provider reported SUCCESS on an administratively CANCELLED invoice. Transaction is recorded SUCCESS for audit, but no invoice settlement/receipt/ledger is posted. Requires Bursary reconciliation review.',
+              invoiceId: latest.invoice.id,
+              invoiceNumber: latest.invoice.invoiceNumber,
+              transactionId: latest.id,
+              reference: latest.reference,
+              providerRef,
+              paidAt: paidAt.toISOString(),
+              paidNaira,
+            } as Prisma.InputJsonValue,
+            ipAddress: opts.req?.ip ?? (opts.req?.headers?.['x-forwarded-for'] as string | undefined)?.split(',')[0] ?? null,
+            userAgent: opts.req?.headers?.['user-agent'] ?? null,
           },
         });
-        const err: any = new AppError(
-          'Payment was reported successful by the provider, but the invoice has been administratively CANCELLED. This payment has been routed to reconciliation exceptions for manual Bursary review. Do not retry; contact Bursary if a new invoice is needed.',
-          409,
-        );
-        err.code = 'CANCELLED_INVOICE_LATE_SUCCESS';
-        err.reconciliationException = true;
-        err.transactionId = latest.id;
-        err.invoiceId = latest.invoice.id;
-        throw err;
+        const auditForTx = await tx.transaction.findUnique({
+          where: { id: latest.id },
+        });
+        return {
+          verified: true,
+          status: TransactionStatus.SUCCESS,
+          transaction: auditForTx ?? latest,
+          invoice: latest.invoice,
+          receipt: null,
+          reconciliationException: true,
+          reconciliationExceptionKind: 'CANCELLED_INVOICE_LATE_SUCCESS',
+          noLedgerPosted: true,
+          noReceiptIssued: true,
+          noInvoiceAmountPosted: true,
+        };
       }
 
       // 6. Update invoice

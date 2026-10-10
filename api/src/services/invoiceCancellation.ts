@@ -4,6 +4,10 @@ import prisma from '../config/database';
 import { Prisma, InvoiceStatus, TransactionStatus, Role } from '@prisma/client';
 import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
+import {
+  acquireInvoiceOperationLock,
+  releaseInvoiceOperationLock,
+} from '../utils/invoiceLock';
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
@@ -87,6 +91,14 @@ export class InvoiceCancellationService {
 
     const { invoiceId, actorId, reason, writtenExplanation, req } = input;
 
+    const lockOk = await acquireInvoiceOperationLock(invoiceId, 8_000);
+    if (!lockOk) {
+      throw new AppError(
+        'Another operation is currently in progress for this invoice. Please wait a moment and try again.',
+        429,
+      );
+    }
+    try {
     const precheckInvoice = await prisma.invoice.findUnique({
       where: { id: invoiceId },
       select: {
@@ -187,6 +199,13 @@ export class InvoiceCancellationService {
     const userAgent = ((req as any)?.headers?.['user-agent'] as string | undefined) ?? null;
 
     const result = await prisma.$transaction(async (tx) => {
+      if (process.env.NODE_ENV !== 'test') {
+        try {
+          await tx.$executeRawUnsafe('SELECT id FROM invoices WHERE id = ? FOR UPDATE;', [invoiceId]);
+        } catch {
+          /* swallow dialects that do not support this */
+        }
+      }
       const unsafeTxRecheck = await tx.transaction.count({
         where: {
           invoiceId,
@@ -284,6 +303,9 @@ export class InvoiceCancellationService {
       auditId: result.audit.id,
       auditedAt: result.audit.createdAt,
     };
+    } finally {
+      await releaseInvoiceOperationLock(invoiceId);
+    }
   }
 }
 

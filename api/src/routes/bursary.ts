@@ -9,6 +9,10 @@ import { RefundService } from '../services/refund';
 import { Prisma } from '@prisma/client';
 import { buildBranding } from '../utils/branding';
 import { csvLineSafe, appendCsvIntegrityTrailer } from '../utils/security';
+import {
+  CancelTransactionBodySchema,
+  TransactionCancellationService,
+} from '../services/transactionCancellation';
 
 const router = express.Router();
 
@@ -932,6 +936,53 @@ router.get(
         transaction: row.transaction,
       },
       branding: brand,
+    });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Controlled manual transaction cancellation (BLOCKER 3)
+//
+// Eligibility: only unpaid attempts in PENDING/PROCESSING/FAILED/UNDERPAID/
+// OVERPAID where NO receipt, NO GL postings, NO settlements exist, invoice
+// amountPaid==0 (or this attempt recorded 0 amount). Never auto-cancelled
+// from popup-close / age / missing webhook — only explicit authorized
+// operator action with written reason + evidence reference.
+//
+// POST /bursary/transactions/:id/cancel   ADMIN|BURSARY with VOID_TRANSACTIONS
+// (ADMIN short-circuits in requirePermission; BURSARY needs perm granted)
+// ---------------------------------------------------------------------------
+const CancelTransactionParams = z.object({
+  id: z.coerce.number().int().positive(),
+});
+router.post(
+  '/transactions/:id/cancel',
+  requirePermission('VOID_TRANSACTIONS'),
+  validateParams(CancelTransactionParams),
+  validateBody(CancelTransactionBodySchema),
+  catchAsync(async (req: any, res) => {
+    const transactionId = Number(req.params.id);
+    const body = req.body as z.infer<typeof CancelTransactionBodySchema>;
+    const result = await TransactionCancellationService.cancelTransaction({
+      transactionId,
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      actorPermissions: req.user.permissions ?? [],
+      reason: body.reason,
+      writtenExplanation: body.writtenExplanation,
+      evidenceReference: body.evidenceReference,
+      req: req as any,
+    });
+    res.status(200).json({
+      status: 'success',
+      data: {
+        id: transactionId,
+        cancelled: true,
+        transaction: result.transaction,
+        auditId: result.auditId,
+        auditedAt: result.auditedAt,
+        cancellation: result.cancellation,
+      },
     });
   }),
 );

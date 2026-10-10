@@ -1,12 +1,39 @@
 import { Role } from '@prisma/client';
 import prisma from '../config/database';
+import { bumpRolePermsVersion } from '../middlewares/auth';
 
 export const PERMISSION_DEFS: { key: string; name: string; category: string; description?: string }[] = [
   { key: 'VIEW_DASHBOARD', name: 'View Dashboard', category: 'Dashboard' },
+  { key: 'VIEW_AUDIT_LOG', name: 'View Audit Log', category: 'Admin' },
+  { key: 'VIEW_USERS', name: 'View Users', category: 'Admin' },
+  { key: 'MANAGE_USERS', name: 'Manage Users', category: 'Admin' },
+  { key: 'VIEW_ROLES', name: 'View Roles', category: 'Admin' },
+  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin' },
+  { key: 'IMPERSONATE_USERS', name: 'Impersonate Users', category: 'Admin' },
   { key: 'VIEW_STUDENTS', name: 'View Students', category: 'Students' },
   { key: 'CREATE_STUDENT', name: 'Create Student', category: 'Students' },
+  { key: 'MANAGE_STUDENTS', name: 'Manage Students', category: 'Students' },
   { key: 'BULK_UPLOAD_STUDENTS', name: 'Bulk Upload Students', category: 'Students' },
+  { key: 'BULK_IMPORT_STUDENTS', name: 'Bulk Import Students', category: 'Students' },
+  { key: 'RESEND_CREDENTIALS', name: 'Resend Credentials', category: 'Students' },
+  { key: 'MANAGE_STUDENT_PROFILE', name: 'Manage Student Profile', category: 'Students' },
   { key: 'VIEW_IMPORT_HISTORY', name: 'View Import History', category: 'Students' },
+  { key: 'VIEW_INVOICES', name: 'View Invoices', category: 'Fees' },
+  { key: 'CREATE_INVOICES', name: 'Create Invoices', category: 'Fees' },
+  { key: 'UPDATE_INVOICES', name: 'Update Invoices', category: 'Fees' },
+  { key: 'VOID_INVOICES', name: 'Void / Cancel Invoices', category: 'Fees', description: 'Cancel unpaid invoices that have no successful payments or unresolved pending transactions.' },
+  { key: 'VIEW_TRANSACTIONS', name: 'View Transactions', category: 'Payments' },
+  { key: 'MANUAL_TRANSACTION', name: 'Post Manual Transaction', category: 'Payments' },
+  { key: 'REVERSE_TRANSACTION', name: 'Reverse Transaction', category: 'Payments' },
+  { key: 'VOID_TRANSACTIONS', name: 'Void / Cancel Transactions', category: 'Payments', description: 'Cancel or abandon individual payment attempts that have no financial postings.' },
+  { key: 'VIEW_RECEIPTS', name: 'View Receipts', category: 'Receipts' },
+  { key: 'ISSUE_RECEIPTS', name: 'Issue Receipts', category: 'Receipts' },
+  { key: 'CANCEL_RECEIPTS', name: 'Cancel / Void Receipts', category: 'Receipts' },
+  { key: 'VIEW_REFUNDS', name: 'View Refunds', category: 'Payments' },
+  { key: 'INITIATE_REFUNDS', name: 'Initiate Refunds', category: 'Payments' },
+  { key: 'APPROVE_REFUNDS', name: 'Approve Refunds', category: 'Payments' },
+  { key: 'VIEW_SETTLEMENTS', name: 'View Settlements', category: 'Payments' },
+  { key: 'CREATE_SETTLEMENTS', name: 'Record Settlements', category: 'Payments' },
   { key: 'VIEW_BILL_CATEGORIES', name: 'View Bill Categories', category: 'Fees' },
   { key: 'VIEW_BILLS_CATALOGUE', name: 'View Bills Catalogue', category: 'Fees' },
   { key: 'CREATE_FEE', name: 'Create Bill / Fee', category: 'Fees' },
@@ -17,7 +44,6 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
   { key: 'VERIFY_PAYMENT', name: 'Verify Payment', category: 'Payments' },
   { key: 'DIRECT_BILL_STUDENT', name: 'Bill a Student (Direct Billing)', category: 'Direct Billing' },
   { key: 'VIEW_DIRECT_BILLS_LOG', name: 'View Direct Bills Log', category: 'Direct Billing' },
-  { key: 'VIEW_RECEIPTS', name: 'View Receipts', category: 'Receipts' },
   { key: 'GENERATE_RECEIPT', name: 'Generate Receipt', category: 'Receipts' },
   { key: 'VERIFY_RECEIPT', name: 'Verify Receipt Authenticity', category: 'Receipts' },
   { key: 'PROCESS_REFUND', name: 'Process Refund', category: 'Payments' },
@@ -26,13 +52,20 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
   { key: 'VIEW_PROGRAMMES', name: 'View Programmes', category: 'Academic Structure' },
   { key: 'VIEW_RECONCILIATION', name: 'View Reconciliation Dashboard', category: 'Reconciliation' },
   { key: 'VIEW_RECONCILIATION_REPORTS', name: 'View Reconciliation Reports', category: 'Reconciliation' },
-  { key: 'MANAGE_USERS', name: 'Manage Users', category: 'Admin' },
-  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin' },
+  { key: 'RESOLVE_EXCEPTIONS', name: 'Resolve Reconciliation Exceptions', category: 'Reconciliation' },
+  { key: 'EXPORT_RECONCILIATION', name: 'Export Reconciliation', category: 'Reconciliation' },
+  { key: 'RUN_RECONCILIATION', name: 'Run Reconciliation', category: 'Reconciliation' },
   { key: 'SYSTEM_SETTINGS', name: 'System Settings', category: 'Admin' },
   { key: 'PAYSTACK_CONFIG', name: 'Payment Configuration', category: 'Admin' },
+  { key: 'MANAGE_PAYMENT_PROVIDERS', name: 'Manage Payment Providers', category: 'Admin' },
+  { key: 'VIEW_SETTINGS', name: 'View Settings', category: 'Admin' },
+  { key: 'MANAGE_SETTINGS', name: 'Manage Settings', category: 'Admin' },
+  { key: 'MANAGE_EMAIL_TEMPLATES', name: 'Manage Email Templates', category: 'Admin' },
+  { key: 'VIEW_QUEUES', name: 'View Background Queues', category: 'Admin' },
+  { key: 'FLUSH_QUEUES', name: 'Flush Background Queues', category: 'Admin' },
   { key: 'AUDIT_LOGS_VIEW_FULL', name: 'Audit Logs (Full)', category: 'Admin' },
   { key: 'AUDIT_LOGS_VIEW_LIMITED', name: 'Audit Logs (Limited)', category: 'Admin' },
-  // === BURSARY REPORTS MODULE (32 existing + 8 new = 40 total) ===
+  // === BURSARY REPORTS MODULE (existing preserved) ===
   { key: 'REPORTS_VIEW_COLLECTIONS', name: 'Reports: View Collections (R1/R2/R3)', category: 'Reports', description: 'View Daily/Monthly Collection reports and Dashboard collection summary cards' },
   { key: 'REPORTS_VIEW_REVENUE', name: 'Reports: View Revenue-by-Bill & Hierarchical (R4/R7/R9)', category: 'Reports', description: 'View revenue analysis: per bill, collection %, college/dept/programme rollup' },
   { key: 'REPORTS_VIEW_ACCOUNTING', name: 'Reports: View Accounting/GL/Charges (R13/R14/R15/R16)', category: 'Reports', description: 'View Refund, Charges & Fee Income, General Ledger, Receipt Register' },
@@ -42,6 +75,9 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
   { key: 'REPORTS_EXPORT_EXCEL', name: 'Reports: Export Excel/CSV', category: 'Reports', description: 'Export any report to XLSX / CSV (Excel streaming writer, 250k row cap)' },
   { key: 'REPORTS_EXPORT_PDF', name: 'Reports: Export PDF', category: 'Reports', description: 'Export any report to branded PDF with Bells official header + page numbers' },
   { key: 'REPORTS_SCHEDULE', name: 'Reports: Schedule Recurring (R20)', category: 'Reports', description: 'Create, edit, pause BullMQ-based scheduled report jobs (ADMIN only; Bursary excluded)' },
+  { key: 'VIEW_REPORTS', name: 'View Reports', category: 'Reports' },
+  { key: 'EXPORT_REPORTS', name: 'Export Reports', category: 'Reports' },
+  { key: 'SCHEDULE_REPORTS', name: 'Schedule Reports', category: 'Reports' },
 ];
 
 const ALL_PERMISSION_KEYS = PERMISSION_DEFS.map((p) => p.key);
@@ -100,6 +136,7 @@ export async function seedPermissions() {
       },
     });
   }
+  bumpRolePermsVersion();
 
   const keyToIdMap = new Map<string, number>();
   const allPerms = await prisma.permission.findMany({

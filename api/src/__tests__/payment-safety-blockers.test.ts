@@ -22,20 +22,45 @@ jest.mock('../config/database', () => ({
     generalLedger: { create: jest.fn() },
     auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
     rolePermission: { findMany: jest.fn() },
-    $transaction: jest.fn((cb) => cb({
-      transaction: {
-        findFirst: jest.fn(),
-        findUnique: jest.fn(),
-        updateMany: jest.fn(),
-        update: jest.fn(),
-        create: jest.fn(),
-      },
-      receipt: { create: jest.fn() },
-      generalLedger: { create: jest.fn() },
-      invoice: { update: jest.fn() },
-      wallet: { update: jest.fn() },
-      $queryRaw: jest.fn(),
-    })),
+    $transaction: jest.fn(async (fn: any) => {
+      const prisma = (require('../config/database') as any).default;
+      const txClient: any = {
+        $executeRawUnsafe: jest.fn().mockResolvedValue([]),
+        $queryRaw: jest.fn().mockResolvedValue([]),
+        user: {
+          findFirst: (...args: any[]) => prisma.user.findFirst?.(...args),
+          findUnique: (...args: any[]) => prisma.user.findUnique?.(...args),
+        },
+        invoice: {
+          findFirst: (...args: any[]) => prisma.invoice.findFirst?.(...args),
+          findUnique: (...args: any[]) => prisma.invoice.findFirst
+            ? prisma.invoice.findFirst({ where: args?.[0]?.where, select: args?.[0]?.select })
+            : Promise.resolve(null),
+          update: (...args: any[]) => prisma.invoice.update?.(...args),
+        },
+        transaction: {
+          findFirst: (...args: any[]) => prisma.transaction.findFirst?.(...args),
+          findMany: (...args: any[]) => prisma.transaction.findMany?.(...args),
+          findUnique: (...args: any[]) => prisma.transaction.findUnique?.(...args),
+          create: (...args: any[]) => prisma.transaction.create(...args),
+          update: (...args: any[]) => prisma.transaction.update(...args),
+          updateMany: (...args: any[]) => prisma.transaction.updateMany(...args),
+        },
+        receipt: {
+          create: (...args: any[]) => prisma.receipt.create(...args),
+        },
+        generalLedger: {
+          create: (...args: any[]) => prisma.generalLedger.create(...args),
+        },
+        auditLog: {
+          create: (...args: any[]) => prisma.auditLog.create(...args),
+        },
+        wallet: {
+          update: (...args: any[]) => prisma.wallet?.update?.(...args),
+        },
+      };
+      return fn(txClient);
+    }),
   },
 }));
 
@@ -202,6 +227,7 @@ function resetMocks() {
 function setupBase(gateway: PaymentGateway = PaymentGateway.PAYSTACK) {
   resetMocks();
   _testResetInitiateLocks();
+  process.env.INVOICE_OP_LOCK_DISABLE = '1';
   const m = requireAll();
   m.getActiveGatewaySetting.mockResolvedValue(gateway);
   m.PaystackBreakdown.mockReturnValue(BREAKDOWN);
@@ -211,6 +237,20 @@ function setupBase(gateway: PaymentGateway = PaymentGateway.PAYSTACK) {
   (prisma.transaction.count as jest.Mock).mockResolvedValue(0);
   (prisma.transaction.findFirst as jest.Mock).mockResolvedValue(null);
   (prisma.transaction.findMany as jest.Mock).mockResolvedValue([]);
+  const Redis = require('ioredis');
+  if (Redis.mock) {
+    Redis.mockImplementation(() => ({
+      on: jest.fn(),
+      call: jest.fn(async (cmd: string, ..._args: any[]) => {
+        if (cmd === 'SET') return 'OK';
+        if (cmd === 'DEL') return 1;
+        return null;
+      }),
+      status: 'ready',
+      disconnect: jest.fn(),
+      quit: jest.fn(),
+    }));
+  }
   return m;
 }
 
@@ -1076,6 +1116,7 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
       providerFactory.getPaymentProvider = jest.fn(() => singleton);
       const Redis = require('ioredis');
       if (Redis.mock) {
+        const lockedKeys = new Set<string>();
         Redis.mockImplementation(() => {
           return {
             on: jest.fn(),
@@ -1085,7 +1126,16 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
             call: jest.fn(async (cmd: string, ...args: any[]) => {
               if (cmd === 'SET' && args.includes('NX') && args.includes('EX')) {
                 lockSetCallCount += 1;
-                return lockSetCallCount === 1 ? 'OK' : null;
+                const key = String(args[0]);
+                if (lockedKeys.has(key)) return null;
+                lockedKeys.add(key);
+                return 'OK';
+              }
+              if (cmd === 'DEL') {
+                const key = String(args[0]);
+                const had = lockedKeys.has(key);
+                lockedKeys.delete(key);
+                return had ? 1 : 0;
               }
               return null;
             }),
@@ -1093,6 +1143,34 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
         });
       }
       paymentModule._testResetInitiateLocks && paymentModule._testResetInitiateLocks();
+      if (require('../utils/invoiceLock')._testResetInvoiceLocks) require('../utils/invoiceLock')._testResetInvoiceLocks();
+      prismaCtx.$transaction = jest.fn(async (fn: any) => {
+        const txClient: any = {
+          $executeRawUnsafe: jest.fn().mockResolvedValue([]),
+          $queryRaw: jest.fn().mockResolvedValue([]),
+          user: { findFirst: (...a: any[]) => prismaCtx.user.findFirst?.(...a) },
+          invoice: {
+            findFirst: (...a: any[]) => prismaCtx.invoice.findFirst?.(...a),
+            findUnique: (...a: any[]) => prismaCtx.invoice.findFirst
+              ? prismaCtx.invoice.findFirst({ where: a?.[0]?.where, select: a?.[0]?.select })
+              : Promise.resolve(null),
+            update: (...a: any[]) => prismaCtx.invoice.update?.(...a),
+          },
+          transaction: {
+            findFirst: (...a: any[]) => prismaCtx.transaction.findFirst?.(...a),
+            findMany: (...a: any[]) => prismaCtx.transaction.findMany?.(...a),
+            findUnique: (...a: any[]) => prismaCtx.transaction.findUnique?.(...a),
+            create: (...a: any[]) => prismaCtx.transaction.create(...a),
+            update: (...a: any[]) => prismaCtx.transaction.update(...a),
+            updateMany: (...a: any[]) => prismaCtx.transaction.updateMany?.(...a),
+          },
+          receipt: { create: (...a: any[]) => prismaCtx.receipt.create(...a) },
+          generalLedger: { create: (...a: any[]) => prismaCtx.generalLedger.create(...a) },
+          auditLog: { create: (...a: any[]) => prismaCtx.auditLog?.create?.(...a) },
+          wallet: { update: (...a: any[]) => prismaCtx.wallet?.update?.(...a) },
+        };
+        return fn(txClient);
+      });
       prismaCtx.user.findFirst = jest.fn().mockResolvedValue({
         id: 1001, email: 'student@test.edu', firstName: 'Test',
         lastName: 'Student', matricNumber: 'TEST/001', role: Role.STUDENT,
@@ -1139,7 +1217,7 @@ describe('Payment Safety Behavioral — 5 Blocker Corrective Commit', () => {
       expect(singleton.initialize.mock.calls.length).toBe(1);
       expect((prismaCtx.receipt.create as jest.Mock).mock.calls.length).toBe(0);
       expect((prismaCtx.generalLedger.create as jest.Mock).mock.calls.length).toBe(0);
-      expect(lockSetCallCount).toBe(2);
+      expect(lockSetCallCount).toBe(3);
     } finally {
       if (savedOverride !== undefined) process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE = savedOverride;
       else delete process.env.INITIATE_LOCK_TTL_SEC_OVERRIDE;

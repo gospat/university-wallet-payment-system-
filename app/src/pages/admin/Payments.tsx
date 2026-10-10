@@ -1,7 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PortalShell from '../../components/PortalShell';
+import Modal from '../../components/Modal';
+import Alert from '../../components/Alert';
 import api, { navCounters, NavCounters } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import {
+  cancelTransaction as cancelTransactionApi,
+  CANCEL_TRANSACTION_REASONS,
+  type CancelTransactionReasonKey,
+} from '../../services/adminFees';
 
 const fmtNGN = (n: number | string | null | undefined) => {
   const num = Number(n ?? 0);
@@ -120,6 +127,65 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [errorMsg, setErrorMsg] = useState<string>('');
   const loadedOnceRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [cancelTarget, setCancelTarget] = useState<any | null>(null);
+  const [cancelReason, setCancelReason] = useState<CancelTransactionReasonKey | ''>('');
+  const [cancelWritten, setCancelWritten] = useState<string>('');
+  const [cancelEvidence, setCancelEvidence] = useState<string>('');
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [cancelError, setCancelError] = useState<string>('');
+
+  const canCancelTransaction = (t: any): { ok: boolean; why?: string } => {
+    if (!t) return { ok: false, why: 'Missing row' };
+    const status = String(t.status ?? '');
+    const ineligible = new Set(['SUCCESS', 'REVERSED', 'CANCELLED']);
+    if (ineligible.has(status)) {
+      return { ok: false, why: `Status ${status} cannot be cancelled (only pending/processing/failed/unpaid attempts are eligible).` };
+    }
+    const receipts = Array.isArray(t.receipts) ? t.receipts.length : 0;
+    if (receipts > 0) return { ok: false, why: `Receipted (${receipts}) transactions must use reversal workflow, not cancellation.` };
+    const invoicePaid = Number(t.invoice?.amountPaid ?? 0);
+    const txAmount = Number(t.amount ?? 0);
+    if (invoicePaid > 0 && txAmount > 0) {
+      return { ok: false, why: 'Invoice already has amountPaid and this attempt already has an amount posted.' };
+    }
+    return { ok: true };
+  };
+
+  const openCancelDialog = (t: any) => {
+    setCancelTarget(t);
+    setCancelReason('');
+    setCancelWritten('');
+    setCancelEvidence('');
+    setCancelError('');
+    setCancelDialogOpen(true);
+  };
+  const closeCancelDialog = () => {
+    setCancelDialogOpen(false);
+    setCancelTarget(null);
+  };
+  const doCancelTransaction = async () => {
+    if (!cancelTarget) return;
+    if (!cancelReason) { setCancelError('Cancellation reason is required.'); return; }
+    if (cancelReason === 'OTHER' && (cancelWritten.trim().length < 1)) {
+      setCancelError('Written explanation is required when reason is Other.'); return;
+    }
+    setCancelLoading(true); setCancelError('');
+    try {
+      await cancelTransactionApi(
+        Number(cancelTarget.id),
+        { reason: cancelReason, writtenExplanation: cancelWritten || null, evidenceReference: cancelEvidence || null },
+        { role: role === 'ADMIN' ? 'admin' : 'bursary' }
+      );
+      closeCancelDialog();
+      await loadData();
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || String(err) || 'Cancellation failed.';
+      setCancelError(msg.slice(0, 600));
+    } finally {
+      setCancelLoading(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     if (abortRef.current) abortRef.current.abort();
@@ -317,6 +383,19 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                               Download PDF
                             </button>
                           )}
+                          {(() => {
+                            const c = canCancelTransaction(t);
+                            return (
+                              <button
+                                className="text-red-600 hover:text-red-800 text-sm font-medium disabled:text-gray-300 disabled:cursor-not-allowed"
+                                disabled={!c.ok}
+                                title={c.ok ? 'Cancel this payment attempt (manual / audited, no financial posting)' : (c.why ?? '')}
+                                onClick={() => openCancelDialog(t)}
+                              >
+                                Cancel
+                              </button>
+                            );
+                          })()}
                         </div>
                       </td>
                     </tr>
@@ -338,6 +417,120 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           </div>
         </div>
       </div>
+      <Modal
+        isOpen={cancelDialogOpen}
+        title={`Cancel Payment Attempt #${cancelTarget?.id ?? ''} ${cancelTarget?.reference ? `(${cancelTarget.reference})` : ''}`}
+        size="lg"
+        onClose={() => { if (!cancelLoading) closeCancelDialog(); }}
+        footer={
+          <div className="w-full flex justify-end gap-2">
+            <button
+              type="button"
+              disabled={cancelLoading}
+              onClick={closeCancelDialog}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+            >
+              Cancel (close)
+            </button>
+            <button
+              type="button"
+              disabled={cancelLoading || !cancelTarget || !cancelReason || (cancelReason === 'OTHER' && cancelWritten.trim().length < 1)}
+              onClick={doCancelTransaction}
+              className="px-4 py-2 rounded-lg text-sm font-semibold text-white shadow-sm bg-gradient-to-br from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 focus:outline-none focus:ring-2 focus:ring-red-500/30 disabled:opacity-50"
+            >
+              {cancelLoading ? 'Cancelling…' : 'Confirm Cancel Attempt'}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-5 text-sm">
+          <Alert variant="info">
+            Cancellation marks an unpaid attempt as CANCELLED for audit purposes. It does <strong>not</strong> modify the invoice
+            balance, generate a receipt, post any General Ledger entry, or trigger settlements. Server-side safety checks are
+            the final arbiter.
+          </Alert>
+          <Alert variant="danger">
+            <div className="text-xs leading-relaxed">
+              <div className="font-semibold mb-1">Never auto-cancel.</div>
+              Never cancel merely because a popup closed, time elapsed, a callback is missing, or you see no final UUID.
+              Always verify independently: receipts already issued, settlements posted, General Ledger financial entries,
+              webhook evidence, and any provider dashboard reference before cancelling.
+            </div>
+          </Alert>
+          {cancelTarget && (
+            <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs">
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Student</dt>
+                <dd className="font-medium text-gray-900 mt-0.5">{cancelTarget.user ? `${cancelTarget.user.firstName} ${cancelTarget.user.lastName}` : '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Invoice</dt>
+                <dd className="font-medium text-gray-900 mt-0.5">{cancelTarget.invoice?.invoiceNumber || '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Current Status</dt>
+                <dd className="mt-0.5"><StatusPill status={cancelTarget.status ?? 'UNKNOWN'} /></dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wide font-semibold text-gray-500">Amount / Expected</dt>
+                <dd className="font-medium text-gray-900 mt-0.5 tabular-nums">{fmtNGN(cancelTarget.amount ?? 0)} / {fmtNGN(cancelTarget.expectedAmount ?? 0)}</dd>
+              </div>
+            </dl>
+          )}
+          <div className="space-y-1.5">
+            <label htmlFor="cancel-reason" className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Cancellation reason <span className="text-red-600">*</span>
+            </label>
+            <select
+              id="cancel-reason"
+              value={cancelReason}
+              onChange={(e) => setCancelReason((e.target.value as CancelTransactionReasonKey) || '')}
+              className={inputCls}
+            >
+              <option value="">— Select reason —</option>
+              {CANCEL_TRANSACTION_REASONS.map((r) => (
+                <option key={r.key} value={r.key}>{r.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="cancel-evidence" className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Evidence reference
+            </label>
+            <input
+              id="cancel-evidence"
+              type="text"
+              placeholder="provider ticket# / recon ID / email subject / internal ref"
+              value={cancelEvidence}
+              onChange={(e) => setCancelEvidence(e.target.value ?? '')}
+              maxLength={500}
+              className={inputCls}
+            />
+            <div className="text-[11px] text-gray-500 leading-relaxed">
+              If provider success refs or SUCCESS-like status are present, EVIDENCE &amp; WRITTEN EXPLANATION (&ge;20 chars) are REQUIRED server-side.
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="cancel-written" className="block text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Written explanation {cancelReason === 'OTHER' && <span className="text-red-600">*</span>}
+            </label>
+            <textarea
+              id="cancel-written"
+              rows={4}
+              maxLength={2000}
+              value={cancelWritten}
+              onChange={(e) => setCancelWritten(e.target.value ?? '')}
+              placeholder="Documented evidence, checks performed, or supporting rationale…"
+              className={inputCls + ' resize-y min-h-[100px]'}
+            />
+          </div>
+          {cancelError && (
+            <Alert variant="danger">
+              <div className="text-xs whitespace-pre-wrap leading-relaxed">{cancelError}</div>
+            </Alert>
+          )}
+        </div>
+      </Modal>
     </PortalShell>
   );
 };

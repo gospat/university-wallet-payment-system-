@@ -405,4 +405,45 @@ export async function cancelInvoice(invoiceId: number, body: CancelInvoiceInput)
   return unwrap<CancelInvoiceResponse>(resp);
 }
 
+export const CANCEL_TRANSACTION_REASONS = [
+  { key: 'TEST_TRANSACTION', label: 'Test / sandbox transaction' },
+  { key: 'DUPLICATE_ATTEMPT', label: 'Duplicate attempt (replaced)' },
+  { key: 'STUDENT_ABANDONED', label: 'Student explicitly abandoned' },
+  { key: 'PROVIDER_SESSION_EXPIRED', label: 'Provider session expired' },
+  { key: 'PAYMENT_COMPLETED_ON_NEW_ATTEMPT', label: 'Paid via separate new attempt' },
+  { key: 'ADMINISTRATIVE_CORRECTION', label: 'Administrative correction' },
+  { key: 'OTHER', label: 'Other' },
+] as const;
+
+export type CancelTransactionReasonKey = typeof CANCEL_TRANSACTION_REASONS[number]['key'];
+
+export type CancelTransactionInput = {
+  reason: CancelTransactionReasonKey | '';
+  writtenExplanation?: string | null;
+  evidenceReference?: string | null;
+};
+
+export type CancelTransactionResponse = {
+  id: number;
+  cancelled: boolean;
+  transaction: any;
+  auditId: number;
+  auditedAt: string;
+  cancellation: any;
+};
+
+export async function cancelTransaction(
+  transactionId: number,
+  body: CancelTransactionInput,
+  opts?: { role: 'admin' | 'bursary' }
+): Promise<CancelTransactionResponse> {
+  const prefix = opts?.role === 'bursary' ? '/bursary' : '/admin';
+  const resp = await api.post(`${prefix}/transactions/${transactionId}/cancel`, {
+    reason: body.reason,
+    writtenExplanation: body.writtenExplanation?.trim() ?? undefined,
+    evidenceReference: body.evidenceReference?.trim() ?? undefined,
+  });
+  return unwrap<CancelTransactionResponse>(resp);
+}
+
 export default feeApi;

@@ -18,7 +18,7 @@ import jwt from 'jsonwebtoken';
 import prisma from '../config/database';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
-import { protect, restrictTo, requirePermission } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission, bumpRolePermsVersion } from '../middlewares/auth';
 import { validateBody } from '../middlewares/validate';
 import { z } from 'zod';
 
@@ -231,6 +231,22 @@ describe('AC2 API Authorization Hardenings', () => {
       return res.status(200).json({ roleAfter: (req as any).user.role });
     },
   );
+  // AC2-CANCEL — mirrors real invoice cancel permission gate: restrictTo(ADMIN,BURSARY) + requirePermission(VOID_INVOICES)
+  app.post(
+    '/api/v1/cancel-perms/fee-assignments/invoices/:id/cancel',
+    protect,
+    restrictTo(Role.ADMIN, Role.BURSARY),
+    requirePermission('VOID_INVOICES'),
+    (_req, res) => res.status(200).json({ ok: 1 }),
+  );
+  // AC2-TXCANCEL — mirrors real transaction cancel permission gate: restrictTo(ADMIN,BURSARY) + requirePermission(VOID_TRANSACTIONS)
+  app.post(
+    '/api/v1/cancel-perms/transactions/:id/cancel',
+    protect,
+    restrictTo(Role.ADMIN, Role.BURSARY),
+    requirePermission('VOID_TRANSACTIONS'),
+    (_req, res) => res.status(200).json({ ok: 1 }),
+  );
 
   it('unauthenticated -> 401', async () => {
     const res = await request(app).get('/api/v1/admin-only');
@@ -287,6 +303,106 @@ describe('AC2 API Authorization Hardenings', () => {
       .get('/api/v1/admin-only')
       .set('Authorization', `Bearer ${mkToken(1002, Role.BURSARY)}`);
     expect(res.status).toBe(403);
+  });
+
+  // ── VOID_INVOICES (cancel invoice endpoint) permission gating ──────────
+  it('BURSARY missing VOID_INVOICES perm on invoice cancel -> 403', async () => {
+    const res = await request(app)
+      .post('/api/v1/cancel-perms/fee-assignments/invoices/1/cancel')
+      .set('Authorization', `Bearer ${mkToken(1002, Role.BURSARY)}`);
+    expect(res.status).toBe(403);
+  });
+  it('BURSARY with VOID_INVOICES perm on invoice cancel -> 200', async () => {
+    const prismaMock: any = prisma;
+    const rolePermissionOrig = prismaMock.rolePermission.findMany;
+    try {
+      bumpRolePermsVersion();
+      prismaMock.rolePermission.findMany = jest.fn((args: any) => {
+        const role = args.where?.role as Role;
+        if (role === Role.ADMIN) return Promise.resolve([]);
+        if (role === Role.BURSARY) {
+          return Promise.resolve(
+            ['VIEW_PAYMENTS', 'VIEW_STUDENTS', 'GENERATE_RECEIPT', 'VOID_INVOICES'].map((key) => ({
+              permission: { key },
+            })),
+          );
+        }
+        return Promise.resolve([]);
+      });
+      const res = await request(app)
+        .post('/api/v1/cancel-perms/fee-assignments/invoices/1/cancel')
+        .set('Authorization', `Bearer ${mkToken(1002, Role.BURSARY)}`);
+      expect(res.status).toBe(200);
+    } finally {
+      prismaMock.rolePermission.findMany = rolePermissionOrig;
+    }
+  });
+  it('STUDENT cannot hit invoice cancel endpoint -> 403', async () => {
+    const res = await request(app)
+      .post('/api/v1/cancel-perms/fee-assignments/invoices/1/cancel')
+      .set('Authorization', `Bearer ${mkToken(1003, Role.STUDENT)}`);
+    expect(res.status).toBe(403);
+  });
+  it('ADMIN short-circuit invoice cancel VOID_INVOICES gate -> 200', async () => {
+    const res = await request(app)
+      .post('/api/v1/cancel-perms/fee-assignments/invoices/1/cancel')
+      .set('Authorization', `Bearer ${mkToken(1001, Role.ADMIN)}`);
+    expect(res.status).toBe(200);
+  });
+
+  // ── VOID_TRANSACTIONS (cancel transaction endpoint) permission gating ──
+  it('BURSARY missing VOID_TRANSACTIONS perm on transaction cancel -> 403', async () => {
+    const res = await request(app)
+      .post('/api/v1/cancel-perms/transactions/99/cancel')
+      .set('Authorization', `Bearer ${mkToken(1002, Role.BURSARY)}`);
+    expect(res.status).toBe(403);
+  });
+  it('BURSARY with VOID_TRANSACTIONS perm on transaction cancel -> 200', async () => {
+    const prismaMock: any = prisma;
+    const rolePermissionOrig = prismaMock.rolePermission.findMany;
+    try {
+      bumpRolePermsVersion();
+      prismaMock.rolePermission.findMany = jest.fn((args: any) => {
+        const role = args.where?.role as Role;
+        if (role === Role.ADMIN) return Promise.resolve([]);
+        if (role === Role.BURSARY) {
+          return Promise.resolve(
+            ['VIEW_PAYMENTS', 'VIEW_STUDENTS', 'GENERATE_RECEIPT', 'VOID_TRANSACTIONS'].map((key) => ({
+              permission: { key },
+            })),
+          );
+        }
+        return Promise.resolve([]);
+      });
+      const res = await request(app)
+        .post('/api/v1/cancel-perms/transactions/99/cancel')
+        .set('Authorization', `Bearer ${mkToken(1002, Role.BURSARY)}`);
+      expect(res.status).toBe(200);
+    } finally {
+      prismaMock.rolePermission.findMany = rolePermissionOrig;
+    }
+  });
+  it('STUDENT cannot hit transaction cancel endpoint -> 403', async () => {
+    const res = await request(app)
+      .post('/api/v1/cancel-perms/transactions/99/cancel')
+      .set('Authorization', `Bearer ${mkToken(1003, Role.STUDENT)}`);
+    expect(res.status).toBe(403);
+  });
+  it('ADMIN short-circuit transaction cancel VOID_TRANSACTIONS gate -> 200', async () => {
+    const res = await request(app)
+      .post('/api/v1/cancel-perms/transactions/99/cancel')
+      .set('Authorization', `Bearer ${mkToken(1001, Role.ADMIN)}`);
+    expect(res.status).toBe(200);
+  });
+
+  // ── Unauthenticated cancel endpoints 401 ───────────────────────────────
+  it('Unauthenticated invoice cancel -> 401', async () => {
+    const res = await request(app).post('/api/v1/cancel-perms/fee-assignments/invoices/1/cancel');
+    expect(res.status).toBe(401);
+  });
+  it('Unauthenticated transaction cancel -> 401', async () => {
+    const res = await request(app).post('/api/v1/cancel-perms/transactions/99/cancel');
+    expect(res.status).toBe(401);
   });
 });
 

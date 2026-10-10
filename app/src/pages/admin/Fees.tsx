@@ -2307,7 +2307,6 @@ const AssignmentsList: React.FC<{
   };
 
   const canCancelInvoice = (a: FeeAssignmentOut): { ok: boolean; reason?: string } => {
-    if (!isDirectBill(a)) return { ok: false, reason: 'Only direct-bill invoices can be cancelled here' };
     if (!a.invoice?.id) return { ok: false, reason: 'No invoice attached to this assignment yet' };
     const status = String(a.invoice.status ?? '').toUpperCase();
     if (UNSAFE_CANCEL_INVOICE_STATUSES.has(status)) return { ok: false, reason: `Invoice status ${status} cannot be cancelled` };
@@ -2470,14 +2469,14 @@ const AssignmentsList: React.FC<{
                             )}
                           </span>
                         )}
-                        {direct && (() => {
+                        {(() => {
                           const cancelInfo = canCancelInvoice(a);
                           if (!cancelInfo.ok) return null;
                           return (
                             <button
                               type="button"
                               onClick={() => onCancelInvoice(a)}
-                              title="Cancel this invoice so the student can no longer pay against it."
+                              title={cancelInfo.reason ?? 'Cancel this invoice so the student can no longer pay against it.'}
                               className="inline-flex items-center px-2 py-1 rounded-md border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 hover:text-red-900 text-xs font-semibold"
                             >
                               Cancel Invoice
