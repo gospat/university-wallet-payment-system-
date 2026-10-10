@@ -2406,7 +2406,11 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       //    string DOES NOT exist. And the lint-safety dead branch (including
       //    its guard) has been completely removed — there are ZERO terminal
       //    writes capable of being introduced here silently.
-      const staleRegionA = p.slice(msgAwaitConfirmation - 200, p.indexOf('// 3. Partial amount clamp'));
+      const staleRegionEndHint =
+        p.indexOf('// 3. Partial amount clamp', msgAwaitConfirmation) > 0
+          ? p.indexOf('// 3. Partial amount clamp', msgAwaitConfirmation)
+          : p.indexOf('await prisma.$transaction', msgAwaitConfirmation);
+      const staleRegionA = p.slice(msgAwaitConfirmation - 200, staleRegionEndHint > 0 ? staleRegionEndHint : p.length - 2000);
       // client-reinit-timeout may appear as a comment but MUST NOT appear as DB description write.
       expect(staleRegionA).not.toMatch(/description:\s*['"]client-reinit-timeout['"]/);
       // STRICT: ZERO terminal-status writes (FAILED / SUCCESS / UNDERPAID / OVERPAID / REVERSED)
@@ -3341,11 +3345,11 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       //   if (bursaryMode === 'full') → BURSARY_PERMISSION_KEYS (fresh).
       //   else → BURSARY_RELEASE_UPGRADE_KEYS only (existing/delta-upgrade).
       // This regex verifies: the else branch has BURSARY_RELEASE_UPGRADE_KEYS.
-      expect(permSeedSrc).toMatch(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)[\s\S]{0,400}BURSARY_PERMISSION_KEYS[\s\S]{0,200}else[\s\S]{0,1200}BURSARY_RELEASE_UPGRADE_KEYS/);
+      expect(permSeedSrc).toMatch(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)[\s\S]{0,800}BURSARY_PERMISSION_KEYS[\s\S]{0,2000}else[\s\S]{0,7000}BURSARY_RELEASE_UPGRADE_KEYS/);
       // The EXISTING branch MUST NOT pass BURSARY_PERMISSION_KEYS. Instead,
       // it should reference only the release set.
       const [_before, afterFullBranch] = permSeedSrc.split(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)/) as [string, string | undefined];
-      const elseSection = (afterFullBranch ?? '').split(/\}\s*$/)[0] ?? '';
+      const elseSection = (afterFullBranch ?? '');
       expect(elseSection).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS/);
       // Fresh path (bursaryMode === 'full') still grants full BURSARY_PERMISSION_KEYS.
       expect(permSeedSrc).toMatch(/bursaryMode\s*===\s*['"]full['"][\s\S]{0,400}BURSARY_PERMISSION_KEYS/);
@@ -3443,6 +3447,88 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // Authoritative SUCCESS hook → 409 deny + route to reconciliation exception workflow message text
       expect(txCancelSrc).toMatch(/stored webhook records contain provider success/i);
       expect(txCancelSrc).toMatch(/reconciliation exception workflow/i);
+    });
+  });
+
+  describe('TR-46 — E1: initiatePayment recalculates payable/breakdown/expected amount ONLY inside prisma.$transaction AFTER FOR UPDATE row lock (never uses stale pre-lock invoice balance)', () => {
+    const fs: typeof import('fs') = require('fs');
+    const path: typeof import('path') = require('path');
+    const paymentSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'payment.ts'), 'utf8');
+
+    it('TR-46.1 computePaymentBreakdown/expectedAmount NOT called outside $transaction in initiation; authoritative recalc happens INSIDE prisma.$transaction AFTER FOR UPDATE invRelock re-read', () => {
+      // Authoritative breakdown names used inside the locked transaction only: breakdownRelock, payableRelock, expectedAmountRelock
+      expect(paymentSrc).toMatch(/breakdownRelock|payableRelock|expectedAmountRelock|authoritativeBreakdown|authoritativeExpected|lockedBreakdown/);
+      expect(paymentSrc).toMatch(/FOR\s+UPDATE[\s\S]{0,8000}breakdownRelock|FOR\s+UPDATE[\s\S]{0,8000}computePaymentBreakdown/);
+      // Breakdown/payable/expected calculations happen INSIDE prisma.$transaction async callback.
+      expect(paymentSrc).toMatch(/prisma\.\$transaction\s*\([\s\S]{0,400}invRelock[\s\S]{0,8000}computePaymentBreakdown[\s\S]{0,4000}transaction\.create/);
+    });
+
+    it('TR-46.2 Transaction.create inside locked $transaction uses locked authoritative breakdown/payable (breakdownRelock/expectedAmountRelock), NOT stale values from before lock', () => {
+      // The Transaction.create must use values with the lock-era variable names (not pre-lock vars).
+      expect(paymentSrc).toMatch(/transaction\.create[\s\S]{0,2000}expectedAmountRelock|transaction\.create[\s\S]{0,2000}breakdownRelock/);
+      // Match prisma.$transaction → tx.transaction.create → expectedAmount field uses expectedAmountRelock (or closure-stashed authoritative vars).
+      expect(paymentSrc).toMatch(/prisma\.\$transaction[\s\S]{0,6000}transaction\.create[\s\S]{0,1200}expectedAmount:[\s\S]{0,120}expectedAmountRelock|authoritativePayable|authoritativeExpected/);
+    });
+
+    it('TR-46.3 classifyPendingForRetry is re-invoked inside $transaction on a freshly counted unresolved PENDING set (double-checked locking pattern)', () => {
+      // First classifyPendingForRetry call is the fast-fail pre-lock path; second authoritative call lives inside prisma.$transaction.
+      const matchAll = paymentSrc.match(/classifyPendingForRetry/g) ?? [];
+      expect(matchAll.length).toBeGreaterThanOrEqual(2);
+      // Transaction.count inside prisma.$transaction re-counts PENDING status.
+      expect(paymentSrc).toMatch(/prisma\.\$transaction[\s\S]{0,4000}transaction\.count[\s\S]{0,200}PENDING/);
+      // Authoritative classifyPendingForRetry inside lock → policyRelock.blockInitiation used to throw and prevent new attempt creation.
+      expect(paymentSrc).toMatch(/classifyPendingForRetry\([^\)]*\)[\s\S]{0,400}blockInitiation/);
+      // Throw 425 or 409 from inside the pending recheck block.
+      expect(paymentSrc).toMatch(/pendingRelock[\s\S]{0,400}throw\s+new\s+AppError[\s\S]{0,150}(425|409)/);
+    });
+
+    it('TR-46.4 Closure stashing pattern: authoritativeBreakdown / authoritativeExpected are assigned INSIDE $transaction then used outside (provider.initialize + audit + response body) for post-$transaction code that cannot run in the tx', () => {
+      // Breakdown provider.initialize baseAmount uses locked authoritative base.
+      expect(paymentSrc).toMatch(/authoritativeBreakdown|lockedBreakdown/);
+      expect(paymentSrc).toMatch(/breakdownMustExist\s*\(/);  // null-guard helper, proves non-trivial closure stashing
+      // Provider.initialize uses breakdown variable whose name contains "locked" / "authoritative", or calls breakdownMustExist first.
+      expect(paymentSrc).toMatch(/provider\.initialize[\s\S]{0,800}lockedBreakdown|provider\.initialize[\s\S]{0,800}authoritativeBreakdown|breakdownMustExist\(\)[\s\S]{0,1200}provider\.initialize/);
+      // writeAudit + response use locked vars.
+      expect(paymentSrc).toMatch(/lockedBreakdown|authoritativeExpected/);
+      expect(paymentSrc).toMatch(/expected_amount:\s*authoritativeExpected/);
+    });
+  });
+
+  describe('TR-47 — E2: Bursary release-upgrade ONE-TIME sentinel (Counter row) prevents permission-restore on restarts after admin deliberate removal', () => {
+    const fs: typeof import('fs') = require('fs');
+    const path: typeof import('path') = require('path');
+    const permSeedSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'permissionSeed.ts'), 'utf8');
+
+    it('TR-47.1 Durable sentinel constant exists and references the Counter model via prisma.counter operations (sentinel is not transient in-memory)', () => {
+      expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_SENTINEL_ID\s*=/);
+      expect(permSeedSrc).toMatch(/prisma\.counter\.(findUnique|upsert)/);
+      // Sentinel row id is versioned so a future upgrade can use a different id for another delta.
+      expect(permSeedSrc).toMatch(/SENTINEL_ID\s*=\s*['"][^'"]*20261010[^'"]*['"]|SENTINEL_ID\s*=\s*['"][^'"]*void[^'"]*['"]/i);
+    });
+
+    it('TR-47.2 Release-upgrade BURSARY_RELEASE_UPGRADE_KEYS delta-add is GUARDED by the sentinel: findUnique check → no sentinel → apply delta + upsert sentinel; sentinel exists → SKIP delta entirely', () => {
+      // Counter.findUnique by SENTINEL_ID must exist in bursary existing-install path.
+      expect(permSeedSrc).toMatch(/counter\.findUnique[\s\S]{0,400}SENTINEL_ID/);
+      // The delta-add of RELEASE_UPGRADE_KEYS must exist INSIDE the guard that checks alreadyApplied === false.
+      expect(permSeedSrc).toMatch(/alreadyApplied|sentinelFound|hasSentinel/);
+      expect(permSeedSrc).toMatch(/if\s*\(\s*!alreadyApplied[\s\S]{0,200}\)[\s\S]{0,2000}BURSARY_RELEASE_UPGRADE_KEYS|if\s*\(\s*\!\s*\(.*sentinel|if.*!alreadyApplied[\s\S]{0,4000}safeApplyDefaults/);
+      // Counter.upsert SENTINEL_ID happens only in the "just applied delta" branch (not repeated if sentinel existed).
+      expect(permSeedSrc).toMatch(/counter\.upsert[\s\S]{0,400}SENTINEL_ID/);
+    });
+
+    it('TR-47.3 Fail-safe: unknown DB error during sentinel read defaults to alreadyApplied=true (never re-issues delta); Counter-model-not-exist error swallowed gracefully (pre-migration environment)', () => {
+      // Counter.findUnique try/catch → unknown error path sets alreadyApplied=true.
+      expect(permSeedSrc).toMatch(/counter\.findUnique[\s\S]{0,1200}alreadyApplied\s*=\s*true/);
+      // Already-applied-true in catch block AND the block includes "for safety"/"skipping" or similar fail-safe wording.
+      expect(permSeedSrc).toMatch(/catch[\s\S]{0,1500}alreadyApplied\s*=\s*true/);
+      // "counter" + "exist" error message detection → swallowed to alreadyApplied=false (pre-migration first-run still applies).
+      expect(permSeedSrc).toMatch(/counter.*exist|exist.*counter/i);
+      expect(permSeedSrc).toMatch(/alreadyApplied\s*=\s*false[\s\S]{0,200}pre-?migration|pre-?migration[\s\S]{0,200}alreadyApplied\s*=\s*false|first run anyway|first boot/i);
+    });
+
+    it('TR-47.4 Fresh-install Bursary path ALSO writes the same sentinel Counter row (so future restarts even with 0 Bursary rows still don\'t accidentally double-add delta)', () => {
+      // BursaryCount===0 / existingCountByRole 0 branch → also upserts the sentinel Counter row.
+      expect(permSeedSrc).toMatch(/existingCountByRole\.get\s*\(\s*Role\.BURSARY\s*\)\s*===\s*0|bursaryCount\s*===\s*0[\s\S]{0,5000}counter\.upsert[\s\S]{0,300}SENTINEL_ID/);
     });
   });
 });

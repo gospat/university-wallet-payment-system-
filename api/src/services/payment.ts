@@ -339,155 +339,106 @@ export class PaymentService {
     const balance = money(Number(inv.amountDue) - Number(inv.amountPaid));
     if (balance <= 0) throw new AppError(i18n.errors.invoice.alreadyPaid, 409);
 
-    // Resolve active gateway UP-FRONT so pending-age policy can branch correctly
-    // for ALATPAY vs Paystack. This also is needed so the A5.1 stale logic below
-    // never writes a terminal status from elapsed time alone.
-    const activeGateway = await getActiveGatewaySetting();
+  const activeGateway = await getActiveGatewaySetting();
+  const provider = getPaymentProvider(activeGateway);
 
-    // Task-4: concurrent double-click / tab / refresh race protection. Serialize
-    // all initiation attempts for the same (student, invoice) using a short
-    // Redis/in-process lock. Otherwise two parallel requests can both see
-    // count=0 and create two PENDING provider transactions. A 429 is returned
-    // for the losing request instead of a duplicate.
-    const dedupeLockOk = await acquireInitiateDedupeLock(studentId, inv.id);
-    if (!dedupeLockOk) {
-      throw new AppError(
-        'Another payment initiation request is currently in progress for this invoice. Please wait a moment and try again.',
-        429,
-      );
-    }
-    let dedupeLockReleased = false;
-    let opLockReleased = false;
-    let txRow: any = null;
-    let invOpLock: any = null;
-    let invOpLockToken: string | null = null;
-    try {
+  // Task-4: concurrent double-click / tab / refresh race protection. Serialize
+  // all initiation attempts for the same (student, invoice) using a short
+  // Redis/in-process lock. Otherwise two parallel requests can both see
+  // count=0 and create two PENDING provider transactions. A 429 is returned
+  // for the losing request instead of a duplicate.
+  const dedupeLockOk = await acquireInitiateDedupeLock(studentId, inv.id);
+  if (!dedupeLockOk) {
+    throw new AppError(
+      'Another payment initiation request is currently in progress for this invoice. Please wait a moment and try again.',
+      429,
+    );
+  }
+  let dedupeLockReleased = false;
+  let opLockReleased = false;
+  let txRow: any = null;
+  let invOpLock: any = null;
+  let invOpLockToken: string | null = null;
+  try {
 
-    // A5.1 Idempotency guard (FR-A7): check for recent PENDING rows on this invoice
-    //
-    // CRITICAL FINANCIAL SAFETY (per production transaction #40, review blockers 1/2/3):
-    //   An unresolved PENDING row MUST NEVER be automatically transitioned to FAILED
-    //   (or any other terminal financial status) merely because of elapsed time /
-    //   browser timeout / popup closure / missing webhook / missing final UUID /
-    //   transport error / student retry.
-    //   UNKNOWN is not FAILED. NO CALLBACK is not FAILED. TIMEOUT is not FAILED.
-    //   RETRY is not FAILED. NETWORK ERROR is not FAILED.
-    //
-    // CONSERVATIVE PROVIDER-NEUTRAL POLICY:
-    //   * MAX_UNRESOLVED_PENDING_PER_INVOICE=2 ceiling (any gateway, any age).
-    //   * Age < 5min → block duplicate with 425.
-    //   * Age >= 5min → 409 BLOCK new initiation. No terminal status write.
-    //     The existing PENDING row is PRESERVED UNTOUCHED so that the
-    //     authoritative reverification workflow, scheduler recon, future webhook
-    //     delivery, or future callback can still settle it correctly.
-    //   * Unknown/null persisted gateway → FAIL CLOSED. DO NOT infer the
-    //     historical provider identity from today's activeGateway setting.
-    //     The past attempt may have been made under a different provider; any
-    //     guess would risk incorrectly terminalizing a valid pending attempt.
-    //
-    //   * The presence of a stored alatpayFinalTransactionId (trustworthy UUID)
-    //     is only a correlation identifier that MAY be used for authoritative
-    //     verification elsewhere. It is NOT proof of success, proof of failure,
-    //     or reason to terminalize the row here. (Blocker 1)
-    //
-    // Duplicate ceiling (B1/B2/B3 invariant): prevents unbounded provider
-    // session creation even after 5 minutes when the lock has expired or the
-    // student manually keeps retrying.
-    const FIVE_MINUTES_MS = 5 * 60 * 1000;
-    const MAX_UNRESOLVED_PENDING_PER_INVOICE = 2;
-    const [existingPending, pendingCount] = await Promise.all([
-      prisma.transaction.findFirst({
-        where: {
-          invoiceId: inv.id,
-          status: TransactionStatus.PENDING,
-          userId: studentId,
-        },
-        orderBy: { createdAt: 'desc' },
-        select: { id: true, createdAt: true, status: true, gateway: true, alatpayFinalTransactionId: true },
-      }),
-      prisma.transaction.count({
-        where: {
-          invoiceId: inv.id,
-          status: TransactionStatus.PENDING,
-          userId: studentId,
-        },
-      }),
-    ]);
-    // Release the student+invoice dedupe lock as soon as pending-age duplicate
-    // check completes. It serializes double-click / refresh bursts only; the
-    // subsequent invoice-level operational lock handles contention with
-    // cancellation/reconciliation operations. Releasing here lets sequential
-    // idempotency test iterations (same student+invoice pair) avoid spurious
-    // 429 dedupe-contention responses between test cases.
-    try {
-      if (!dedupeLockReleased) {
-        dedupeLockReleased = true;
-        await releaseInitiateDedupeLock(studentId, inv.id);
+    // Pre-lock sanity check — run the pending-age policy BEFORE acquiring the
+    // invoice operational lock so the 425/409 responses return without a lock
+    // contention. HOWEVER: because this check is OUTSIDE the database row
+    // lock and outside the invoice operational lock it is NOT authoritative
+    // for concurrency. An identical strict recheck is performed INSIDE the
+    // locked prisma.$transaction below.
+    {
+      const FIVE_MINUTES_MS = 5 * 60 * 1000;
+      const MAX_UNRESOLVED_PENDING_PER_INVOICE = 2;
+      const [existingPending, pendingCount] = await Promise.all([
+        prisma.transaction.findFirst({
+          where: {
+            invoiceId: inv.id,
+            status: TransactionStatus.PENDING,
+            userId: studentId,
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true, createdAt: true, status: true, gateway: true, alatpayFinalTransactionId: true },
+        }),
+        prisma.transaction.count({
+          where: {
+            invoiceId: inv.id,
+            status: TransactionStatus.PENDING,
+            userId: studentId,
+          },
+        }),
+      ]);
+      // Release the student+invoice dedupe lock as soon as this pending-age
+      // duplicate check completes (it is NOT a gatekeeper for subsequent
+      // mutation; the row-level operational lock and InnoDB FOR UPDATE are).
+      try {
+        if (!dedupeLockReleased) {
+          dedupeLockReleased = true;
+          await releaseInitiateDedupeLock(studentId, inv.id);
+        }
+      } catch {
+        /* best-effort release */
       }
-    } catch {
-      /* best-effort release */
-    }
-    if (pendingCount >= MAX_UNRESOLVED_PENDING_PER_INVOICE) {
-      throw new AppError(
-        'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
-        409,
-      );
-    }
-    if (existingPending) {
-      const createdAtTime = existingPending.createdAt.getTime();
-      const nowTime = Date.now();
-      const ageMs = nowTime - createdAtTime;
-      const pendingGateway = (existingPending as any).gateway as string | null;
-
-      // Use the single canonical strict UUID-v4 helper (also used by recon
-      // worker and student reverify route) — never any inline weak variant.
-      // (Blocker 4: single shared validator.
-      // Presence of UUID is not proof of payment status. It only means: we may
-      // attempt authoritative verification through it in a separate workflow.)
-      const hasTrustedAlatpayFinalUuid = isAlatpayUuid((existingPending as any).alatpayFinalTransactionId);
-
-      if (ageMs < FIVE_MINUTES_MS) {
+      if (pendingCount >= MAX_UNRESOLVED_PENDING_PER_INVOICE) {
         throw new AppError(
-          'Payment already in progress. Please wait 5 minutes before retrying or check status.',
-          425,
-        );
-      }
-
-      // Provider-neutral conservative: never terminalize from age alone.
-      // classifyPendingForRetry returns { blockInitiation: true } for every
-      // input (no exceptions, no gateway-branch special cases, no terminal DB
-      // writes ever). Explicit provider-result classification belongs in an
-      // authoritative provider-verification/reverification workflow, not in
-      // the stale/elapsed-time retry path.
-      const policy = classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid);
-      if (policy.blockInitiation) {
-        // 409 with student-facing actionable message.
-        // The message distinguishes ALATPAY / PAYSTACK / UNKNOWN scenarios so
-        // the student knows which status workflow to use next, but NO DB
-        // terminal write happens ever here.
-        const isAlatpay = pendingGateway === PaymentGateway.ALATPAY;
-        const isPaystack = pendingGateway === PaymentGateway.PAYSTACK;
-        const gwLabel =
-          isAlatpay ? 'ALATPay' : isPaystack ? 'Paystack' : 'an earlier';
-        const finalUuidHint =
-          isAlatpay && hasTrustedAlatpayFinalUuid
-            ? ' (its final provider transaction identifier has been captured; use the Check Status / Re-verify action on this payment to obtain an authoritative result.)'
-            : isAlatpay
-              ? ' (the final provider transaction identifier is not yet recorded locally; confirmation is still pending.)'
-              : '';
-        throw new AppError(
-          `A ${gwLabel} payment attempt from ${Math.round(ageMs / 60000)} minutes ago is still awaiting confirmation and has not been authoritatively settled. Please verify that attempt using its transaction reference${finalUuidHint}, or contact support. Another payment will not be started automatically.`,
+          'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
           409,
         );
       }
+      if (existingPending) {
+        const createdAtTime = existingPending.createdAt.getTime();
+        const nowTime = Date.now();
+        const ageMs = nowTime - createdAtTime;
+        const pendingGateway = (existingPending as any).gateway as string | null;
+        const hasTrustedAlatpayFinalUuid = isAlatpayUuid((existingPending as any).alatpayFinalTransactionId);
+        if (ageMs < FIVE_MINUTES_MS) {
+          throw new AppError(
+            'Payment already in progress. Please wait 5 minutes before retrying or check status.',
+            425,
+          );
+        }
+        const policy = classifyPendingForRetry(pendingGateway, activeGateway, hasTrustedAlatpayFinalUuid);
+        if (policy.blockInitiation) {
+          const isAlatpay = pendingGateway === PaymentGateway.ALATPAY;
+          const isPaystack = pendingGateway === PaymentGateway.PAYSTACK;
+          const gwLabel =
+            isAlatpay ? 'ALATPay' : isPaystack ? 'Paystack' : 'an earlier';
+          const finalUuidHint =
+            isAlatpay && hasTrustedAlatpayFinalUuid
+              ? ' (its final provider transaction identifier has been captured; use the Check Status / Re-verify action on this payment to obtain an authoritative result.)'
+              : isAlatpay
+                ? ' (the final provider transaction identifier is not yet recorded locally; confirmation is still pending.)'
+                : '';
+          throw new AppError(
+            `A ${gwLabel} payment attempt from ${Math.round(ageMs / 60000)} minutes ago is still awaiting confirmation and has not been authoritatively settled. Please verify that attempt using its transaction reference${finalUuidHint}, or contact support. Another payment will not be started automatically.`,
+            409,
+          );
+        }
+      }
     }
 
-    // Invoice-level operational lock: acquired AFTER the pending-age /
-    // duplicate-ceiling policy (which MUST return 409 / 425 / 425 without a
-    // lock contention). This lock serializes the actual mutation phase
-    // (amount calculation → PENDING row creation → provider.initialize →
-    // Transaction update) against cancelInvoice/cancelTransaction so the
-    // SC6 race safety holds.
+    // Invoice-level operational lock: serializes the mutation phase against
+    // cancelInvoice/cancelTransaction (SC6 safety).
     const invOpLock = await acquireInvoiceOperationLock(inv.id, 8_000);
     let invOpLockToken: string | null = null;
     if (invOpLock.ok) {
@@ -500,22 +451,23 @@ export class PaymentService {
       );
     }
 
-  // 3. Partial amount clamp
-  let payable = balance;
-  if (payload.partialAmount !== undefined && payload.partialAmount !== null) {
-    const pa = money(Number(payload.partialAmount));
-    if (pa <= 0) throw new AppError(i18n.errors.payment.invalidPartialAmount, 400);
-    payable = pa > balance ? balance : pa;
-  }
-
-  // 4. Service charge breakdown — charge comes ON TOP of payable so the
-  //    university always receives exactly payable to STUDENT_RECEIVABLE.
-  const breakdown = computePaymentBreakdown(payable);
-  const expectedAmount = breakdown.totalAmount;
-  const provider = getPaymentProvider(activeGateway);
-
   // 6. Create reference & pending Transaction — with gateway explicitly set.
   const paymentRef = generatePaymentReference();
+  // These values are computed INSIDE the prisma.$transaction (after FOR UPDATE
+  // row lock and invRelock authoritative re-read) so we NEVER use an invoice
+  // balance obtained BEFORE the lock was acquired (E1 fix).
+  let authoritativePayable = 0;
+  let authoritativeBreakdown: PaymentBreakdown | null = null;
+  let authoritativeExpected = 0;
+  const breakdownMustExist: () => PaymentBreakdown = () => {
+    if (authoritativeBreakdown == null) {
+      throw new AppError(
+        'Internal initialization state error — locked payment breakdown was not computed. Please try again.',
+        500,
+      );
+    }
+    return authoritativeBreakdown;
+  };
   txRow = await prisma.$transaction(async (tx) => {
       if (process.env.NODE_ENV !== 'test') {
         try {
@@ -528,16 +480,9 @@ export class PaymentService {
             'SELECT id FROM invoices WHERE id = ? FOR UPDATE',
             boundInvoiceId,
           );
-          // $executeRaw returns affectedRows count numeric for MySQL.
-          // SELECT ... FOR UPDATE in MySQL returns `affectedRows = 0` when
-          // the SELECT returns row set (it's a read). Use a best-effort check;
-          // the invRelock findUnique directly below is the authoritative guard.
           void lockRes;
         } catch (err: any) {
-          // FAIL CLOSED. If we cannot obtain the required InnoDB row lock for
-          // this invoice, we MUST NOT proceed to create a PENDING transaction —
-          // for all we know, the concurrent cancelInvoice transaction already
-          // wrote CANCELLED and we are reading stale data outside the lock.
+          // FAIL CLOSED.
           const msg: string = (err && typeof err.message === 'string') ? err.message : String(err);
           throw new AppError(
             `Unable to obtain database row lock for invoice ${inv.id} during payment initialization (${msg.slice(0, 120)}). Please try again.`,
@@ -545,9 +490,27 @@ export class PaymentService {
           );
         }
       }
+      // =======================================================================
+      // E1: AUTHORITATIVE RE-READ + RECHECK + RECALCULATION UNDER LOCK.
+      // All prior reads (inv.amountDue/amountPaid, pendingCount, existingPending)
+      // were performed before the InnoDB row lock and may be STALE because a
+      // concurrent verifyPayment / cancelInvoice / cancelTransaction could have
+      // committed new state to the DB between then and now.
+      // The values below are the ONLY ones used for mutation.
+      // =======================================================================
       const invRelock = await tx.invoice.findUnique({
         where: { id: inv.id },
-        select: { id: true, status: true, amountDue: true, amountPaid: true },
+        select: {
+          id: true,
+          status: true,
+          amountDue: true,
+          amountPaid: true,
+          invoiceNumber: true,
+          session: true,
+          semester: true,
+          feeId: true,
+          fee: { select: { id: true, name: true, feeCode: true, categoryId: true } },
+        },
       });
       if (!invRelock) throw new AppError(i18n.errors.invoice.notFound, 404);
       if (
@@ -561,8 +524,94 @@ export class PaymentService {
           409,
         );
       }
-      const balanceRelock = Number(invRelock.amountDue) - Number(invRelock.amountPaid);
+      const balanceRelock = money(Number(invRelock.amountDue) - Number(invRelock.amountPaid));
       if (balanceRelock <= 0) throw new AppError(i18n.errors.invoice.alreadyPaid, 409);
+
+      // E1 (continued): RECHECK unresolved pending attempts UNDER LOCK.
+      // A concurrent initiatePayment on the same (student, invoice) that raced
+      // through the pre-lock pending-ceiling check (because neither had
+      // written a PENDING row yet) is now serialized here by the FOR UPDATE
+      // lock — whichever transaction commits second will see the first
+      // transaction's PENDING row in this re-count and block appropriately.
+      const FIVE_MINUTES_MS_RECHECK = 5 * 60 * 1000;
+      const MAX_UNRESOLVED_PENDING_PER_INVOICE_RECHECK = 2;
+      const [pendingRelock, pendingCountRelock] = await Promise.all([
+        tx.transaction.findFirst({
+          where: {
+            invoiceId: inv.id,
+            status: TransactionStatus.PENDING,
+            userId: studentId,
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true, createdAt: true, status: true, gateway: true, alatpayFinalTransactionId: true },
+        }),
+        tx.transaction.count({
+          where: {
+            invoiceId: inv.id,
+            status: TransactionStatus.PENDING,
+            userId: studentId,
+          },
+        }),
+      ]);
+      if (pendingCountRelock >= MAX_UNRESOLVED_PENDING_PER_INVOICE_RECHECK) {
+        throw new AppError(
+          'Multiple previous payment attempts are still awaiting confirmation for this invoice. Please wait for reconciliation, verify any existing attempt using its reference, or contact support before starting another payment.',
+          409,
+        );
+      }
+      if (pendingRelock) {
+        const createdAtRelock = pendingRelock.createdAt.getTime();
+        const nowRelock = Date.now();
+        const ageMsRelock = nowRelock - createdAtRelock;
+        const pendingGatewayRelock = (pendingRelock as any).gateway as string | null;
+        // UNKNOWN != FAILED safeguard: NEVER terminalize from age alone.
+        // Strictly reuse classifyPendingForRetry so behavior is identical to
+        // the pre-lock policy path but we block here under lock.
+        const hasTrustedAlatpayFinalUuidRelock = isAlatpayUuid((pendingRelock as any).alatpayFinalTransactionId);
+        if (ageMsRelock < FIVE_MINUTES_MS_RECHECK) {
+          throw new AppError(
+            'Payment already in progress. Please wait 5 minutes before retrying or check status.',
+            425,
+          );
+        }
+        const policyRelock = classifyPendingForRetry(pendingGatewayRelock, activeGateway, hasTrustedAlatpayFinalUuidRelock);
+        if (policyRelock.blockInitiation) {
+          const isAlatpayRelock = pendingGatewayRelock === PaymentGateway.ALATPAY;
+          const isPaystackRelock = pendingGatewayRelock === PaymentGateway.PAYSTACK;
+          const gwLabelRelock =
+            isAlatpayRelock ? 'ALATPay' : isPaystackRelock ? 'Paystack' : 'an earlier';
+          const finalUuidHintRelock =
+            isAlatpayRelock && hasTrustedAlatpayFinalUuidRelock
+              ? ' (its final provider transaction identifier has been captured; use the Check Status / Re-verify action on this payment to obtain an authoritative result.)'
+              : isAlatpayRelock
+                ? ' (the final provider transaction identifier is not yet recorded locally; confirmation is still pending.)'
+                : '';
+          throw new AppError(
+            `A ${gwLabelRelock} payment attempt from ${Math.round(ageMsRelock / 60000)} minutes ago is still awaiting confirmation and has not been authoritatively settled. Please verify that attempt using its transaction reference${finalUuidHintRelock}, or contact support. Another payment will not be started automatically.`,
+            409,
+          );
+        }
+      }
+
+      // E1 (continued): AUTHORITATIVE PAYABLE + BREAKDOWN RECALCULATION.
+      // payable, partial amount clamp, service charge, gateway fee and
+      // expectedAmount are ALL recomputed here from balanceRelock (obtained
+      // under FOR UPDATE lock) instead of the stale pre-lock `balance`.
+      let payableRelock = balanceRelock;
+      if (payload.partialAmount !== undefined && payload.partialAmount !== null) {
+        const pa = money(Number(payload.partialAmount));
+        if (pa <= 0) throw new AppError(i18n.errors.payment.invalidPartialAmount, 400);
+        payableRelock = pa > balanceRelock ? balanceRelock : pa;
+      }
+      const breakdownRelock = computePaymentBreakdown(payableRelock);
+      const expectedAmountRelock = breakdownRelock.totalAmount;
+      // Stash outside $transaction so the provider.initialize call (below)
+      // and response body (below) can use authoritative locked values instead
+      // of any stale pre-lock computation.
+      authoritativePayable = payableRelock;
+      authoritativeBreakdown = breakdownRelock;
+      authoritativeExpected = expectedAmountRelock;
+
       return await tx.transaction.create({
       data: {
         reference: paymentRef,
@@ -571,31 +620,31 @@ export class PaymentService {
         type: TransactionType.FEE_PAYMENT,
         gateway: activeGateway,
         status: TransactionStatus.PENDING,
-        expectedAmount: expectedAmount,
+        expectedAmount: expectedAmountRelock,
         amount: 0,
-        description: `${inv.fee?.name ?? 'Fee payment'} — ${inv.session ?? ''} ${inv.semester ?? ''}`.trim(),
+        description: `${invRelock.fee?.name ?? 'Fee payment'} — ${invRelock.session ?? ''} ${invRelock.semester ?? ''}`.trim(),
         metadata: {
-          invoiceNumber: inv.invoiceNumber,
+          invoiceNumber: invRelock.invoiceNumber,
           fee: {
-            id: inv.feeId,
-            name: inv.fee?.name ?? null,
-            feeCode: inv.fee?.feeCode ?? null,
-            categoryId: inv.fee?.categoryId ?? null,
+            id: invRelock.feeId,
+            name: invRelock.fee?.name ?? null,
+            feeCode: invRelock.fee?.feeCode ?? null,
+            categoryId: invRelock.fee?.categoryId ?? null,
           },
           student: {
             id: studentId,
             name: `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
             matricNumber: user.matricNumber ?? null,
           },
-          session: inv.session ?? null,
-          semester: inv.semester ?? null,
+          session: invRelock.session ?? null,
+          semester: invRelock.semester ?? null,
           amount: {
-            base: breakdown.baseAmount,
-            serviceCharge: breakdown.serviceCharge,
-            gatewayFee: breakdown.gatewayFee,
-            total: breakdown.totalAmount,
-            serviceChargeMode: breakdown.serviceChargeMode,
-            gatewayFeeMode: breakdown.gatewayFeeMode,
+            base: breakdownRelock.baseAmount,
+            serviceCharge: breakdownRelock.serviceCharge,
+            gatewayFee: breakdownRelock.gatewayFee,
+            total: breakdownRelock.totalAmount,
+            serviceChargeMode: breakdownRelock.serviceChargeMode,
+            gatewayFeeMode: breakdownRelock.gatewayFeeMode,
           },
         } as Prisma.InputJsonValue,
       },
@@ -603,10 +652,12 @@ export class PaymentService {
   });
 
     try {
-      // 7. Initialize through the pre-resolved provider
+      // 7. Initialize through the pre-resolved provider — use the authoritative
+      // locked breakdown computed INSIDE prisma.$transaction (NOT any stale
+      // pre-lock breakdown).
+      const lockedBreakdown = breakdownMustExist();
       const callback = `${process.env.FRONTEND_BASE_URL ?? 'http://localhost:5174'}/student/payments/callback/${paymentRef}`;
-
-      const init = await provider.initialize(customerEmail, breakdown.baseAmount, {
+      const init = await provider.initialize(customerEmail, lockedBreakdown.baseAmount, {
         firstName: user.firstName ?? 'Student',
         lastName: user.lastName ?? 'Student',
         phone: undefined,
@@ -694,8 +745,8 @@ export class PaymentService {
           id: txRow.id,
           reference: paymentRef,
           invoiceId: inv.id,
-          baseAmount: breakdown.baseAmount,
-          expectedAmount: breakdown.totalAmount,
+          baseAmount: lockedBreakdown.baseAmount,
+          expectedAmount: lockedBreakdown.totalAmount,
           gateway: activeGateway,
         },
         details: { studentId, invoiceNumber: inv.invoiceNumber },
@@ -718,8 +769,8 @@ export class PaymentService {
         checkout_url: init?.checkoutUrl ?? init?.authorization_url ?? null,
         access_code: init?.access_code ?? init?.sessionId ?? null,
         payment_reference: paymentRef,
-        expected_amount: expectedAmount,
-        fee_breakdown: breakdown,
+        expected_amount: authoritativeExpected,
+        fee_breakdown: lockedBreakdown,
         gateway: activeGateway,
         gateway_label: gatewayLabel(activeGateway, gatewayChannel),
       };

@@ -20,6 +20,12 @@ jest.mock('../config/database', () => ({
             : Promise.resolve(null),
         },
         transaction: {
+          findFirst: (...args: any[]) => prisma.transaction.findFirst
+            ? prisma.transaction.findFirst(...args)
+            : Promise.resolve(null),
+          count: (...args: any[]) => prisma.transaction.count
+            ? prisma.transaction.count(...args)
+            : Promise.resolve(0),
           create: (...args: any[]) => prisma.transaction.create(...args),
           update: (...args: any[]) => prisma.transaction.update(...args),
           updateMany: (...args: any[]) => prisma.transaction.updateMany

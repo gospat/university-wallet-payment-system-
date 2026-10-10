@@ -11,6 +11,7 @@ import { TransactionCancellationService, CANCEL_TRANSACTION_REASONS } from '../s
 import {
   BURSARY_PERMISSION_KEYS,
   BURSARY_RELEASE_UPGRADE_KEYS,
+  BURSARY_RELEASE_UPGRADE_SENTINEL_ID,
   seedPermissions,
 } from '../services/permissionSeed';
 import prisma from '../config/database';
@@ -36,6 +37,7 @@ jest.mock('../config/database', () => {
   const permissions: Record<string, { id: number; key: string; name: string; category: string; description: string | null }> = {};
   let nextPermissionId = 1;
   const rolePermissions: { role: string; permissionId: number }[] = [];
+  const counters: Record<string, { id: string; value: number; updatedAt: Date }> = {};
   let nextTxnId = 99000;
   let nextWebhookId = 1;
 
@@ -228,7 +230,21 @@ jest.mock('../config/database', () => {
           return Promise.resolve({ role: rp.role, permissionId: rp.permissionId });
         }),
       },
-      counter: { upsert: jest.fn(() => Promise.resolve({ id: 'receipt_number', value: 1 })) },
+      counter: {
+        findUnique: jest.fn((a: any) => {
+          if (a.where?.id && counters[a.where.id]) {
+            return Promise.resolve(JSON.parse(JSON.stringify(counters[a.where.id])));
+          }
+          return Promise.resolve(null);
+        }),
+        upsert: jest.fn((a: any) => {
+          const id = a.where?.id ?? 'receipt_number';
+          if (!counters[id]) counters[id] = { id, value: 1, updatedAt: new Date() };
+          else counters[id].updatedAt = new Date();
+          if (a.update && typeof a.update.value === 'number') counters[id].value = a.update.value;
+          return Promise.resolve(JSON.parse(JSON.stringify(counters[id])));
+        }),
+      },
       $queryRaw: jest.fn().mockResolvedValue([]),
       $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       $transaction: jest.fn(async (fn: any) => {
@@ -270,6 +286,7 @@ jest.mock('../config/database', () => {
           audits.length = 0;
           for (const k of Object.keys(permissions)) delete permissions[k as any];
           rolePermissions.length = 0;
+          for (const k of Object.keys(counters)) delete counters[k];
           nextPermissionId = 1;
           nextTxnId = 99000;
           nextWebhookId = 1;
@@ -299,7 +316,7 @@ jest.mock('../config/database', () => {
         },
         _redisKV,
         _redisCall: runRedisCall,
-        _state: { txns, invoices, webhookEvents, settlements, receipts, gls, audits, permissions, rolePermissions },
+        _state: { txns, invoices, webhookEvents, settlements, receipts, gls, audits, permissions, rolePermissions, counters },
       },
     },
   };
@@ -612,6 +629,9 @@ describe('D2 — Bursary permission delta release-upgrade (diffAdd existing vs f
     expect(priorBursaryKeys.has('VOID_INVOICES')).toBe(false);
     expect(priorBursaryKeys.has('VOID_TRANSACTIONS')).toBe(false);
     expect(priorBursaryKeys.has(intentionallyRemoved[0])).toBe(false);
+    // Simulate an existing install that has NOT yet received the one-time
+    // release-upgrade: clear the sentinel so the delta path fires exactly once.
+    delete state.counters[BURSARY_RELEASE_UPGRADE_SENTINEL_ID];
     // Now run seedPermissions again on this "existing" database. diffAdd path
     // must fire for Bursary (rolePermissions count > 0 for BURSARY).
     await seedPermissions();
@@ -658,6 +678,9 @@ describe('D2 — Bursary permission delta release-upgrade (diffAdd existing vs f
       const permId = idByKey.get(k);
       if (permId) state.rolePermissions.push({ role: Role.BURSARY, permissionId: permId });
     }
+    // Simulate pre-upgrade install: remove the sentinel so the one-shot delta
+    // still fires exactly once for the test assertion.
+    delete state.counters[BURSARY_RELEASE_UPGRADE_SENTINEL_ID];
     // Re-run seedPermissions (existing upgrade path fires).
     await seedPermissions();
     const postKeys = new Set(
@@ -702,6 +725,9 @@ describe('D2 — Bursary permission delta release-upgrade (diffAdd existing vs f
       (rp: any) => rp.role === Role.BURSARY && rp.permissionId === voidInvoicesId,
     );
     expect(hasPre).toBe(false);
+    // Remove sentinel so this legacy install still runs the one-time delta
+    // (simulates the upgrade-to-release moment for a pre-release installation).
+    delete state.counters[BURSARY_RELEASE_UPGRADE_SENTINEL_ID];
     // Run seedPermissions.
     await seedPermissions();
     const postKeys = new Set(

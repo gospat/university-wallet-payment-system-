@@ -124,6 +124,18 @@ export const BURSARY_PERMISSION_KEYS = ALL_PERMISSION_KEYS.filter(
 // default permission that an administrator had deliberately removed on an
 // existing installation. Fresh installations still receive the full
 // BURSARY_PERMISSION_KEYS safe default set via mode='full'.
+// One-time sentinel id used as a Counter row. If this row EXISTS in the
+// database the release-upgrade phase (BURSARY_RELEASE_UPGRADE_KEYS diffAdd for
+// existing installs) has ALREADY been applied and MUST NOT be re-attempted on
+// subsequent server startups. An administrator who intentionally removes
+// VOID_INVOICES or VOID_TRANSACTIONS from a Bursary role after the initial
+// upgrade relies on this sentinel to prevent the seed from restoring them on
+// the next boot.
+// The identifier is intentionally release-specific so future releases that
+// introduce another required delta-upgrade can define a NEW sentinel id and
+// have their own independent one-time application guarantee.
+export const BURSARY_RELEASE_UPGRADE_SENTINEL_ID = 'bursary_release_upgrade_void_20261010';
+
 export const BURSARY_RELEASE_UPGRADE_KEYS: readonly string[] = [
   'VOID_INVOICES',
   'VOID_TRANSACTIONS',
@@ -289,20 +301,79 @@ export async function seedPermissions() {
     // FRESH installation: Bursary has never had a permission row → grant the
     // complete safe Bursary default set.
     await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode);
+    // Fresh install does not need the one-time sentinel because the admin has
+    // never had a chance to customize anything yet. Still write the sentinel
+    // so subsequent boots that re-enter as existing-install (mode='diffAdd')
+    // do not re-run RELEASE_UPGRADE_KEYS and potentially restore perms that
+    // were later removed by admin after first boot.
+    try {
+      await prisma.counter.upsert({
+        where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
+        create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
+        update: {},
+      });
+    } catch (e) {
+      // Counter model may not yet exist in DB during pre-migration seed runs.
+      const msg = (e as Error)?.message ?? '';
+      if (!(msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist'))) {
+        console.warn('[seedPermissions] Bursary sentinel upsert note:', msg.slice(0, 180));
+      }
+    }
   } else {
     // EXISTING installation: Bursary role has been seeded before and admins
     // may have intentionally removed individual grants (e.g., no student
-    // create, no email templates etc). Do NOT re-populate every missing
-    // default key — only delta-add the newly introduced cancellation
-    // permissions that THIS release must grant. Admin-only sensitive keys
-    // continue to be removed by the BURSARY_EXCLUDED pre-sweep above and are
-    // also explicitly excluded from BURSARY_RELEASE_UPGRADE_KEYS via module
-    // load-time guard.
-    await safeApplyDefaults(
-      Role.BURSARY,
-      Array.from(BURSARY_RELEASE_UPGRADE_KEYS),
-      bursaryMode,
-    );
+    // create, no email templates etc).
+    // E2: ONE-TIME upgrade. If the release-upgrade sentinel row EXISTS in
+    // counters, then THIS release has ALREADY applied its delta in a prior
+    // server startup. We MUST NOT run RELEASE_UPGRADE_KEYS again — doing so
+    // would restore permissions (VOID_INVOICES, VOID_TRANSACTIONS) that the
+    // admin intentionally removed after the upgrade.
+    let alreadyApplied = false;
+    try {
+      const sentinelRow = await prisma.counter.findUnique({
+        where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
+        select: { id: true },
+      });
+      alreadyApplied = !!sentinelRow;
+    } catch (e) {
+      const msg = (e as Error)?.message ?? '';
+      if (msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist')) {
+        // Counter table doesn't exist yet — pre-migration seed. Fall back to
+        // running the delta (it will be the first run anyway so it is safe).
+        alreadyApplied = false;
+      } else {
+        // Unknown DB error: fail-safe NO-OP for the delta-add path so we
+        // never re-restore admin-removed permissions when unsure.
+        console.warn('[seedPermissions] Bursary sentinel read failed; skipping release-upgrade delta for safety:', msg.slice(0, 180));
+        alreadyApplied = true;
+      }
+    }
+    if (!alreadyApplied) {
+      // First boot on existing install: delta-add the newly introduced
+      // cancellation permissions. Admin-only sensitive keys continue to be
+      // removed by the BURSARY_EXCLUDED pre-sweep above and are also
+      // explicitly excluded from BURSARY_RELEASE_UPGRADE_KEYS via module
+      // load-time guard.
+      await safeApplyDefaults(
+        Role.BURSARY,
+        Array.from(BURSARY_RELEASE_UPGRADE_KEYS),
+        bursaryMode,
+      );
+      // Write the sentinel so FUTURE startups NEVER re-run this delta (even
+      // if the admin later removes these keys manually).
+      try {
+        await prisma.counter.upsert({
+          where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
+          create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
+          update: {},
+        });
+      } catch (e) {
+        const msg = (e as Error)?.message ?? '';
+        if (!(msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist'))) {
+          console.warn('[seedPermissions] Bursary sentinel write note:', msg.slice(0, 180));
+        }
+      }
+    }
   }
 
   // Expose applied statistics for diagnostics (no logging secrets — only counts).
