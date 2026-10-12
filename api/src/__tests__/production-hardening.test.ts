@@ -271,6 +271,7 @@ describe('TEST1: Counter receipt atomic race — B3 anti-race guard', () => {
           }),
         },
         generalLedger: {
+          findFirst: jest.fn().mockResolvedValue(null),
           createMany: jest.fn().mockImplementation((args: any) => {
             glCreateManyArgs.push(args);
             return Promise.resolve({ count: 4 });
@@ -586,57 +587,69 @@ describe('TEST3: Webhook idempotency — ALATPAY 3 retries = 1 receipt/generalLe
     let updateManyCalls = 0;
     let receiptCreateCalls = 0;
     let glCreateManyCalls = 0;
+    let txnChain: Promise<any> = Promise.resolve();
 
-    (prisma.$transaction as jest.Mock).mockImplementation(async (callback: Function) => {
-      const txCtx: any = {
-        transaction: {
-          updateMany: jest.fn().mockImplementation(() => {
-            updateManyCalls++;
-            return Promise.resolve({ count: updateManyCalls === 1 ? 1 : 0 });
-          }),
-          findUnique: jest.fn().mockImplementation(() =>
-            Promise.resolve({
-              id: 7002,
-              status: updateManyCalls === 1 ? TransactionStatus.PROCESSING : TransactionStatus.SUCCESS,
-              invoice: {
-                id: 802, invoiceNumber: 'INV-802', amountDue: 50000, amountPaid: 0,
-                status: 'UNPAID', session: '2024/2025', semester: 'FIRST', studentId: 5002,
-                fee: { id: 2, name: 'School Fees', feeCode: 'SCH-002' },
-              },
-              metadata: { amount: { base: 50000, serviceCharge: 750, gatewayFee: 0, total: 50750 }, session: '2024/2025' },
-              expectedAmount: 50750,
-              user: { id: 5002, email: 'student@university.edu', firstName: 'S', lastName: 'T', matricNumber: 'A/002' },
+    (prisma.$transaction as jest.Mock).mockImplementation((callback: Function) => {
+      // Serialize transactions to simulate DB row-lock serialization
+      // (in production, $transaction acquires locks that prevent concurrent
+      //  modification of the same invoice/transaction rows).
+      txnChain = txnChain.then(async () => {
+        const txCtx: any = {
+          transaction: {
+            updateMany: jest.fn().mockImplementation(() => {
+              updateManyCalls++;
+              return Promise.resolve({ count: updateManyCalls === 1 ? 1 : 0 });
             }),
-          ),
-          update: jest.fn().mockResolvedValue({ id: 7002 }),
-        },
-        invoice: {
-          update: jest.fn().mockResolvedValue({ id: 802 }),
-          findUnique: jest.fn().mockResolvedValue({ id: 802, invoiceNumber: 'INV-802' }),
-        },
-        counter: {
-          upsert: jest.fn().mockImplementation(() => {
-            return Promise.resolve({ value: 201 });
-          }),
-        },
-        receipt: {
-          findFirst: jest.fn().mockResolvedValue(null),
-          create: jest.fn().mockImplementation((args: any) => {
-            receiptCreateCalls++;
-            return Promise.resolve({ id: receiptCreateCalls, ...args?.data });
-          }),
-        },
-        generalLedger: {
-          createMany: jest.fn().mockImplementation(() => {
-            glCreateManyCalls++;
-            return Promise.resolve({ count: 4 });
-          }),
-        },
-        feeAssignment: {
-          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-        },
-      };
-      return await callback(txCtx);
+            findUnique: jest.fn().mockImplementation(() =>
+              Promise.resolve({
+                id: 7002,
+                status: updateManyCalls === 1 ? TransactionStatus.PROCESSING : TransactionStatus.SUCCESS,
+                invoice: {
+                  id: 802, invoiceNumber: 'INV-802', amountDue: 50000, amountPaid: 0,
+                  status: 'UNPAID', session: '2024/2025', semester: 'FIRST', studentId: 5002,
+                  fee: { id: 2, name: 'School Fees', feeCode: 'SCH-002' },
+                },
+                metadata: { amount: { base: 50000, serviceCharge: 750, gatewayFee: 0, total: 50750 }, session: '2024/2025' },
+                expectedAmount: 50750,
+                user: { id: 5002, email: 'student@university.edu', firstName: 'S', lastName: 'T', matricNumber: 'A/002' },
+              }),
+            ),
+            update: jest.fn().mockResolvedValue({ id: 7002 }),
+          },
+          invoice: {
+            update: jest.fn().mockResolvedValue({ id: 802 }),
+            findUnique: jest.fn().mockResolvedValue({ id: 802, invoiceNumber: 'INV-802' }),
+          },
+          counter: {
+            upsert: jest.fn().mockImplementation(() => {
+              return Promise.resolve({ value: 201 });
+            }),
+          },
+          receipt: {
+            findFirst: jest.fn().mockImplementation(() => {
+              return Promise.resolve(receiptCreateCalls > 0 ? { id: receiptCreateCalls, transactionId: 7002 } : null);
+            }),
+            create: jest.fn().mockImplementation((args: any) => {
+              receiptCreateCalls++;
+              return Promise.resolve({ id: receiptCreateCalls, ...args?.data });
+            }),
+          },
+          generalLedger: {
+            findFirst: jest.fn().mockImplementation(() => {
+              return Promise.resolve(glCreateManyCalls > 0 ? { id: 1, transactionId: 7002 } : null);
+            }),
+            createMany: jest.fn().mockImplementation(() => {
+              glCreateManyCalls++;
+              return Promise.resolve({ count: 4 });
+            }),
+          },
+          feeAssignment: {
+            updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          },
+        };
+        return await callback(txCtx);
+      });
+      return txnChain;
     });
 
     // --- 3 retries with the SAME eventId / transaction reference ---
@@ -790,7 +803,7 @@ describe('TEST4: Gateway mid-session active flip invariant — tx.gateway wins, 
           findFirst: jest.fn().mockResolvedValue(null),
           create: jest.fn().mockResolvedValue({ id: 1 }),
         },
-        generalLedger: { createMany: jest.fn().mockResolvedValue({ count: 4 }) },
+        generalLedger: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 4 }) },
         feeAssignment: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         },

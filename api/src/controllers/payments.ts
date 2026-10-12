@@ -249,19 +249,90 @@ export const getContinueOption = catchAsync(async (req: Request, res: Response) 
 // Shared controllers used by both /admin/payments and /bursary/payments.
 //
 // Security invariants:
-//   • The transaction is loaded server-side by :id. The browser is NEVER
-//     allowed to substitute a gateway/provider identifier for the stored
-//     trusted reference.
+//   • The transaction is loaded server-side. The browser is NEVER allowed to
+//     substitute a gateway/provider identifier for the stored trusted reference.
 //   • For ALATPay, provider verification is ONLY attempted when the stored
 //     alatpayFinalTransactionId is a strict UUID v4. Order/init/WEMA-PAY
-//     references are NEVER used as a fallback (they are not authoritative
-//     final transaction IDs).
+//     references are NEVER used as a fallback.
 //   • For Paystack, the stored paystackReference is the only identifier used.
 //   • PaymentService.verifyPayment performs the authoritative, idempotent
-//     financial posting (atomic claim, amount validation, invoice credit,
-//     receipt, GL, settlement). Transport errors and non-terminal provider
-//     statuses never move the transaction to FAILED.
+//     financial posting. Transport errors and non-terminal provider statuses
+//     never move the transaction to FAILED.
+//   • The GET lookup response is sanitized: no metadata, no ALATPay checkout
+//     URL/session id, no raw provider payloads, no internal tokens.
 // =============================================================================
+const VERIFY_TX_SELECT = {
+  id: true,
+  reference: true,
+  status: true,
+  gateway: true,
+  amount: true,
+  expectedAmount: true,
+  description: true,
+  type: true,
+  createdAt: true,
+  updatedAt: true,
+  paystackReference: true,
+  paystackChannel: true,
+  alatpayReference: true,
+  alatpayOrderReference: true,
+  alatpayInitPaymentReference: true,
+  alatpayFinalTransactionId: true,
+  underpaidReason: true,
+  userId: true,
+  invoiceId: true,
+  user: {
+    select: { id: true, firstName: true, lastName: true, email: true, matricNumber: true },
+  },
+  invoice: {
+    select: {
+      id: true,
+      invoiceNumber: true,
+      amountDue: true,
+      amountPaid: true,
+      status: true,
+      fee: { select: { id: true, name: true, feeCode: true } },
+    },
+  },
+  receipts: {
+    select: { id: true, receiptNumber: true, verificationToken: true, isVoided: true, generatedAt: true },
+    orderBy: { generatedAt: 'desc' },
+    take: 1,
+  },
+} as const;
+
+const buildVerifyPayload = async (tx: any) => {
+  const gl = await prisma.generalLedger.findFirst({
+    where: { transactionId: tx.id },
+    select: { id: true, entryType: true, amount: true, createdAt: true },
+  });
+  const webhookEvidence = await prisma.webhookEvent
+    .findFirst({
+      where: { transactionReference: tx.reference },
+      select: { id: true, eventType: true, isProcessed: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    })
+    .catch(() => null);
+  const settlementEvidence =
+    (prisma.settlement as any)?.count
+      ? await prisma.settlement
+          .count({ where: { transactionId: tx.id } })
+          .then((c: number) => (c > 0 ? { exists: true, count: c } : null))
+          .catch(() => null)
+      : null;
+  let alatpayFinalTxIdValid = false;
+  if (tx.gateway === 'ALATPAY' && tx.alatpayFinalTransactionId) {
+    alatpayFinalTxIdValid = isAlatpayUuid(tx.alatpayFinalTransactionId);
+  }
+  return {
+    transaction: tx,
+    generalLedger: gl,
+    webhookEvidence,
+    settlementEvidence,
+    alatpayFinalTxIdValid,
+  };
+};
+
 export const getTransactionForVerify = catchAsync(async (req: Request, res: Response) => {
   const txId = Number(req.params.id);
   if (!Number.isFinite(txId) || txId <= 0) {
@@ -269,77 +340,53 @@ export const getTransactionForVerify = catchAsync(async (req: Request, res: Resp
   }
   const tx = await prisma.transaction.findUnique({
     where: { id: txId },
-    select: {
-      id: true,
-      reference: true,
-      status: true,
-      gateway: true,
-      amount: true,
-      expectedAmount: true,
-      description: true,
-      type: true,
-      createdAt: true,
-      updatedAt: true,
-      paystackReference: true,
-      paystackChannel: true,
-      alatpayReference: true,
-      alatpayOrderReference: true,
-      alatpayInitPaymentReference: true,
-      alatpayFinalTransactionId: true,
-      alatpayCheckoutUrl: true,
-      alatpaySessionId: true,
-      underpaidReason: true,
-      metadata: true,
-      userId: true,
-      invoiceId: true,
-      user: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          matricNumber: true,
-        },
-      },
-      invoice: {
-        select: {
-          id: true,
-          invoiceNumber: true,
-          amountDue: true,
-          amountPaid: true,
-          status: true,
-          fee: { select: { id: true, name: true, feeCode: true } },
-        },
-      },
-      receipts: {
-        select: { id: true, receiptNumber: true, verificationToken: true, isVoided: true, generatedAt: true },
-        orderBy: { generatedAt: 'desc' },
-        take: 1,
-      },
-    },
+    select: VERIFY_TX_SELECT as any,
   });
   if (!tx) {
     return res.status(404).json({ status: 'error', message: 'Transaction not found.' });
   }
+  const data = await buildVerifyPayload(tx);
+  return res.status(200).json({ status: 'success', data });
+});
 
-  const gl = await prisma.generalLedger.findFirst({
-    where: { transactionId: tx.id },
-    select: { id: true, entryType: true, amount: true, createdAt: true },
-  });
+const LookupQuerySchema = z.object({
+  type: z.enum(['reference', 'transactionId', 'paystackReference', 'alatpayFinalTransactionId']),
+  value: z.string().min(1).max(255).trim(),
+});
 
-  let alatpayFinalTxIdValid = false;
-  if (tx.gateway === 'ALATPAY' && tx.alatpayFinalTransactionId) {
-    alatpayFinalTxIdValid = isAlatpayUuid(tx.alatpayFinalTransactionId);
+export const lookupTransactionForVerify = catchAsync(async (req: Request, res: Response) => {
+  const parsed = LookupQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ status: 'error', message: 'Invalid lookup parameters.', issues: parsed.error.issues });
   }
-
-  return res.status(200).json({
-    status: 'success',
-    data: {
-      transaction: tx,
-      generalLedger: gl,
-      alatpayFinalTxIdValid,
-    },
+  const { type, value } = parsed.data;
+  let where: any = {};
+  if (type === 'transactionId') {
+    const id = Number(value);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(404).json({ status: 'error', message: 'Transaction not found.' });
+    }
+    where = { id };
+  } else if (type === 'reference') {
+    where = { reference: value };
+  } else if (type === 'paystackReference') {
+    where = { paystackReference: value };
+  } else if (type === 'alatpayFinalTransactionId') {
+    if (!isAlatpayUuid(value)) {
+      return res.status(404).json({ status: 'error', message: 'Transaction not found.' });
+    }
+    where = { alatpayFinalTransactionId: value };
+  }
+  const tx = await prisma.transaction.findFirst({
+    where,
+    select: VERIFY_TX_SELECT as any,
+    orderBy: { createdAt: 'desc' },
   });
+  if (!tx) {
+    return res.status(404).json({ status: 'error', message: 'Transaction not found.' });
+  }
+  const data = await buildVerifyPayload(tx);
+  return res.status(200).json({ status: 'success', data });
 });
 
 export const verifyPaymentByTransactionId = catchAsync(async (req: Request, res: Response) => {
@@ -371,8 +418,7 @@ export const verifyPaymentByTransactionId = catchAsync(async (req: Request, res:
 
   // Idempotency for already-successful transactions: do not call the provider
   // again and do not create duplicate receipt/GL/invoice-credit.
-  const TERMINAL_SUCCESS = new Set(['SUCCESS']);
-  if (TERMINAL_SUCCESS.has(String(tx.status))) {
+  if (String(tx.status) === 'SUCCESS') {
     const receipt = await prisma.receipt.findFirst({
       where: { transactionId: tx.id, isVoided: false },
       select: { id: true, receiptNumber: true, verificationToken: true },
@@ -435,33 +481,34 @@ export const verifyPaymentByTransactionId = catchAsync(async (req: Request, res:
     });
   }
 
-  let result: any;
-  try {
-    result = await PaymentService.verifyPayment(tx.reference, {
-      providerReference: providerReference ?? undefined,
-      expectedTransactionId: tx.id,
-      req,
-    });
-  } catch (err: any) {
-    return res.status(200).json({
-      status: 'provider_unavailable',
-      data: {
-        verified: false,
-        bellsStatus: tx.status,
-        provider: tx.gateway,
-        providerReferenceUsed: providerReference,
-        reason: 'PROVIDER_TRANSPORT_ERROR',
-        message: 'Provider verification could not be completed. No financial status was changed.',
-      },
-    });
-  }
+  // PaymentService.verifyPayment internally handles provider transport
+  // failures and non-terminal statuses safely (they never become FAILED).
+  // We do NOT blanket-catch every error as a provider outage: application,
+  // database or financial-processing errors must propagate as 500s so they
+  // are not misrepresented as provider unavailability.
+  const result: any = await PaymentService.verifyPayment(tx.reference, {
+    providerReference: providerReference ?? undefined,
+    expectedTransactionId: tx.id,
+    req,
+  });
 
   const bellsStatus = result?.status ?? tx.status;
   const verified = result?.verified === true || bellsStatus === 'SUCCESS';
   const providerStatus = result?.providerStatus ?? result?.reason ?? null;
 
+  // Detect provider transport / non-terminal results returned by
+  // PaymentService (verified=false, status still non-terminal) so the UI can
+  // show "Provider unavailable" rather than claiming failure.
+  const isTransportOrNonTerminal =
+    !verified &&
+    result?.verified === false &&
+    bellsStatus !== 'FAILED' &&
+    (result?.reason?.toLowerCase().includes('transport') ||
+      result?.reason?.toLowerCase().includes('non-terminal') ||
+      ['PENDING', 'PROCESSING'].includes(String(bellsStatus)));
+
   return res.status(200).json({
-    status: verified ? 'success' : 'pending',
+    status: verified ? 'success' : isTransportOrNonTerminal ? 'provider_unavailable' : 'pending',
     data: {
       verified,
       bellsStatus,
@@ -472,6 +519,8 @@ export const verifyPaymentByTransactionId = catchAsync(async (req: Request, res:
       providerTransactionId: providerReference,
       verifiedAt: new Date().toISOString(),
       reason: result?.reason ?? null,
+      reconciliationException: result?.reconciliationException === true,
+      reconciliationExceptionKind: result?.reconciliationExceptionKind ?? null,
     },
   });
 });
@@ -482,5 +531,6 @@ export default {
   confirmPayload,
   getContinueOption,
   getTransactionForVerify,
+  lookupTransactionForVerify,
   verifyPaymentByTransactionId,
 };

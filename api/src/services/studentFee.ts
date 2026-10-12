@@ -29,7 +29,7 @@ export type StudentInvoiceListInput = z.infer<typeof StudentInvoiceListSchema>;
 
 const INVOICE_SELECT = {
   id: true, invoiceNumber: true, feeId: true, studentId: true,
-  amountDue: true, amountPaid: true, status: true,
+  amountDue: true, amountPaid: true, status: true, isActive: true,
   dueDate: true, session: true, semester: true,
   createdAt: true, updatedAt: true,
   fee: { select: { id: true, feeCode: true, name: true, description: true, amount: true,
@@ -298,26 +298,29 @@ export class StudentFeesService {
       };
     });
     // ---- Find the blocking pending for presentation panels (no DB write) ---
-    // PaymentService.initiatePayment uses classifyPendingForRetry() which
-    // returns {blockInitiation:true} for every pending row (never terminalizes
-    // from age; UNKNOWN != FAILED invariant). Here we expose the candidate
-    // most-recent PENDING row for the UI so it can offer [Check Pending
-    // Payment] BEFORE the user clicks Pay Now (§23/27/28). NO financial logic.
+    // PaymentService.initiatePayment uses classifyPendingForRetry() which now
+    // allows a new attempt once the 5-minute cooldown and MAX_UNRESOLVED=2
+    // ceiling pass (UNKNOWN != FAILED; pending rows are never terminalized
+    // from age). Here we expose the candidate most-recent PENDING row so the
+    // UI can offer BOTH [Check Payment Status] and [Pay Now] for a PENDING
+    // invoice. The previous attempt stays in transaction history; double-
+    // credit is prevented server-side in verifyPayment.
     const pendingTransactions = mappedTransactions.filter(
       (tx: any) => String(tx.status ?? '').toUpperCase() === 'PENDING',
     );
     const blockingPendingTransaction: any | null = pendingTransactions[0] ?? null;
-    // A payment can be initiated ONLY when: balance > 0, invoice not terminal,
-    // AND there is no unresolved PENDING row on this invoice (matches A5.1
-    // existing guards MAX_UNRESOLVED_PENDING_PER_INVOICE). The UI uses canPay to
-    // choose between [Pay Now] vs [Check Pending Payment] primary button.
+    // A payment can be initiated when: balance > 0, invoice not terminal.
+    // The presence of a PENDING attempt no longer disables Pay Now — the
+    // student may retry after the backend cooldown. canPay reflects this
+    // simplified workflow; backend enforces 425 (too soon) / 409 (max
+    // unresolved reached) as needed.
     const payPayload = {
       canPay:
         balance > 0 &&
+        (row as any).isActive !== false &&
         (row as any).status !== 'CANCELLED' &&
         (row as any).status !== 'REFUNDED' &&
-        (row as any).status !== 'REVERSED' &&
-        pendingTransactions.length === 0,
+        (row as any).status !== 'REVERSED',
       amountToPay: balance,
       paymentReference: generatePaymentReference(),
       dueDate: (row as any).dueDate,
@@ -333,6 +336,7 @@ export class StudentFeesService {
         amountPaid,
         balance,
         status: computeStatusWithOverdue(row),
+        isActive: (row as any).isActive !== false,
         dueDate: (row as any).dueDate,
         session: (row as any).session,
         semester: (row as any).semester,

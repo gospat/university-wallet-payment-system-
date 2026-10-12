@@ -398,6 +398,13 @@ const setupBaseMocks = () => {
       count: jest.fn(() => Promise.resolve(receiptRows.length)),
     },
     generalLedger: {
+      findFirst: jest.fn((q: any) => {
+        const where = q.where;
+        return Promise.resolve(glRows.find((r) => {
+          if (where.transactionId && r.transactionId !== where.transactionId) return false;
+          return true;
+        }) ?? null);
+      }),
       createMany: jest.fn((q: any) => {
         for (const d of q.data) glRows.push({ ...d, id: glRows.length + 1 });
         return Promise.resolve({ count: q.data.length });
@@ -1631,16 +1638,19 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T27-concurrent — Promise.all race: browser verify × 3 + webhook concurrently => NO duplicate receipt/GL (balanced single dr/cr)', async () => {
     const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     process.env.ALATPAY_ACTIVE = 'true';
-    // ---- Instrument updateMany to simulate real-DB row-lock atomicity: ----
-    let updateManyLock: Promise<void> = Promise.resolve();
-    const originalUpdateMany = prismaMock.transaction.updateMany;
-    prismaMock.transaction.updateMany = jest.fn(async (q: any) => {
-      const myTurn = updateManyLock.then(() => undefined);
+    // ---- Instrument $transaction to simulate real-DB row-lock atomicity: ----
+    // In production, $transaction acquires locks that serialize concurrent
+    // modifications of the same invoice/transaction rows. The mock must
+    // replicate this serialization so losers see the winner's receipt/GL.
+    let txnLock: Promise<void> = Promise.resolve();
+    const originalTxn = prismaMock.$transaction;
+    prismaMock.$transaction = jest.fn(async (cb: any): Promise<any> => {
+      const myTurn = txnLock.then(() => undefined);
       let release: () => void = () => {};
-      updateManyLock = new Promise<void>((res) => { release = res; });
+      txnLock = new Promise<void>((res) => { release = res; });
       await myTurn;
       try {
-        return await originalUpdateMany(q);
+        return await originalTxn(cb);
       } finally {
         release();
       }

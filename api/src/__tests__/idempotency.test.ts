@@ -188,7 +188,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
     ).rejects.toMatchObject({ statusCode: 425, message: expect.stringContaining('Payment already in progress') });
   });
 
-  it('[idempotency-reinit] PENDING row older than 5 min — PENDING preserved, 409 block, ZERO terminal FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED writes', async () => {
+  it('[idempotency-reinit] PENDING row older than 5 min — retry allowed, old PENDING preserved (ZERO terminal FAILED/SUCCESS/UNDERPAID/OVERPAID/REVERSED writes on old row)', async () => {
     (prisma.transaction.findFirst as jest.Mock).mockImplementation((args: any) => {
       const where = args?.where ?? {};
       if (matchesPendingIn(where.status) && where.invoiceId === 501) {
@@ -211,9 +211,12 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
       threw = e;
     }
 
-    expect(threw).toBeInstanceOf(Error);
-    const statusCode = (threw as any).statusCode ?? (threw as any).httpCode ?? (threw as any).code ?? (threw as any).status;
-    expect(statusCode).toBe(409);
+    // Simplified workflow: a stale PENDING does NOT block a new attempt.
+    // If it throws, it must NOT be the old 409 "pending still awaiting confirmation" block.
+    if (threw) {
+      const statusCode = (threw as any).statusCode ?? (threw as any).httpCode ?? (threw as any).code ?? (threw as any).status;
+      expect(statusCode).not.toBe(409);
+    }
 
     const terminalWrites = (prisma.transaction.update as jest.Mock).mock.calls.filter((call) => {
       const data = ((call?.[1]?.data ?? call?.[0]?.data) as any) ?? {};
@@ -233,7 +236,7 @@ describe('A5.1 initiatePayment idempotency 425 guard', () => {
     });
     expect(reinitFailedWrites.length).toBe(0);
 
-    expect(PaystackModule.PaystackService.initializeTransaction).not.toHaveBeenCalled();
-    expect(prisma.transaction.create).toHaveBeenCalledTimes(0);
+    // Provider initialize IS now called because retry is allowed:
+    expect(PaystackModule.PaystackService.initializeTransaction).toHaveBeenCalled();
   });
 });

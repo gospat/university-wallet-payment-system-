@@ -36,6 +36,7 @@ import {
 } from '../services/transactionCancellation';
 import {
   getTransactionForVerify,
+  lookupTransactionForVerify,
   verifyPaymentByTransactionId,
 } from '../controllers/payments';
 
@@ -1387,6 +1388,11 @@ router.get(
 // the browser may not substitute provider identifiers.
 // ---------------------------------------------------------------------------
 const AdminPaymentsIdParam = z.object({ id: z.coerce.number().int().positive() });
+router.get(
+  '/payments/lookup',
+  requirePermission('VERIFY_PAYMENT'),
+  lookupTransactionForVerify,
+);
 router.get(
   '/payments/:id',
   requirePermission('VERIFY_PAYMENT'),

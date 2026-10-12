@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { catchAsync } from '../utils/catchAsync';
+import prisma from '../config/database';
 import {
   CreateFeeAssignmentSchema,
   DirectStudentBillSchema,
@@ -41,6 +42,71 @@ export const cancelInvoice = [
     return res.status(200).json({ status: 'success', data: result });
   }),
 ];
+
+const setInvoiceActive = (isActive: boolean) => [
+  validateParams(InvoiceIdParam),
+  catchAsync(async (req: Request, res: Response) => {
+    const actorId = (req as any).user?.id;
+    if (!actorId) {
+      return res.status(401).json({ status: 'fail', message: 'Authentication required' });
+    }
+    const invoiceId = Number(req.params.id);
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: invoiceId },
+      select: { id: true, invoiceNumber: true, isActive: true, status: true, amountDue: true, amountPaid: true },
+    });
+    if (!invoice) {
+      return res.status(404).json({ status: 'error', message: 'Invoice not found.' });
+    }
+    if (invoice.isActive === isActive) {
+      return res.status(200).json({
+        status: 'success',
+        data: { invoice: { id: invoice.id, invoiceNumber: invoice.invoiceNumber, isActive: invoice.isActive } },
+        message: isActive ? 'Invoice is already enabled.' : 'Invoice is already disabled.',
+      });
+    }
+    const updated = await prisma.invoice.update({
+      where: { id: invoiceId },
+      data: { isActive },
+      select: { id: true, invoiceNumber: true, isActive: true, status: true },
+    });
+    const ipAddress = (req as any)?.ip ?? (req as any)?.headers?.['x-forwarded-for']?.split(',')[0] ?? null;
+    const userAgent = (req as any)?.headers?.['user-agent'] ?? null;
+    try {
+      await prisma.auditLog.create({
+        data: {
+          action: isActive ? 'INVOICE_ENABLED' : 'INVOICE_DISABLED',
+          entityType: 'INVOICE',
+          entityId: String(invoiceId),
+          userId: Number(actorId),
+          oldValue: { isActive: !isActive } as any,
+          newValue: { isActive } as any,
+          details: {
+            invoiceNumber: invoice.invoiceNumber,
+            invoiceStatus: invoice.status,
+            amountDue: Number(invoice.amountDue),
+            amountPaid: Number(invoice.amountPaid),
+            note: isActive
+              ? 'Invoice re-enabled: new payment attempts are now allowed. No existing transactions/receipts/GL were altered.'
+              : 'Invoice disabled: new payment attempts are blocked. Existing transactions/receipts/GL/settlement records are unchanged.',
+          } as any,
+          ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
+          userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
+        },
+      });
+    } catch {
+      /* audit writes should never break the request */
+    }
+    return res.status(200).json({
+      status: 'success',
+      data: { invoice: updated },
+      message: isActive ? 'Invoice enabled.' : 'Invoice disabled.',
+    });
+  }),
+];
+
+export const enableInvoice = setInvoiceActive(true);
+export const disableInvoice = setInvoiceActive(false);
 
 export const listFeeAssignments = [
   validateQuery(FeeAssignmentQuerySchema),

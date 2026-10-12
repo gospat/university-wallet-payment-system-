@@ -936,6 +936,16 @@ const InvoiceDetailPage: React.FC = () => {
   const pay = data?.pay;
   const transactions = data?.transactions ?? [];
   const blockingPending = (data as any)?.blockingPendingTransaction ?? null;
+  const successfulTxn = transactions.find(
+    (tx: any) => String(tx.status ?? '').toUpperCase() === 'SUCCESS',
+  );
+  const invoiceStatus = String(invoice?.status ?? '').toUpperCase();
+  const primaryActionLabel =
+    invoiceStatus === 'PARTIALLY_PAID'
+      ? 'Pay Balance'
+      : invoiceStatus === 'PAID'
+        ? 'View Receipt'
+        : t.payButton;
   const blockingPendingDerived = blockingPending ? derivePendingPresentation(blockingPending) : null;
   const panelTone =
     blockingPendingDerived && blockingPendingDerived.override === true
@@ -981,7 +991,7 @@ const InvoiceDetailPage: React.FC = () => {
   };
 
   const proceedPayment = async () => {
-    if (!pay?.canPay || paying || blockingPending) return;
+    if (!pay?.canPay || paying) return;
     const iid = invoice?.id ?? invoiceId;
     if (!iid) return;
     setPaying(true);
@@ -1106,7 +1116,14 @@ const InvoiceDetailPage: React.FC = () => {
                   <StatusPill status={invoice.status} />
                 </div>
                 <div className="pt-3 space-y-3">
-                  {blockingPending && blockingPanel ? (
+                  {invoice.isActive === false ? (
+                    <div className="rounded-lg border border-gray-300 bg-gray-50 p-4 text-center">
+                      <div className="text-sm font-semibold text-gray-800">Payment Currently Unavailable</div>
+                      <p className="text-xs text-gray-600 mt-1">
+                        Payment for this invoice is currently disabled. Please contact the Bursary.
+                      </p>
+                    </div>
+                  ) : blockingPending && blockingPanel ? (
                     <div className={blockingPanel.wrapperClass}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
@@ -1114,34 +1131,59 @@ const InvoiceDetailPage: React.FC = () => {
                           <p className={blockingPanel.bodyClass}>{blockingPanel.body}</p>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={openPendingInDrawer}
-                        className={blockingPanel.btnClass}
-                        aria-label="Check pending payment status for this invoice"
-                      >
-                        Check Pending Payment
-                      </button>
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={openPendingInDrawer}
+                          className="w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 bg-slate-700 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2"
+                          aria-label="Check pending payment status for this invoice"
+                        >
+                          Check Payment Status
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!pay?.canPay || paying}
+                          onClick={proceedPayment}
+                          className={`w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                            !pay?.canPay || paying
+                              ? 'bg-blue-400 cursor-not-allowed disabled:opacity-60'
+                              : 'bg-blue-600 hover:bg-blue-700'
+                          }`}
+                          aria-busy={paying}
+                          aria-disabled={!pay?.canPay || paying}
+                        >
+                          {paying
+                            ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> Preparing secure checkout…</>)
+                            : 'Pay Now'}
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <button
                       type="button"
-                      disabled={!pay?.canPay || paying}
-                      onClick={proceedPayment}
+                      disabled={!pay?.canPay && invoiceStatus !== 'PAID'}
+                      onClick={() => {
+                        if (invoiceStatus === 'PAID' && successfulTxn) {
+                          setPageSelectedTxn(successfulTxn);
+                          setPageDrawerOpen(true);
+                        } else {
+                          void proceedPayment();
+                        }
+                      }}
                       className={`w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
-                        !pay?.canPay || paying
+                        (!pay?.canPay && invoiceStatus !== 'PAID') || paying
                           ? 'bg-blue-400 cursor-not-allowed disabled:opacity-60'
                           : 'bg-blue-600 hover:bg-blue-700'
                       }`}
                       aria-busy={paying}
-                      aria-disabled={!pay?.canPay || paying}
+                      aria-disabled={(!pay?.canPay && invoiceStatus !== 'PAID') || paying}
                     >
                       {paying
                         ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> Preparing secure checkout…</>)
-                        : (pay?.canPay ? t.payButton : t.payDisabled)}
+                        : primaryActionLabel}
                     </button>
                   )}
-                  {pay?.canPay && !blockingPending && <p className="text-xs text-gray-500 mt-2 text-center">Amount to pay: <b>{formatNgn(pay.amountToPay)}</b></p>}
+                  {pay?.canPay && <p className="text-xs text-gray-500 mt-2 text-center">Amount to pay: <b>{formatNgn(pay.amountToPay)}</b></p>}
                 </div>
               </div>
             </div>

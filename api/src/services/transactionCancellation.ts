@@ -104,12 +104,23 @@ const ELIGIBLE_INVOICE_STATUSES_FOR_TX_CANCEL: InvoiceStatus[] = [
 ];
 
 type ProviderVerifyClassification =
+  | { kind: 'AUTH_SUCCESS' }
   | { kind: 'AUTH_FAILURE_TERMINAL' }
   | { kind: 'NON_TERMINAL' }
   | { kind: 'PENDING' };
 
 function classifyProviderVerify(verifyResult: VerifyResult): ProviderVerifyClassification {
   const ps = String(verifyResult.providerStatus ?? '').toLowerCase().trim();
+  const successExact = new Set([
+    'success', 'successful', 'paid', 'completed', 'complete', 'settled',
+    'approved', 'captured', 'confirmed',
+  ]);
+  if (successExact.has(ps)) {
+    return { kind: 'AUTH_SUCCESS' };
+  }
+  if (verifyResult.status === TransactionStatus.SUCCESS) {
+    return { kind: 'AUTH_SUCCESS' };
+  }
   // Authoritative terminal failure statuses ONLY — exact match.
   // Substring matching is forbidden: a provider response containing
   // 'timeout', 'error', 'invalid' or 'unpaid' must NOT authorize cancellation.
@@ -497,98 +508,106 @@ export class TransactionCancellationService {
         }
       }
 
-      // Precheck 6B: Evidence policy gate for LIVE UNRESOLVED attempts (FR-4)
-      // Live unresolved = tx still within processing window OR has unverified
-      // webhook evidence OR missing final provider ref. Fail-closed unless
-      // we have (i) authoritative provider-negative terminal evidence OR
-      // (ii) strictly-gated MANUAL_SUPPORT_OVERRIDE policy.
+      // Precheck 6B: Simplified cancellation policy.
+      //
+      // Ordinary safe abandoned/test attempts (no receipt, no GL, no
+      // settlement, no confirmed webhook SUCCESS — all enforced by prechecks
+      // 3–6 above) may be cancelled with just reason + written explanation.
+      // No REC-XXXXXX / support-ticket reference is required, and provider-
+      // negative evidence is not mandatory.
+      //
+      // However, if a provider reference exists, we best-effort verify with
+      // the provider. If the provider authoritatively reports SUCCESS, money
+      // has moved and cancellation is blocked (409) so reconciliation handles
+      // it. Any other provider outcome (terminal-negative, non-terminal,
+      // transport failure) is acceptable for a safe cancellation because the
+      // late-success reconciliation path in verifyPayment already guards
+      // against double-crediting if the provider later reports SUCCESS.
+      //
+      // MANUAL_SUPPORT_OVERRIDE remains available for exceptional cases
+      // (e.g. cancelling a live attempt that the provider still reports as
+      // processing) and still requires ADMIN + VOID_TRANSACTIONS + a strict
+      // support ticket reference.
       const txStatus: string = String(initialTx.status);
       const liveAttempt = txStatus === 'PENDING' || txStatus === 'PROCESSING';
       const providerRefMissing =
         (!initialTx.alatpayFinalTransactionId || String(initialTx.alatpayFinalTransactionId).length === 0) &&
         (!(initialTx as any).paystackReference || String((initialTx as any).paystackReference).length === 0);
+      const liveUnresolved =
+        liveAttempt || hasPendingOrUnverifiedWebhooks || providerRefMissing;
+
       const hasSuccessRef =
         (initialTx.status === TransactionStatus.SUCCESS as any) ||
         (initialTx.alatpayFinalTransactionId && String(initialTx.alatpayFinalTransactionId).length > 0) ||
         ((initialTx as any).paystackReference && String((initialTx as any).paystackReference).length > 0 &&
           initialTx.status === TransactionStatus.SUCCESS);
-      const liveUnresolved =
-        liveAttempt || hasPendingOrUnverifiedWebhooks || providerRefMissing;
 
-      // Sanitized evidence captured when the live-unresolved gate passes.
-      // These are persisted to metadata.cancellation + audit details so the
-      // audit can distinguish PROVIDER_TERMINAL_NEGATIVE from
-      // MANUAL_SUPPORT_OVERRIDE. Only allowlisted, non-secret fields are stored.
       let providerEvidence: Record<string, unknown> | null = null;
       let overrideEvidence: Record<string, unknown> | null = null;
+      let providerConfirmedSuccess = false;
 
-      if (liveUnresolved) {
-        let providerNegativeTerminal = false;
+      if (liveUnresolved && initialTx.gateway) {
+        let bestProviderRef: string | null = null;
+        if (initialTx.alatpayFinalTransactionId && String(initialTx.alatpayFinalTransactionId).length > 0) {
+          bestProviderRef = String(initialTx.alatpayFinalTransactionId);
+        } else if ((initialTx as any).alatpayInitPaymentReference && String((initialTx as any).alatpayInitPaymentReference).length > 0) {
+          bestProviderRef = String((initialTx as any).alatpayInitPaymentReference);
+        } else if ((initialTx as any).paystackReference && String((initialTx as any).paystackReference).length > 0) {
+          bestProviderRef = String((initialTx as any).paystackReference);
+        }
 
-        if (initialTx.gateway) {
-          let bestProviderRef: string | null = null;
-          if (initialTx.alatpayFinalTransactionId && String(initialTx.alatpayFinalTransactionId).length > 0) {
-            bestProviderRef = String(initialTx.alatpayFinalTransactionId);
-          } else if ((initialTx as any).alatpayInitPaymentReference && String((initialTx as any).alatpayInitPaymentReference).length > 0) {
-            bestProviderRef = String((initialTx as any).alatpayInitPaymentReference);
-          } else if ((initialTx as any).paystackReference && String((initialTx as any).paystackReference).length > 0) {
-            bestProviderRef = String((initialTx as any).paystackReference);
-          } else if (initialTx.reference && String(initialTx.reference).length > 0) {
-            bestProviderRef = String(initialTx.reference);
-          }
-
-          if (bestProviderRef) {
-            try {
-              const provider = getPaymentProvider(initialTx.gateway as PaymentGateway);
-              const verifyResult = await provider.verify(bestProviderRef);
-              const cls = classifyProviderVerify(verifyResult);
-              if (cls.kind === 'AUTH_FAILURE_TERMINAL') {
-                providerNegativeTerminal = true;
-                // Sanitized evidence ONLY — never store raw provider payload,
-                // authorization headers, or secrets.
-                const rawStatus =
-                  verifyResult && typeof verifyResult.providerStatus === 'string'
-                    ? verifyResult.providerStatus
-                    : '';
-                providerEvidence = {
-                  gateway: String(initialTx.gateway),
-                  providerReference: bestProviderRef,
-                  providerStatusRaw: rawStatus,
-                  providerStatusNormalized: rawStatus.trim().toLowerCase(),
-                  classification: 'AUTH_FAILURE_TERMINAL',
-                  verifiedAt: new Date().toISOString(),
-                };
-              }
-            } catch (_err) {
-              providerNegativeTerminal = false;
+        if (bestProviderRef) {
+          try {
+            const provider = getPaymentProvider(initialTx.gateway as PaymentGateway);
+            const verifyResult = await provider.verify(bestProviderRef);
+            const cls = classifyProviderVerify(verifyResult);
+            if (cls.kind === 'AUTH_SUCCESS') {
+              providerConfirmedSuccess = true;
+            } else if (cls.kind === 'AUTH_FAILURE_TERMINAL') {
+              const rawStatus =
+                verifyResult && typeof verifyResult.providerStatus === 'string'
+                  ? verifyResult.providerStatus
+                  : '';
+              providerEvidence = {
+                gateway: String(initialTx.gateway),
+                providerReference: bestProviderRef,
+                providerStatusRaw: rawStatus,
+                providerStatusNormalized: rawStatus.trim().toLowerCase(),
+                classification: 'AUTH_FAILURE_TERMINAL',
+                verifiedAt: new Date().toISOString(),
+              };
             }
+          } catch (_err) {
+            // Transport / non-terminal: acceptable for safe cancellation.
           }
         }
+      }
 
-        const overrideGate =
-          evidenceOverride === 'MANUAL_SUPPORT_OVERRIDE' &&
-          actorRole === Role.ADMIN &&
-          (input.actorPermissions ?? []).includes(Permissions.VOID_TRANSACTIONS) &&
-          evidenceReference != null &&
-          STRICT_SUPPORT_TICKET_REGEX.test(String(evidenceReference).trim());
+      const overrideGate =
+        evidenceOverride === 'MANUAL_SUPPORT_OVERRIDE' &&
+        actorRole === Role.ADMIN &&
+        (input.actorPermissions ?? []).includes(Permissions.VOID_TRANSACTIONS) &&
+        evidenceReference != null &&
+        STRICT_SUPPORT_TICKET_REGEX.test(String(evidenceReference).trim());
 
-        if (overrideGate) {
-          overrideEvidence = {
-            basis: 'MANUAL_SUPPORT_OVERRIDE',
-            supportTicketReference: String(evidenceReference).trim(),
-            actorId,
-            actorRole,
-          };
-        }
+      if (overrideGate) {
+        overrideEvidence = {
+          basis: 'MANUAL_SUPPORT_OVERRIDE',
+          supportTicketReference: String(evidenceReference).trim(),
+          actorId,
+          actorRole,
+        };
+      }
 
-        if (!providerNegativeTerminal && !overrideGate) {
-          throw new AppError(
-            `Cancellation requires authoritative provider-negative evidence (declined/expired/abandoned/rejected/failed) via verifyPayment, or MANUAL_SUPPORT_OVERRIDE with ADMIN role + VOID_TRANSACTIONS permission + strict support ticket reference. ` +
-            `Free-text explanation (popup close, elapsed time, missing callback, missing UUID, typed reference) alone is NOT sufficient financial evidence for a live unresolved attempt. ` +
-            `Please run Check Payment Status (verifyPayment) first to obtain explicit terminal negative evidence, or apply the strictly-gated manual override policy with a recognized ticket/reference pattern.`,
-            412,
-          );
-        }
+      // Block ONLY when the provider authoritatively confirms SUCCESS (money
+      // moved) and no manual override is applied. All other cases — including
+      // safe abandoned/test attempts with no provider-negative evidence — are
+      // allowed to proceed with reason + explanation.
+      if (providerConfirmedSuccess && !overrideGate) {
+        throw new AppError(
+          `Provider authoritatively reports SUCCESS for transaction ${transactionId}, indicating funds were received. Cancellation denied; use the reconciliation workflow (verifyPayment) to resolve with authoritative provider verification.`,
+          409,
+        );
       }
 
       // Precheck 7: Authoritative evidence requirements (C4 fail-closed).

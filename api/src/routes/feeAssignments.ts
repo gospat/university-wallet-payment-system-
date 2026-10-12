@@ -5,6 +5,8 @@ import {
   createDirectStudentBill,
   createFeeAssignment,
   deleteFeeAssignment,
+  disableInvoice,
+  enableInvoice,
   generateInvoices,
   getFeeAssignment,
   listFeeAssignments,
@@ -32,6 +34,20 @@ router.post(
   restrictTo(Role.ADMIN, Role.BURSARY),
   requirePermission('VOID_INVOICES'),
   cancelInvoice,
+);
+
+router.post(
+  '/invoices/:id/disable',
+  restrictTo(Role.ADMIN, Role.BURSARY),
+  requirePermission('VOID_INVOICES'),
+  disableInvoice,
+);
+
+router.post(
+  '/invoices/:id/enable',
+  restrictTo(Role.ADMIN, Role.BURSARY),
+  requirePermission('VOID_INVOICES'),
+  enableInvoice,
 );
 
 export default router;

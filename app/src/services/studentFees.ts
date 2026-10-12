@@ -63,6 +63,7 @@ export type InvoiceSummary = {
   transactionCount?: number;
   origin?: 'CATALOGUE' | 'DIRECT_BILL';
   directAssignment?: { id: number; overrideAmount?: number | string | null; overrideDeadline?: string | null; assignedAt?: string; assignedBy?: { firstName?: string; lastName?: string; email?: string } | null } | null;
+  isActive?: boolean;
 };
 
 export type InvoiceListResponse = {

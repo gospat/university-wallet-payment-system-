@@ -383,12 +383,28 @@ function safeDiagnosticFromError(err: any, provider: PaymentGateway | null): Saf
  * SUCCESS / UNDERPAID / OVERPAID / REVERSED rows never match this block
  * because the Promise.all query filters status = PENDING only.
  */
+/**
+ * classifyPendingForRetry — Simplified student retry policy.
+ *
+ * The caller (initiatePayment) already enforces two hard ceilings BEFORE
+ * invoking this function:
+ *   1. MAX_UNRESOLVED_PENDING_PER_INVOICE = 2 (any age, any gateway) —
+ *      prevents unlimited duplicate PENDING accumulation.
+ *   2. Age < 5 minutes → block duplicate with 425 (student should wait).
+ *
+ * After those ceilings pass, a previous PENDING attempt must NOT permanently
+ * prevent the student from trying payment again. The previous attempt remains
+ * in transaction history; double-credit is prevented inside verifyPayment
+ * (receipt findFirst by invoiceId/transactionId + invoice already-paid
+ * reconciliation exception). UNKNOWN != FAILED: we never terminalize a
+ * PENDING row from age alone.
+ */
 function classifyPendingForRetry(
   _pendingGateway: string | null,
   _activeGateway: PaymentGateway,
   _hasTrustedAlatpayFinalUuid: boolean,
-): { blockInitiation: true } {
-  return { blockInitiation: true };
+): { blockInitiation: false } {
+  return { blockInitiation: false };
 }
 
 
@@ -411,11 +427,17 @@ export class PaymentService {
       where: { id: payload.invoiceId, studentId },
       select: {
         id: true, invoiceNumber: true, studentId: true, amountDue: true, amountPaid: true,
-        status: true, dueDate: true, session: true, semester: true, feeId: true,
+        status: true, dueDate: true, session: true, semester: true, feeId: true, isActive: true,
         fee: { select: { id: true, name: true, feeCode: true, categoryId: true, college: true, department: true, program: true, level: true, studentType: true } },
       },
     });
     if (!inv) throw new AppError(i18n.errors.invoice.notFound, 404);
+    if (inv.isActive === false) {
+      throw new AppError(
+        'Payment for this invoice is currently disabled. Please contact the Bursary.',
+        403,
+      );
+    }
     if (inv.status === 'PAID' || inv.status === 'CANCELLED' || inv.status === 'REFUNDED' || inv.status === 'REVERSED') {
       throw new AppError(i18n.errors.invoice.alreadyPaid, 409);
     }
@@ -1546,7 +1568,8 @@ export class PaymentService {
         latest.status === TransactionStatus.CANCELLED &&
         latest.invoice?.status === InvoiceStatus.CANCELLED;
       const shouldContinueLateSuccess =
-        classify.kind === 'AUTH_SUCCESS' && !settled && !txCancelledLocal;
+        classify.kind === 'AUTH_SUCCESS' && !settled && !txCancelledLocal &&
+        latest.status !== TransactionStatus.SUCCESS;
       const shouldContinueCancelledLateSuccess =
         txnSuccess && latest.status === TransactionStatus.CANCELLED;
       if (
@@ -1790,6 +1813,71 @@ export class PaymentService {
           amountPaid: money(Number(latest.invoice.amountPaid)),
           status: latest.invoice.status,
         };
+
+        // --- LATE SUCCESS ON ALREADY-PAID INVOICE (double-credit guard) ---
+        // If a different payment attempt already settled this invoice
+        // (amountPaid >= amountDue OR status PAID), a second authoritative
+        // provider SUCCESS represents real additional money received but must
+        // NOT silently double-credit the invoice. Preserve the transaction as
+        // SUCCESS for audit, record a reconciliation exception, and skip all
+        // financial posting (invoice amountPaid, receipt, GL). Admin/Bursary
+        // reconcile the extra funds manually.
+        const invoiceAlreadySettled =
+          before.amountPaid >= before.amountDue ||
+          String(before.status) === InvoiceStatus.PAID;
+        if (invoiceAlreadySettled) {
+          await tx.auditLog.create({
+            data: {
+              userId: (opts.req as any)?.user?.id ?? null,
+              action: 'PAYMENT_SUCCESS_ON_PAID_INVOICE',
+              entityType: 'TRANSACTION',
+              entityId: String(latest.id),
+              oldValue: {
+                status: String(latest.status),
+                invoiceStatus: String(before.status),
+                invoiceAmountPaid: before.amountPaid,
+                invoiceAmountDue: before.amountDue,
+                invoiceId,
+              } as Prisma.InputJsonValue,
+              newValue: {
+                status: TransactionStatus.SUCCESS,
+                providerRef,
+                paidNaira,
+                txGateway,
+              } as Prisma.InputJsonValue,
+              details: {
+                code: 'PAID_INVOICE_LATE_SUCCESS',
+                note:
+                  'Provider reported SUCCESS but this invoice was already settled by a prior payment attempt. Transaction is recorded SUCCESS for audit; no invoice credit, receipt, or ledger was posted to prevent double-crediting. The additional funds require Bursary reconciliation.',
+                invoiceId,
+                invoiceNumber: latest.invoice.invoiceNumber,
+                transactionId: latest.id,
+                reference: latest.reference,
+                providerRef,
+                paidAt: paidAt.toISOString(),
+                paidNaira,
+              } as Prisma.InputJsonValue,
+              ipAddress: opts.req?.ip ?? (opts.req?.headers?.['x-forwarded-for'] as string | undefined)?.split(',')[0] ?? null,
+              userAgent: opts.req?.headers?.['user-agent'] ?? null,
+            },
+          });
+          const auditForTx = await tx.transaction.findUnique({
+            where: { id: latest.id },
+          });
+          return {
+            verified: true,
+            status: TransactionStatus.SUCCESS,
+            transaction: auditForTx ?? latest,
+            invoice: latest.invoice,
+            receipt: null,
+            reconciliationException: true,
+            reconciliationExceptionKind: 'PAID_INVOICE_LATE_SUCCESS',
+            noLedgerPosted: true,
+            noReceiptIssued: true,
+            noInvoiceAmountPosted: true,
+          };
+        }
+
         const newAmountPaid = +(before.amountPaid + baseAmount).toFixed(2);
         const balanceAfter = +(before.amountDue - newAmountPaid).toFixed(2);
         let newStatus: any = latest.invoice.status;

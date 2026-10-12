@@ -15,6 +15,7 @@ import {
 } from '../services/transactionCancellation';
 import {
   getTransactionForVerify,
+  lookupTransactionForVerify,
   verifyPaymentByTransactionId,
 } from '../controllers/payments';
 
@@ -680,6 +681,11 @@ router.get(
 // Both require VERIFY_PAYMENT. Transaction loaded server-side by :id.
 // ---------------------------------------------------------------------------
 const BursaryPaymentsIdParam = z.object({ id: z.coerce.number().int().positive() });
+router.get(
+  '/payments/lookup',
+  requirePermission('VERIFY_PAYMENT'),
+  lookupTransactionForVerify,
+);
 router.get(
   '/payments/:id',
   requirePermission('VERIFY_PAYMENT'),

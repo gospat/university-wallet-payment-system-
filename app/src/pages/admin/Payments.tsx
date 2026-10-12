@@ -165,46 +165,23 @@ const VerifyPaymentWorkspace: React.FC<{ baseEndpoint: string }> = ({ baseEndpoi
     if (!value) { setErrorMsg('Enter a value to look up.'); return; }
     setLoading(true); setErrorMsg(''); setTxDetail(null); setGlDetail(null); setVerifyResult(null);
     try {
+      const typeMap: Record<string, string> = {
+        reference: 'reference',
+        transactionId: 'transactionId',
+        paystackRef: 'paystackReference',
+        alatpayFinalTxId: 'alatpayFinalTransactionId',
+      };
+      const type = typeMap[lookupField];
       const q = new URLSearchParams();
-      if (lookupField === 'transactionId') {
-        if (!/^\d+$/.test(value)) { setErrorMsg('Transaction ID must be numeric.'); setLoading(false); return; }
-        const resp = await api.get<{ status: string; data: { transaction: VerifyTxDetail; generalLedger: any; alatpayFinalTxIdValid: boolean } }>(`${baseEndpoint}/${value}`);
-        if (resp.data?.status === 'success') {
-          setTxDetail(resp.data.data.transaction);
-          setGlDetail(resp.data.data.generalLedger);
-          setAlatpayFinalTxIdValid(resp.data.data.alatpayFinalTxIdValid);
-        } else {
-          setErrorMsg('Transaction not found.');
-        }
+      q.set('type', type);
+      q.set('value', value);
+      const resp = await api.get<{ status: string; data: { transaction: VerifyTxDetail; generalLedger: any; alatpayFinalTxIdValid: boolean; webhookEvidence: any; settlementEvidence: any } }>(`${baseEndpoint}/lookup?${q.toString()}`);
+      if (resp.data?.status === 'success') {
+        setTxDetail(resp.data.data.transaction);
+        setGlDetail(resp.data.data.generalLedger);
+        setAlatpayFinalTxIdValid(resp.data.data.alatpayFinalTxIdValid);
       } else {
-        // Use the list endpoint to find the transaction by reference/provider ref, then fetch detail.
-        const fieldMap: Record<string, string> = {
-          reference: 'q',
-          paystackRef: 'q',
-          alatpayFinalTxId: 'q',
-        };
-        const qParam = fieldMap[lookupField];
-        q.set(qParam, value);
-        q.set('page', '1'); q.set('pageSize', '10');
-        const resp = await api.get<{ status: string; data: { items: any[] } }>(`${baseEndpoint}?${q.toString()}`);
-        const items = resp.data?.data?.items ?? [];
-        let match: any = null;
-        if (lookupField === 'reference') {
-          match = items.find((i: any) => String(i.reference) === value) ?? items[0];
-        } else if (lookupField === 'paystackRef') {
-          match = items.find((i: any) => String(i.paystackReference) === value) ?? items[0];
-        } else if (lookupField === 'alatpayFinalTxId') {
-          match = items.find((i: any) => String(i.alatpayFinalTransactionId) === value) ?? items[0];
-        }
-        if (!match) { setErrorMsg('No transaction matched the lookup value.'); setLoading(false); return; }
-        const detailResp = await api.get<{ status: string; data: { transaction: VerifyTxDetail; generalLedger: any; alatpayFinalTxIdValid: boolean } }>(`${baseEndpoint}/${match.id}`);
-        if (detailResp.data?.status === 'success') {
-          setTxDetail(detailResp.data.data.transaction);
-          setGlDetail(detailResp.data.data.generalLedger);
-          setAlatpayFinalTxIdValid(detailResp.data.data.alatpayFinalTxIdValid);
-        } else {
-          setErrorMsg('Transaction not found.');
-        }
+        setErrorMsg('Transaction not found.');
       }
     } catch (e: any) {
       if (e?.response?.status === 404) setErrorMsg('Transaction not found.');
