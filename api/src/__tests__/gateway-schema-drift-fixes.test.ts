@@ -32,16 +32,34 @@ jest.mock('../config/database', () => ({
             ? prisma.invoice.findFirst({ where: a?.[0]?.where, select: a?.[0]?.select })
             : Promise.resolve(null),
           update: (...a: any[]) => prisma.invoice.update?.(...a),
+          updateMany: (...a: any[]) => prisma.invoice.updateMany?.(...a),
         },
         transaction: {
           findFirst: (...a: any[]) => prisma.transaction.findFirst?.(...a),
           findMany: (...a: any[]) => prisma.transaction.findMany?.(...a),
+          findUnique: (...a: any[]) => prisma.transaction.findFirst
+            ? prisma.transaction.findFirst({ where: a?.[0]?.where, select: a?.[0]?.select })
+            : Promise.resolve(null),
           create: (...a: any[]) => prisma.transaction.create(...a),
           update: (...a: any[]) => prisma.transaction.update(...a),
+          updateMany: (...a: any[]) => prisma.transaction.updateMany?.(...a) ?? Promise.resolve({ count: 0 }),
+          count: (...a: any[]) => prisma.transaction.count?.(...a) ?? Promise.resolve(0),
+          deleteMany: (...a: any[]) => Promise.resolve({ count: 0 }),
         },
         feeAssignment: {
           findMany: (...a: any[]) => prisma.feeAssignment.findMany?.(...a),
           updateMany: (...a: any[]) => prisma.feeAssignment.updateMany?.(...a),
+        },
+        receipt: {
+          findFirst: (...a: any[]) => prisma.receipt?.findFirst?.(...a) ?? Promise.resolve(null),
+          create: (...a: any[]) => prisma.receipt?.create?.(...a) ?? Promise.resolve({ id: 1 }),
+        },
+        generalLedger: {
+          findFirst: (...a: any[]) => prisma.generalLedger?.findFirst?.(...a) ?? Promise.resolve(null),
+          create: (...a: any[]) => prisma.generalLedger?.create?.(...a) ?? Promise.resolve({ id: 1 }),
+        },
+        auditLog: {
+          create: (...a: any[]) => prisma.auditLog?.create?.(...a) ?? Promise.resolve({ id: 1 }),
         },
       };
       return fn(txClient);

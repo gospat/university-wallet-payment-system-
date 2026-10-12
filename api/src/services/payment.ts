@@ -1674,6 +1674,7 @@ export class PaymentService {
         });
         return {
           verified: true,
+          status: CANCELLED_PRESERVED_STR,
           reportedStatus: CANCELLED_PRESERVED_STR,
           transaction: auditForTx ?? latest,
           invoice: latest.invoice,

@@ -337,6 +337,7 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
     generateFeeAssignedInvoices: noop, confirmPayload: noop, confirmPayloadValidator: passArr,
     getDirectBillInvoice: noop, getDirectBillInvoiceValidator: passArr,
     getContinueOption: noop, getContinueOptionValidator: passArr,
+    getTransactionForVerify: noop, lookupTransactionForVerify: noop, verifyPaymentByTransactionId: noop,
   }));
   jest.mock('../controllers/fees', () => ({
     listFeesCatalogue: jest.fn((_r: any, res: any) => res.status(200).json([])),
@@ -349,7 +350,7 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
     listMyFeeAssignments: noop, billStudent: noop, generateInvoices: noop,
     listFeeAssignments: noop, getFeeAssignment: noop, createFeeAssignment: noop,
     updateFeeAssignment: noop, deleteFeeAssignment: noop, manualStudentInvoice: noop,
-    createDirectStudentBill: noop, cancelInvoice: noop,
+    createDirectStudentBill: noop, cancelInvoice: noop, enableInvoice: noop, disableInvoice: noop,
   }));
   jest.mock('../controllers/auth', () => ({
     signup: noop, login: noop, refresh: passArr, logout: passArr, logoutAll: noop, me: noop,
@@ -549,6 +550,7 @@ describe('8 limiters + webhook regression', () => {
       generateFeeAssignedInvoices: noop, confirmPayload: noop, confirmPayloadValidator: passArr,
       getDirectBillInvoice: noop, getDirectBillInvoiceValidator: passArr,
       getContinueOption: noop, getContinueOptionValidator: passArr,
+      getTransactionForVerify: noop, lookupTransactionForVerify: noop, verifyPaymentByTransactionId: noop,
     }));
     jest.mock('../controllers/fees', () => ({
       listFeesCatalogue: noop, listFees: noop, createFee: noop, updateFee: noop,
@@ -560,7 +562,7 @@ describe('8 limiters + webhook regression', () => {
       listMyFeeAssignments: noop, billStudent: noop, generateInvoices: noop,
       listFeeAssignments: noop, getFeeAssignment: noop, createFeeAssignment: noop,
       updateFeeAssignment: noop, deleteFeeAssignment: noop, manualStudentInvoice: noop,
-      createDirectStudentBill: noop, cancelInvoice: noop,
+      createDirectStudentBill: noop, cancelInvoice: noop, enableInvoice: noop, disableInvoice: noop,
     }));
     jest.mock('../controllers/auth', () => ({
       signup: noop, login: noop, refresh: passArr, logout: passArr, logoutAll: noop, me: noop,

@@ -479,7 +479,7 @@ const setupBaseMocks = () => {
 
 describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T1 — initialize() actually sends Bells correlation metadata (no empty array)', async () => {
-    const { prismaMock } = setupBaseMocks();
+    setupBaseMocks();
     const providerFactory = require('../services/payment/providerFactory');
     jest.doMock('../services/payment/providerFactory', () => providerFactory);
     const { AlatpayProvider } = require('../services/payment/providers/alatpayProvider');
@@ -513,7 +513,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
 
   it('T2 — webhook metadata.transaction_id finds the correct Bells transaction via Tier A', async () => {
     try {
-    const { prismaMock, txRows } = setupBaseMocks();
+    const { txRows } = setupBaseMocks();
     txRows.push({
       id: 1234,
       reference: BELLS_REF,
@@ -562,7 +562,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T4 — verifyPayment uses opts.providerReference (final UUID) for provider.verify', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows } = setupBaseMocks();
+    const { txRows, invoiceRows } = setupBaseMocks();
     invoiceRows.push({
       id: 55,
       invoiceNumber: 'INV-0001',
@@ -601,7 +601,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T5 — correct ₦100 verification invokes normal accounting exactly once (real meta.side production GL structure)', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     invoiceRows.push({
       id: 55,
       invoiceNumber: 'INV-0001',
@@ -667,7 +667,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T6 — duplicate webhook does NOT duplicate receipt', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows } = setupBaseMocks();
     invoiceRows.push({
       id: 55,
       invoiceNumber: 'INV-0001',
@@ -707,7 +707,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T7 — duplicate webhook does NOT duplicate GeneralLedger rows', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, glRows } = setupBaseMocks();
     invoiceRows.push({
       id: 55,
       invoiceNumber: 'INV-0001',
@@ -744,7 +744,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T8 — wrong amount (₦99.50 vs expected ₦100) does NOT create receipt or GL', async () => {
     alatAmount = 99.5;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     invoiceRows.push({
       id: 55,
       invoiceNumber: 'INV-0001',
@@ -788,7 +788,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     // Replicate real app.ts rawBody capture (middleware writes req.rawBody Buffer
     // via json.verify callback) — identical to production mount:
     app.use(express.json({
-      verify: (req: any, res: any, buf: Buffer) => {
+      verify: (req: any, _res: any, buf: Buffer) => {
         req.rawBody = buf;
       },
     }));
@@ -811,7 +811,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     const app = express();
     // Same rawBody capture middleware as real production app:
     app.use(express.json({
-      verify: (req: any, res: any, buf: Buffer) => {
+      verify: (req: any, _res: any, buf: Buffer) => {
         req.rawBody = buf;
       },
     }));
@@ -826,7 +826,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   });
 
   it('T11 — ambiguous correlation (>1 rows match tier C) does NOT process payment', async () => {
-    const { prismaMock, txRows, invoiceRows, webhookEventRows } = setupBaseMocks();
+    const { txRows, invoiceRows } = setupBaseMocks();
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
     txRows.push(
       {
@@ -853,7 +853,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   });
 
   it('T12 — unknown transaction (no row matches any tier) does NOT process payment', async () => {
-    const { prismaMock, txRows } = setupBaseMocks();
+    setupBaseMocks();
     const PaymentService = require('../services/payment').PaymentService;
     const result = await PaymentService.locateAlatpayTransactionFromWebhook({
       transaction_id_from_metadata: 99999,
@@ -869,7 +869,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T13 — existing SUCCESS transaction is NOT processed twice', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 100, status: 'PAID', session: '2025/2026' });
     receiptRows.push({ id: 1, transactionId: 1234, reference: 'RCPT/2026/00042', amount: 100 });
     glRows.push(
@@ -904,7 +904,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
     paystackRef = 'PSTK-REF-99';
     paystackKobo = 10000;
     paystackSuccess = true;
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows } = setupBaseMocks();
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0002', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
     txRows.push({
       id: 7777,
@@ -968,7 +968,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T16 — init/session/order/checkout identifiers remain available after final UUID is stored', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows } = setupBaseMocks();
+    const { txRows, invoiceRows } = setupBaseMocks();
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
     txRows.push({
       id: 1234,
@@ -1016,7 +1016,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   // T17 — correct transaction_id + contradictory Bells reference => REJECT
   // -------------------------------------------------------------------------
   it('T17 — correct metadata.transaction_id + contradictory Bells ref => NOT CORRELATED (no money processed)', async () => {
-    const { prismaMock, txRows } = setupBaseMocks();
+    const { txRows } = setupBaseMocks();
     txRows.push({
       id: 1234,
       reference: BELLS_REF,
@@ -1046,7 +1046,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   // T18 — correct transaction_id + contradictory OrderId => REJECT
   // -------------------------------------------------------------------------
   it('T18 — correct metadata.transaction_id + contradictory OrderId => NOT CORRELATED', async () => {
-    const { prismaMock, txRows } = setupBaseMocks();
+    const { txRows } = setupBaseMocks();
     txRows.push({
       id: 1234,
       reference: BELLS_REF,
@@ -1076,7 +1076,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   // T19 — correct transaction_id + contradictory known final UUID => REJECT
   // -------------------------------------------------------------------------
   it('T19 — correct metadata.transaction_id + contradictory already-known final UUID => NOT CORRELATED', async () => {
-    const { prismaMock, txRows } = setupBaseMocks();
+    const { txRows } = setupBaseMocks();
     const OTHER_UUID = '11111111-2222-3333-4444-555555555555';
     txRows.push({
       id: 1234,
@@ -1109,7 +1109,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   // T20 — valid consistent tier-A breadcrumbs ALL match => ACCEPT
   // -------------------------------------------------------------------------
   it('T20 — consistent breadcrumbs across Bells/Order/Init/Session/Final => ACCEPT tier-A correlation', async () => {
-    const { prismaMock, txRows } = setupBaseMocks();
+    const { txRows } = setupBaseMocks();
     txRows.push({
       id: 1234,
       reference: BELLS_REF,
@@ -1146,7 +1146,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   it('T21 — real GL accounting test: CASH_CLEARING meta.side=DEBIT 100, STUDENT_RECEIVABLE meta.side=CREDIT 100', async () => {
     alatAmount = 100;
     alatStatus = 'SUCCESSFUL';
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
     txRows.push({
       id: 1234,
@@ -1541,7 +1541,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       → single receipt + one GL dr/cr pair.
   // -------------------------------------------------------------------------
   it('T27 — verify x2 + webhook sequentially => NO duplicate receipt/GL (idempotent)', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     invoiceRows.push({ id: 55, invoiceNumber: 'INV-0001', studentId: 99, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
     txRows.push({
       id: 1234,
@@ -1585,7 +1585,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       matching PAY-20261007-WZR760 shape => 0 mutations / no new receipt.
   // -------------------------------------------------------------------------
   it('T28 — historical SUCCESS tx (PAY-20261007-WZR760 shape) unchanged by verify (idempotent 0 update)', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     invoiceRows.push({ id: 77, invoiceNumber: 'INV-HIST-77', studentId: 88, amountDue: 50000, amountPaid: 50000, status: 'PAID', session: '2025/2026' });
     txRows.push({
       id: 777,
@@ -1884,7 +1884,6 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
         amount: 100, expectedAmount: 100, invoiceId: 55, createdAt: new Date(), updatedAt: new Date(),
       }],
     });
-    const status = out.nextErr?.statusCode || out.resStatus || 0;
     // Legacy Paystack path: no providerReference => pre-gate block is skipped entirely.
     // If handler proceeds through service (which will fail inside service due to no
     // paystackVerify mocked), that is fine — the test's intent is ONLY to assert the
@@ -2296,7 +2295,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       → SUCCESS, invoice applied for 150 exactly.
   // ============================================================
   it('T41 — gross=150.75 fee=0.75 expected=150.00 → SUCCESS with effective 150.00 (gross_minus_fee norm)', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     alatAmount = 150.75;
     alatFeeAmount = 0.75;
     invoiceRows.push({ id: 9001, invoiceNumber: 'INV/2026/00001', studentId: 90, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2348,7 +2347,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       no blind subtraction of fee.
   // ============================================================
   it('T42 — gross=150.00 fee=0.75 expected=150.00 → SUCCESS, fee NOT subtracted (exact norm)', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows } = setupBaseMocks();
     alatAmount = 150.00;
     alatFeeAmount = 0.75;
     invoiceRows.push({ id: 9002, invoiceNumber: 'INV/2026/00002', studentId: 91, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2384,7 +2383,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       gross-fee=149.00 < 150 → fail closed UNDERPAID
   // ============================================================
   it('T43 — gross=149.75 fee=0.75 expected=150.00 → UNDERPAID (fail closed, no ledger/receipt)', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     alatAmount = 149.75;
     alatFeeAmount = 0.75;
     invoiceRows.push({ id: 9003, invoiceNumber: 'INV/2026/00003', studentId: 92, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2415,7 +2414,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       gross-fee=151.00 > 150 → fail closed OVERPAID
   // ============================================================
   it('T44 — gross=151.75 fee=0.75 expected=150.00 → OVERPAID (fail closed, no ledger/receipt)', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     alatAmount = 151.75;
     alatFeeAmount = 0.75;
     invoiceRows.push({ id: 9004, invoiceNumber: 'INV/2026/00004', studentId: 93, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2446,7 +2445,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       no normalization applied.
   // ============================================================
   it('T45 — fee=0 expected=150 gross=150 → exact match, normalization_kind=exact, no subtract', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows } = setupBaseMocks();
     alatAmount = 150;
     alatFeeAmount = 0;
     invoiceRows.push({ id: 9005, invoiceNumber: 'INV/2026/00005', studentId: 94, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2477,7 +2476,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       from Paystack response exactly; no fee subtraction.
   // ============================================================
   it('T46 — Paystack verification byte-equivalent: paid=10000kobo (100.00), no ALATPAY fields present', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows } = setupBaseMocks();
     paystackKobo = 10000; // 100.00 NGN
     paystackSuccess = true;
     invoiceRows.push({ id: 9006, invoiceNumber: 'INV/2026/00006', studentId: 95, amountDue: 100, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2512,7 +2511,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       no GATEWAY_FEE_EXPENSE (0.75 not in ledger at all).
   // ============================================================
   it('T47 — normalized success → 1 receipt, invoice 150.00 applied, balanced GL 150 dr/cr, no 0.75 expense entry', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     alatAmount = 150.75;
     alatFeeAmount = 0.75;
     invoiceRows.push({ id: 9007, invoiceNumber: 'INV/2026/00007', studentId: 96, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2552,7 +2551,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       exactly once.
   // ============================================================
   it('T48 — normalized verify ×3 idempotent → 1 receipt, 1 balanced GL pair, invoice 150 applied once', async () => {
-    const { prismaMock, txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
+    const { txRows, invoiceRows, receiptRows, glRows } = setupBaseMocks();
     alatAmount = 150.75;
     alatFeeAmount = 0.75;
     invoiceRows.push({ id: 9008, invoiceNumber: 'INV/2026/00008', studentId: 97, amountDue: 150, amountPaid: 0, status: 'PENDING', session: '2025/2026' });
@@ -2592,7 +2591,7 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //       alongside normalized values.
   // ============================================================
   it('T49 — metadata retains raw gross 150.75 and provider fee 0.75 alongside normalized effective 150.00', async () => {
-    const { prismaMock, txRows, invoiceRows } = setupBaseMocks();
+    const { txRows, invoiceRows } = setupBaseMocks();
     alatAmount = 150.75;
     alatFeeAmount = 0.75;
     alatExtra = { Id: 'd7725744-785f-46c9-821b-2e9d5d6f7ac3' };

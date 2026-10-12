@@ -461,6 +461,7 @@ jest.mock('../config/database', () => {
           },
           generalLedger: {
             count: (a: any) => Promise.resolve(gls.filter((g: any) => g.transactionId === a.where.transactionId).length),
+            findFirst: (a: any) => Promise.resolve(gls.find((g: any) => g.transactionId === a.where.transactionId) ?? null),
             create: (a: any) => {
               gls.push({ id: gls.length + 1, ...a.data });
               return Promise.resolve({ id: gls.length });
@@ -724,7 +725,7 @@ describe('SC1 B1 Bursary VOID_INVOICES endpoint authorization', () => {
 //       reconciliation exception flags without receipt/GL posting
 // ─────────────────────────────────────────────────────────────────────────────
 describe('SC2 B2 CANCELLED invoice late SUCCESS durable commit + flags', () => {
-  it('Cancelled tx + invoice + provider SUCCESS payload → SUCCESS + audit flags', async () => {
+  it('Cancelled tx + invoice + provider SUCCESS payload → CANCELLED preserved + reconciliation exception audit flags (FR-2: never flip locally-CANCELLED tx to SUCCESS)', async () => {
     const provider = requireProvider();
     const paidAmount = 50_000;
     testAPI().seedInvoice({ id: 551, studentId: TEST_STUDENT.id, invoiceNumber: 'INV-CANCELLED-01', amountDue: Decimal(50_000), amountPaid: Decimal(0), status: InvoiceStatus.CANCELLED, feeId: 1 });
@@ -768,18 +769,19 @@ describe('SC2 B2 CANCELLED invoice late SUCCESS durable commit + flags', () => {
       req: { ip: '10.0.0.9', user: { id: TEST_STUDENT.id, role: Role.STUDENT }, headers: {} } as any,
     });
 
-    // Final return values → reconciliation exception + no money posted
+    // Final return values → reconciliation exception + no money posted.
+    // FR-2: locally-CANCELLED tx is NOT flipped to SUCCESS; status preserved as CANCELLED.
     expect(result.verified).toBe(true);
-    expect(result.status).toBe(TransactionStatus.SUCCESS);
+    expect(result.status).toBe(TransactionStatus.CANCELLED);
     expect(result.reconciliationException).toBe(true);
     expect(result.reconciliationExceptionKind).toBe('CANCELLED_INVOICE_LATE_SUCCESS');
     expect(result.noLedgerPosted).toBe(true);
     expect(result.noReceiptIssued).toBe(true);
     expect(result.noInvoiceAmountPosted).toBe(true);
 
-    // DB state: tx status SUCCESS (durable: not rolled back)
+    // DB state: tx status CANCELLED (durable: preserved, not flipped to SUCCESS)
     const tx = testAPI().getTx(8001);
-    expect(tx.status).toBe(TransactionStatus.SUCCESS);
+    expect(tx.status).toBe(TransactionStatus.CANCELLED);
 
     // Invoice amountPaid unchanged (0) — no money posted to cancelled invoice
     const inv = testAPI().getInv(551);
@@ -800,8 +802,8 @@ describe('SC2 B2 CANCELLED invoice late SUCCESS durable commit + flags', () => {
 //       idempotent-early-return has continue gate when provider declares
 //       SUCCESS and current status = CANCELLED.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('SC3 B2 alreadyProcessed CANCELLED + provider SUCCESS → upgrade to SUCCESS', () => {
-  it('alreadyProcessed=true (updateMany WHERE status=PENDING returns count=0) + CANCELLED status → still upgraded', async () => {
+describe('SC3 B2 alreadyProcessed CANCELLED + provider SUCCESS → NOT silently dropped (FR-2 preserves CANCELLED + reconciliation exception)', () => {
+  it('alreadyProcessed=true (updateMany WHERE status=PENDING returns count=0) + CANCELLED status → NOT silently dropped; CANCELLED preserved with reconciliationException', async () => {
     const provider = requireProvider();
     testAPI().seedInvoice({ id: 552, studentId: TEST_STUDENT.id, invoiceNumber: 'INV-CANCELLED-02', amountDue: Decimal(10_000), amountPaid: Decimal(0), status: InvoiceStatus.CANCELLED, feeId: 1 });
     testAPI().seedTransaction({
@@ -842,9 +844,9 @@ describe('SC3 B2 alreadyProcessed CANCELLED + provider SUCCESS → upgrade to SU
       req: { ip: '10.0.0.9', user: { id: TEST_STUDENT.id, role: Role.STUDENT }, headers: {} } as any,
     });
 
-    // NOT silently ignored → status MUST be SUCCESS (not remain CANCELLED)
-    expect(result.status).not.toBe(TransactionStatus.CANCELLED);
-    expect(result.status).toBe(TransactionStatus.SUCCESS);
+    // NOT silently ignored → reconciliationException is set (late SUCCESS evidence recorded)
+    // FR-2: status preserved as CANCELLED (not flipped to SUCCESS)
+    expect(result.status).toBe(TransactionStatus.CANCELLED);
     expect(result.reconciliationException).toBe(true);
   });
 });

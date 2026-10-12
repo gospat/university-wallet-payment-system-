@@ -2368,12 +2368,15 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(initiateSlice).toBeTruthy();
       const p = initiateSlice!;
       // 1. Provider-neutral classifyPendingForRetry helper is declared, takes all
-      //    combinations and returns { blockInitiation: true }.
+      //    combinations and returns { blockInitiation: false }.
+      //    The caller (initiatePayment) enforces MAX_UNRESOLVED_PER_INVOICE=2 and
+      //    age<5min→425 BEFORE invoking this helper. A previous PENDING attempt
+      //    must NOT permanently prevent the student from retrying.
       //    It MUST NOT expose terminalizeFailed — explicit rejection handling
       //    belongs in an authoritative provider-result workflow, not stale retry.
       const helper = p.indexOf('function classifyPendingForRetry(');
       const helperSig = p.indexOf('_pendingGateway: string | null', helper);
-      const helperBlock = p.indexOf('blockInitiation: true', helper);
+      const helperBlock = p.indexOf('blockInitiation: false', helper);
       expect(helper).toBeGreaterThan(0);
       expect(helperSig).toBeGreaterThan(helper);
       expect(helperBlock).toBeGreaterThan(helper);
@@ -2756,20 +2759,22 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(invoicesRegion).not.toMatch(/<TxnDetailsDrawer/);
     });
 
-    it('TR-39.B Unresolved pending transaction blocks Pay Now and shows Check Pending Payment as primary action; backend canPay requires zero pending rows', () => {
+    it('TR-39.B Unresolved pending transaction shows Check Payment Status panel; backend canPay does NOT require zero pending rows (student may retry; backend enforces 425/409)', () => {
       const fs: typeof import('fs') = require('fs');
       const path: typeof import('path') = require('path');
       const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
       const studentFeeSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'studentFee.ts'), 'utf8');
-      // Blocking pending conditional renders Check Pending Payment — expand window since blockingPanel ternary + wrapper classes sit between
-      expect(feesSrc).toMatch(/blockingPending\s*&&[\s\S]{0,2500}Check Pending Payment/);
+      // Blocking pending conditional renders Check Payment Status panel
+      expect(feesSrc).toMatch(/blockingPending\s*&&[\s\S]{0,2500}Check Payment Status/);
       // Pay Now else branch is not offered as primary when a blocking pending exists
       expect(feesSrc).toMatch(/blockingPending\s*&&\s*blockingPanel/);
-      // Backend canPay requires pendingTransactions.length === 0 (matches A5.1 pending ceiling)
-      expect(studentFeeSrc).toMatch(/pendingTransactions\.length\s*===\s*0/);
-      // initiatePayment proceedPayment guard blocks on blockingPending too (frontend double guard)
-      expect(feesSrc).toMatch(/proceedPayment\s*=\s*async\s*\(\s*\)\s*=>\s*\{[\s\S]{0,200}!pay\?\.canPay\s*\|\|\s*paying\s*\|\|\s*blockingPending/);
-      // No second payment initiated inside Check Pending Payment button: onClick invokes openPendingInDrawer only
+      // Backend canPay does NOT require pendingTransactions.length === 0 — a PENDING
+      // attempt no longer disables Pay Now; backend enforces 425 (too soon) / 409
+      // (max unresolved reached) as needed.
+      expect(studentFeeSrc).not.toMatch(/canPay:[\s\S]{0,400}pendingTransactions\.length\s*===\s*0/);
+      // initiatePayment proceedPayment guard blocks on !canPay || paying only (no frontend pending block)
+      expect(feesSrc).toMatch(/proceedPayment\s*=\s*async\s*\(\s*\)\s*=>\s*\{[\s\S]{0,200}!pay\?\.canPay\s*\|\|\s*paying/);
+      // No second payment initiated inside Check Payment Status button: onClick invokes openPendingInDrawer only
       expect(feesSrc).toMatch(/openPendingInDrawer\s*=\s*\(\s*\)\s*=>\s*\{[\s\S]{0,300}setPageSelectedTxn\(\s*blockingPending\s*\)/);
     });
 
@@ -2876,17 +2881,18 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(studentFeeSrc).toMatch(/blockingPendingTransaction\s*:\s*any\s*\|\s*null\s*=\s*pendingTransactions\[0\]\s*\?\?\s*null/);
     });
 
-    it('TR-39.E Authoritative FAILED only re-enables Pay Now / new attempt; pending rows continue to block initiation; no terminal-state downgrade by UI', () => {
+    it('TR-39.E Authoritative FAILED only re-enables Pay Now / new attempt; PENDING rows do NOT block initiation at UI layer (backend enforces 425/409); no terminal-state downgrade by UI', () => {
       const fs: typeof import('fs') = require('fs');
       const path: typeof import('path') = require('path');
       const studentFeeSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'studentFee.ts'), 'utf8');
       const feesSrc = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'app', 'src', 'pages', 'student', 'Fees.tsx'), 'utf8');
-      // canPay composition includes balance && not cancelled/refunded/reversed && ZERO pending rows
-      expect(studentFeeSrc).toMatch(/canPay:[\s\S]{0,300}balance\s*>\s*0[\s\S]{0,300}status\s*!==\s*['"]CANCELLED['"][\s\S]{0,300}status\s*!==\s*['"]REFUNDED['"][\s\S]{0,300}status\s*!==\s*['"]REVERSED['"][\s\S]{0,300}pendingTransactions\.length\s*===\s*0/);
-      // UI Pay Now branch only offered in the else-of-blockingPending (enlarged window; else has nested canPay ternary before t.payButton)
-      expect(feesSrc).toMatch(/blockingPending\s*&&\s*blockingPanel\s*\?[\s\S]{0,2500}\)\s*:\s*\([\s\S]{0,800}t\.payButton/);
-      // UI proceedPayment short-returns when blockingPending is present
-      expect(feesSrc).toMatch(/proceedPayment[\s\S]{0,120}if\s*\(\s*!pay\?\.canPay\s*\|\|\s*paying\s*\|\|\s*blockingPending\s*\)\s*return;/);
+      // canPay composition includes balance && not cancelled/refunded/reversed — does NOT require zero pending rows
+      expect(studentFeeSrc).toMatch(/canPay:[\s\S]{0,300}balance\s*>\s*0[\s\S]{0,300}status\s*!==\s*['"]CANCELLED['"][\s\S]{0,300}status\s*!==\s*['"]REFUNDED['"][\s\S]{0,300}status\s*!==\s*['"]REVERSED['"]/);
+      expect(studentFeeSrc).not.toMatch(/canPay:[\s\S]{0,400}pendingTransactions\.length\s*===\s*0/);
+      // UI Pay Now branch only offered in the else-of-blockingPending (blocking panel shown first, pay button in else branch)
+      expect(feesSrc).toMatch(/blockingPending\s*&&\s*blockingPanel\s*\?[\s\S]{0,2500}Check Payment Status[\s\S]{0,1500}\)\s*:\s*\([\s\S]{0,800}proceedPayment/);
+      // UI proceedPayment short-returns on !canPay || paying only (no frontend blockingPending gate)
+      expect(feesSrc).toMatch(/proceedPayment[\s\S]{0,120}if\s*\(\s*!pay\?\.canPay\s*\|\|\s*paying\s*\)\s*return;/);
     });
 
     it('TR-39.F Provider unavailable / network timeout / unknown state does not unlock duplicate payment, keeps tx preserved, shows Unable to Confirm Right Now friendly fallback', () => {
@@ -3052,8 +3058,10 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(studentFeeSrc).toMatch(/(?:pendingTransactions|mappedTransactions)\s*\.filter\s*\(\s*\(?\s*tx[^)]*\)?\s*=>\s*[\s\S]{0,260}(?:status\s*===\s*['"]PENDING['"]|toUpperCase\s*\(\s*\)\s*===\s*['"]PENDING['"])/);
       // Also verify the pendingTransactions variable is assigned from the filter (semantic naming of result variable)
       expect(studentFeeSrc).toMatch(/pendingTransactions\s*=\s*(?:mappedTransactions|[\s\S]{0,40})\.filter\s*\(/);
-      // And canPay double-gate for INVOICE level CANCELLED (correctly blocked alongside REFUNDED/REVERSED)
-      expect(studentFeeSrc).toMatch(/canPay:[\s\S]{0,400}balance\s*>\s*0[\s\S]{0,200}status\s*!==\s*['"]CANCELLED['"][\s\S]{0,160}status\s*!==\s*['"]REFUNDED['"][\s\S]{0,160}status\s*!==\s*['"]REVERSED['"][\s\S]{0,200}pendingTransactions\.length\s*===\s*0/);
+      // And canPay double-gate for INVOICE level CANCELLED (correctly blocked alongside REFUNDED/REVERSED).
+      // NOTE: pendingTransactions.length === 0 is intentionally NOT part of canPay — a PENDING attempt
+      // no longer disables Pay Now; backend enforces 425/409 as needed (simplified student workflow).
+      expect(studentFeeSrc).toMatch(/canPay:[\s\S]{0,400}balance\s*>\s*0[\s\S]{0,200}status\s*!==\s*['"]CANCELLED['"][\s\S]{0,160}status\s*!==\s*['"]REFUNDED['"][\s\S]{0,160}status\s*!==\s*['"]REVERSED['"]/);
     });
 
     it('TR-41.5 PENDING transactions still block new payment initiation. CANCELLED addition did NOT relax PENDING blocking (structural regex proof)', () => {
