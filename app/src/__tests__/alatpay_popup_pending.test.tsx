@@ -300,14 +300,13 @@ it('Q: no SDK callback → backend polling alone drives navigation', async () =>
   expect(navigateMock).toHaveBeenCalledWith('/student/payments/callback/PAY-REF-001');
 });
 
-// ---- R. SDK onReportTransaction fires → closes popup + navigates ----------
-// The SDK can fire onTransaction (which we map to onReportTransaction) as soon
-// as the transaction is created — possibly while it is still PENDING. We must
-// dismiss the popup even then, because the callback page will poll the backend
-// for the authoritative status. Without close() the SDK's document.body iframes
-// would remain after navigation.
+// ---- R. onTransaction + backend PENDING → capture UUID only ---------------
+// The SDK fires onTransaction as soon as the transaction is created, which
+// may be while it is still PENDING. onReportTransaction MUST only capture the
+// provider UUID — it must NOT navigate or close the popup. Backend polling
+// remains authoritative and must continue.
 
-it('R: onReportTransaction → closes popup AND navigates with providerReference', async () => {
+it('R: onTransaction + PENDING → captures UUID, popup stays open, no navigation, polling continues', async () => {
   let onReportTx: ((r: any) => void) | null = null;
   launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
     onReportTx = cb.onReportTransaction ?? null;
@@ -326,36 +325,41 @@ it('R: onReportTransaction → closes popup AND navigates with providerReference
       initPaymentReference: 'INIT-1',
       providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
       extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+      source: 'transaction',
     });
   });
 
-  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
-  expect(navigateMock).toHaveBeenCalledWith(
-    '/student/payments/callback/PAY-REF-001?providerReference=7162fb44-6d04-4590-ac65-a96061e272ab',
-  );
+  // Popup NOT closed, no navigation yet.
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // Polling continues — fire two poll cycles.
+  await tickPolls(2500);
+  const callsAfterFirst = getPaymentStatusMock.mock.calls.length;
+  expect(callsAfterFirst).toBeGreaterThanOrEqual(1);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  await tickPolls(2500);
+  expect(getPaymentStatusMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
 });
 
-// ---- S. onReportTransaction preserves providerReference over onClosed ------
-// close() fires the SDK's onClose callback synchronously. Our onClosed handler
-// calls navigateToCallback(null). Because onReportTransaction navigated first
-// (with the provider reference), navigatedRef is already true, so the onClosed
-// navigation is a no-op and the provider reference is preserved.
+// ---- S. onTransaction + later backend SUCCESS -----------------------------
+// The provider UUID is captured onTransaction, but the popup stays open until
+// backend polling sees persisted SUCCESS. Then: close popup exactly once,
+// navigate exactly once, by Bells reference alone (no provider reference).
 
-it('S: close() from onReportTransaction does not overwrite providerReference', async () => {
+it('S: onTransaction then backend SUCCESS → popup closes once, navigates once by Bells ref', async () => {
   let onReportTx: ((r: any) => void) | null = null;
-  let onClosedCb: (() => void) | null = null;
   launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
     onReportTx = cb.onReportTransaction ?? null;
-    onClosedCb = cb.onClosed ?? null;
-    return {
-      close: () => {
-        alatpayCloseMock();
-        // Simulate the SDK firing onClose synchronously when close() is called.
-        onClosedCb?.();
-      },
-    };
+    return { close: alatpayCloseMock };
   });
-  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING' })
+    .mockResolvedValueOnce({ status: 'SUCCESS', reference: 'PAY-REF-001' });
 
   renderConfirm();
   await flushLoad();
@@ -368,22 +372,143 @@ it('S: close() from onReportTransaction does not overwrite providerReference', a
       initPaymentReference: 'INIT-1',
       providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
       extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+      source: 'transaction',
     });
   });
 
-  // Exactly one navigation — with the provider reference.
+  // After onTransaction: popup still open, no navigation.
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // First poll → PENDING: still no close/navigate.
+  await tickPolls(2500);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // Second poll → SUCCESS: popup closed + navigated by Bells ref only.
+  await tickPolls(2500);
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
   expect(navigateMock).toHaveBeenCalledTimes(1);
-  expect(navigateMock).toHaveBeenCalledWith(
-    '/student/payments/callback/PAY-REF-001?providerReference=7162fb44-6d04-4590-ac65-a96061e272ab',
-  );
+  expect(navigateMock).toHaveBeenCalledWith('/student/payments/callback/PAY-REF-001');
 });
 
-// ---- T. Unmount while popup open → popup is closed ------------------------
-// The SDK appends its popup iframes to document.body, outside the React tree.
-// If the student navigates away (e.g. "Back to Invoices") while the popup is
-// open, the component must dismiss it on unmount.
+// ---- U. SDK onSuccess while backend PENDING -------------------------------
+// The SDK's onSuccess must NOT create financial SUCCESS. It may trigger an
+// immediate backend status refresh, but the Bells success screen requires
+// persisted backend SUCCESS/PAID. If the backend is still PENDING, the popup
+// stays open and polling continues.
 
-it('T: unmount while popup open → closes popup', async () => {
+it('U: onSuccess while backend PENDING → no SUCCESS, popup stays open, check continues', async () => {
+  let onSuccessCb: (() => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onSuccessCb = cb.onSuccess ?? null;
+    return { close: alatpayCloseMock };
+  });
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  act(() => { onSuccessCb?.(); });
+
+  // onSuccess triggers an immediate check, but backend says PENDING:
+  // no close, no navigation.
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // Polling continues.
+  const callsBefore = getPaymentStatusMock.mock.calls.length;
+  await tickPolls(2500);
+  expect(getPaymentStatusMock.mock.calls.length).toBeGreaterThan(callsBefore);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+});
+
+// ---- V. onSuccess does not create duplicate in-flight polls ----------------
+// onSuccess cancels the scheduled timer and fires an immediate poll. It must
+// not create a parallel in-flight request while one is already running.
+
+it('V: onSuccess during in-flight poll → no duplicate request', async () => {
+  let onSuccessCb: (() => void) | null = null;
+  let resolveFirst: ((v: any) => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onSuccessCb = cb.onSuccess ?? null;
+    return { close: alatpayCloseMock };
+  });
+  // First poll hangs (unresolved promise) to simulate an in-flight request.
+  getPaymentStatusMock
+    .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+    .mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  // Fire the first poll (in-flight, unresolved).
+  await tickPolls(2500);
+  const callsDuringFlight = getPaymentStatusMock.mock.calls.length;
+
+  // Trigger onSuccess while the first poll is still in flight.
+  act(() => { onSuccessCb?.(); });
+  // Flush microtasks — the immediate poll should be skipped (in-flight guard).
+  await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
+
+  // No new poll was started; still the same in-flight request.
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsDuringFlight);
+
+  // Resolve the first poll with PENDING; polling resumes normally.
+  act(() => { resolveFirst?.({ status: 'PENDING' }); });
+  await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+});
+
+// ---- W. No duplicate close or navigation from overlapping events ----------
+// A backend SUCCESS poll, an onSuccess callback, and onTransaction all arriving
+// together must result in exactly one close() and one navigation.
+
+it('W: SUCCESS poll + onSuccess + onTransaction → exactly one close, one navigate', async () => {
+  let onReportTx: ((r: any) => void) | null = null;
+  let onSuccessCb: (() => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onReportTx = cb.onReportTransaction ?? null;
+    onSuccessCb = cb.onSuccess ?? null;
+    return { close: alatpayCloseMock };
+  });
+  getPaymentStatusMock.mockResolvedValue({ status: 'SUCCESS', reference: 'PAY-REF-001' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  // Fire a poll that resolves to SUCCESS.
+  await tickPolls(2500);
+
+  // Immediately fire onSuccess and onTransaction (which would normally try to
+  // trigger more checks). Because navigatedRef is now true, they are no-ops.
+  act(() => { onSuccessCb?.(); });
+  act(() => {
+    onReportTx?.({
+      bellsReference: 'PAY-REF-001',
+      orderReference: 'ORD-1',
+      initPaymentReference: 'INIT-1',
+      providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
+      extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+      source: 'transaction',
+    });
+  });
+
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledTimes(1);
+});
+
+// ---- T. Unmount while popup open → popup is closed, no unwanted redirect ---
+// The SDK appends its popup iframes to document.body, outside the React tree.
+// If the component unmounts while the popup is open, it must dismiss the popup
+// without triggering an unwanted callback redirect.
+
+it('T: unmount while popup open → closes popup, no unwanted redirect', async () => {
   launchAlatpayMock.mockResolvedValue({ close: alatpayCloseMock });
   getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
 
@@ -392,8 +517,11 @@ it('T: unmount while popup open → closes popup', async () => {
   await proceed();
 
   expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
 
   cleanup();
 
   expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  // No navigation triggered by the unmount close.
+  expect(navigateMock).not.toHaveBeenCalled();
 });

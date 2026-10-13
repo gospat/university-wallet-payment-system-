@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, Link, useLocation } from 'react-router-dom';
 import PortalShell from '../../components/PortalShell';
 import HostedCheckoutModal from '../../components/HostedCheckoutModal';
@@ -51,6 +51,9 @@ const CheckoutPage: React.FC = () => {
   const [lastInitiatedResult, setLastInitiatedResult] = useState<any>(null);
   const [continueOption, setContinueOption] = useState<any>(null);
   const [continueOptionLoading, setContinueOptionLoading] = useState(false);
+
+  const providerReferenceRef = useRef<string | null>(null);
+  const navigatedRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -139,6 +142,8 @@ const CheckoutPage: React.FC = () => {
     setAlatpayRefs(null);
     setShowUnresolved(false);
     setLastInitiatedResult(null);
+    providerReferenceRef.current = null;
+    navigatedRef.current = false;
     try {
       const init = await studentFeeApi.initiatePayment({
         invoiceId: invoiceId || '',
@@ -163,14 +168,9 @@ const CheckoutPage: React.FC = () => {
         try {
           await launchAlatpayNativeModal(alatpayCheckout, {
             onReportTransaction: (report) => {
-              const bellsRef = bellsReference || ref;
-              const base = `/student/payments/callback/${encodeURIComponent(bellsRef)}`;
               const finalUuid = report?.extractedFinalTxId ?? null;
-              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
-                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
-                navigate(`${base}?${qs}`);
-              } else {
-                navigate(base);
+              if (finalUuid) {
+                providerReferenceRef.current = finalUuid;
               }
             },
             onError: (e) => {
@@ -178,7 +178,17 @@ const CheckoutPage: React.FC = () => {
               setMsg(typeof m === 'string' ? m : t.failedInit);
             },
             onClosed: () => {
-              setShowUnresolved(true);
+              if (navigatedRef.current) return;
+              navigatedRef.current = true;
+              const bellsRef = bellsReference || ref;
+              const base = `/student/payments/callback/${encodeURIComponent(bellsRef)}`;
+              const finalUuid = providerReferenceRef.current;
+              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
+                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
+                navigate(`${base}?${qs}`);
+              } else {
+                navigate(base);
+              }
             },
           });
         } catch (_e: any) {
@@ -273,6 +283,8 @@ const CheckoutPage: React.FC = () => {
     }
     setContinuing(true);
     setMsg(null);
+    providerReferenceRef.current = null;
+    navigatedRef.current = false;
     try {
       const option: any = await studentFeeApi.getContinueOption(txId);
       if (!option?.canResume) {
@@ -308,13 +320,9 @@ const CheckoutPage: React.FC = () => {
         try {
           await launchAlatpayNativeModal(alatpayCheckout, {
             onReportTransaction: (report) => {
-              const base = `/student/payments/callback/${encodeURIComponent(bellsReference)}`;
               const finalUuid = report?.extractedFinalTxId ?? null;
-              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
-                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
-                navigate(`${base}?${qs}`);
-              } else {
-                navigate(base);
+              if (finalUuid) {
+                providerReferenceRef.current = finalUuid;
               }
             },
             onError: (e) => {
@@ -322,7 +330,16 @@ const CheckoutPage: React.FC = () => {
               setMsg(typeof m === 'string' ? m : t.failedInit);
             },
             onClosed: () => {
-              setShowUnresolved(true);
+              if (navigatedRef.current) return;
+              navigatedRef.current = true;
+              const base = `/student/payments/callback/${encodeURIComponent(bellsReference)}`;
+              const finalUuid = providerReferenceRef.current;
+              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
+                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
+                navigate(`${base}?${qs}`);
+              } else {
+                navigate(base);
+              }
             },
           });
         } catch (_e: any) {

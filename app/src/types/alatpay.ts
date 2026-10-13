@@ -38,8 +38,18 @@ export type AlatpayPublicCheckout = {
   readonly fallback: AlatpayPublicCheckoutFallback;
 };
 
+export type AlatpayTransactionSource = 'transaction' | 'success';
+
 export type AlatpayNativeModalLaunchCallbacks = {
   onReportTransaction: (context: {
+    bellsReference: string;
+    orderReference: string;
+    initPaymentReference: string;
+    providerTx: unknown;
+    extractedFinalTxId: string | null;
+    source: AlatpayTransactionSource;
+  }) => void;
+  onSuccess?: (context: {
     bellsReference: string;
     orderReference: string;
     initPaymentReference: string;

@@ -2,6 +2,7 @@ import type {
   AlatpayCheckoutEnv,
   AlatpayNativeModalLaunchCallbacks,
   AlatpayPublicCheckout,
+  AlatpayTransactionSource,
 } from '../types/alatpay';
 import { isAlatpayUuid } from '../types/alatpay';
 
@@ -160,17 +161,28 @@ export async function launchAlatpayNativeModal(
   }
   const fallback = checkout.fallback ?? {};
   let lastReportedFinalTxId: string | null = null;
-  const reportTransaction = (providerTx: unknown) => {
+  const reportTransaction = (providerTx: unknown, source: AlatpayTransactionSource) => {
     const finalTxId = extractAlatpayFinalTxId(providerTx);
     if (finalTxId && lastReportedFinalTxId === finalTxId) return;
     lastReportedFinalTxId = finalTxId;
-    callbacks.onReportTransaction({
+    const ctx = {
       bellsReference: String(checkout.metadata?.bells_payment_reference ?? ''),
       orderReference: String(checkout.metadata?.order_reference ?? ''),
       initPaymentReference: String(checkout.metadata?.init_payment_reference ?? ''),
       providerTx,
       extractedFinalTxId: finalTxId,
-    });
+      source,
+    };
+    callbacks.onReportTransaction(ctx);
+    if (source === 'success') {
+      callbacks.onSuccess?.({
+        bellsReference: ctx.bellsReference,
+        orderReference: ctx.orderReference,
+        initPaymentReference: ctx.initPaymentReference,
+        providerTx,
+        extractedFinalTxId: finalTxId,
+      });
+    }
   };
   const cfg = {
     apiKey: checkout.apiKey,
@@ -189,10 +201,10 @@ export async function launchAlatpayNativeModal(
       handshakeTimeoutMs: Number.isFinite(fallback.handshakeTimeoutMs) ? fallback.handshakeTimeoutMs : 4500,
     },
     onTransaction: (providerTx: unknown) => {
-      reportTransaction(providerTx);
+      reportTransaction(providerTx, 'transaction');
     },
     onSuccess: (providerTx: unknown) => {
-      reportTransaction(providerTx);
+      reportTransaction(providerTx, 'success');
     },
     onClose: () => {
       callbacks.onClosed?.();

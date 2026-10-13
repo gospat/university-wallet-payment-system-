@@ -57,6 +57,14 @@ const PaymentConfirmation: React.FC = () => {
   const alatpayHandleRef = useRef<{ close?: () => void } | null>(null);
   const navigatedRef = useRef(false);
   const popupPollActiveRef = useRef(false);
+  // Provider UUID captured from the SDK's onTransaction/onSuccess callbacks.
+  // The SDK may fire these while the transaction is still PENDING, so we MUST
+  // NOT navigate or close the popup from those callbacks. The UUID is only
+  // stored for potential later use; backend polling remains authoritative.
+  const providerReferenceRef = useRef<string | null>(null);
+  // Guards against overlapping in-flight status requests (e.g. when onSuccess
+  // triggers an immediate poll while a scheduled poll is already running).
+  const pollInFlightRef = useRef(false);
   const load = useCallback(async () => {
     if (!invoiceId) {
       setError('Missing invoice id');
@@ -160,6 +168,8 @@ const PaymentConfirmation: React.FC = () => {
         navigatedRef.current = false;
         alatpayHandleRef.current = null;
         popupPollActiveRef.current = false;
+        providerReferenceRef.current = null;
+        pollInFlightRef.current = false;
         if (pollTimerRef.current) {
           clearTimeout(pollTimerRef.current);
           pollTimerRef.current = null;
@@ -186,15 +196,19 @@ const PaymentConfirmation: React.FC = () => {
 
         const pollBackendStatus = async () => {
           if (!popupPollActiveRef.current || navigatedRef.current) return;
+          if (pollInFlightRef.current) return;
           const bellsRef = bellsReference || ref;
           if (!bellsRef) return;
+          pollInFlightRef.current = true;
           try {
             const r: any = await studentFeeApi.getPaymentStatus(bellsRef);
             const status = String(r?.status ?? '').toUpperCase();
             if (status === 'SUCCESS' || status === 'PAID') {
               // Backend has authoritatively confirmed the payment via the webhook.
-              // Dismiss the ALATPay popup if the SDK supports programmatic close,
-              // then transition the student to our confirmed Payment Successful screen.
+              // Dismiss the ALATPay popup, then navigate by Bells reference alone.
+              // We do NOT pass the provider UUID because the backend already has
+              // persisted SUCCESS; the callback page's polling will see it directly
+              // without needing a provider verification call.
               try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
               navigateToCallback(null);
               return;
@@ -206,22 +220,44 @@ const PaymentConfirmation: React.FC = () => {
             }
           } catch {
             // Network/API error while polling: NOT a failure. Keep polling.
+          } finally {
+            pollInFlightRef.current = false;
           }
           if (popupPollActiveRef.current && !navigatedRef.current) {
             pollTimerRef.current = setTimeout(pollBackendStatus, 2500);
           }
         };
 
+        // Triggers an immediate backend status check, cancelling any scheduled
+        // poll. Used when the SDK reports success — but the actual success
+        // decision still comes from the persisted backend status.
+        const triggerImmediateCheck = () => {
+          if (pollTimerRef.current) {
+            clearTimeout(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          if (popupPollActiveRef.current && !navigatedRef.current) {
+            void pollBackendStatus();
+          }
+        };
+
         try {
           const handle = await launchAlatpayNativeModal(alatpayCheckout, {
             onReportTransaction: (report) => {
+              // The SDK fires onTransaction as soon as the transaction is
+              // created, which may be while it is still PENDING. We therefore
+              // only capture the provider UUID — we must NOT navigate or close
+              // the popup here. Backend polling is authoritative.
               const finalUuid = report?.extractedFinalTxId ?? null;
-              // Navigate first so the provider reference is preserved via the
-              // navigatedRef guard. Then dismiss the ALATPay popup. The SDK
-              // renders its popup as iframes directly on document.body, so a
-              // plain React navigation would leave it on screen forever.
-              navigateToCallback(finalUuid);
-              try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
+              if (finalUuid) {
+                providerReferenceRef.current = finalUuid;
+              }
+            },
+            onSuccess: () => {
+              // SDK reports success — but financial SUCCESS requires persisted
+              // backend confirmation. Trigger an immediate backend poll; do
+              // NOT navigate or close the popup based on this callback alone.
+              triggerImmediateCheck();
             },
             onError: (e) => {
               const m = e?.message || 'Unable to initiate payment. Please try again shortly.';

@@ -529,7 +529,7 @@ test('K. ALATPAY CSP regression: Helmet + nginx connect-src BOTH include https:/
 //         and ONLY after strict isAlatpayUuid validation in alatpayCheckout.ts
 //         extractAlatpayFinalTxId (returns null for non-UUID values).
 //      c) If extractedFinalTxId is null → no query param, navigate to base URL.
-test('M. ALATPay callback URL wiring: extractedFinalTxId ?providerReference= appended after Bells ref path param only, Bells ref primary', () => {
+test('M. ALATPay callback URL wiring: onReportTransaction captures UUID only; navigateToCallback by Bells ref path param with optional providerReference query', () => {
   const fs = require('node:fs');
   const path = require('node:path');
   const filesToCheck = [
@@ -548,21 +548,21 @@ test('M. ALATPay callback URL wiring: extractedFinalTxId ?providerReference= app
     // Must append providerReference as QUERY PARAM (URLSearchParams or ?providerReference=):
     expect(txt).toMatch(/providerReference/);
     expect(txt).toMatch(/URLSearchParams/);
-    // Must NOT place provider UUID in URL path (only in query):
+    // onReportTransaction block: captures the provider UUID into a ref but does
+    // NOT navigate. Navigation is driven by the authoritative backend polling
+    // success path (pollBackendStatus), not by the SDK callback, because the
+    // SDK may fire onTransaction while the transaction is still PENDING.
     const onReportBlock = (txt.match(/onReportTransaction\s*:\s*\(([^)]*)\)\s*=>\s*\{([\s\S]*?)\n\s*\},/)?.[2] ?? '') +
                           (txt.match(/onReportTransaction\s*:\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\s*\},/)?.[2] ?? '');
-    expect(onReportBlock.length).toBeGreaterThan(40);
-    // Navigation may be direct (navigate(...)) or via a helper (navigateToCallback(...))
-    // that encapsulates the URL construction. Either is acceptable.
-    expect(onReportBlock).toMatch(/(?:navigate|navigateToCallback)\s*\(/);
+    expect(onReportBlock.length).toBeGreaterThan(20);
+    // onReportTransaction must NOT directly navigate (no navigate/navigateToCallback call):
+    expect(onReportBlock).not.toMatch(/(?:^|[^.\w])(?:navigate|navigateToCallback)\s*\(/);
     // URL wiring (Bells ref as path param, providerReference as query param,
-    // truthy-checked) is verified against the whole file since it may live in
-    // a navigateToCallback helper invoked from onReportTransaction.
+    // truthy-checked) is verified against the whole file since it lives in
+    // the navigateToCallback helper invoked from the backend polling success path.
     expect(txt).toMatch(/encodeURIComponent\s*\(\s*bells(?:Ref|Reference)/);
     expect(txt).toMatch(/providerReference/);
     // Safety: provider reference is truthy-checked before navigating with query param.
-    // The variable holding the provider reference may be named finalUuid,
-    // extractedFinalTxId, or providerReference depending on the component.
     expect(txt).toMatch(/(?:finalUuid|extractedFinalTxId|providerReference)\s*(?:&&|\?\?)|if\s*\(\s*(?:finalUuid|extractedFinalTxId|providerReference)/);
     base as any; // no-op to satisfy unused
   }
