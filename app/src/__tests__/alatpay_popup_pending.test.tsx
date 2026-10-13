@@ -299,3 +299,101 @@ it('Q: no SDK callback → backend polling alone drives navigation', async () =>
   expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
   expect(navigateMock).toHaveBeenCalledWith('/student/payments/callback/PAY-REF-001');
 });
+
+// ---- R. SDK onReportTransaction fires → closes popup + navigates ----------
+// The SDK can fire onTransaction (which we map to onReportTransaction) as soon
+// as the transaction is created — possibly while it is still PENDING. We must
+// dismiss the popup even then, because the callback page will poll the backend
+// for the authoritative status. Without close() the SDK's document.body iframes
+// would remain after navigation.
+
+it('R: onReportTransaction → closes popup AND navigates with providerReference', async () => {
+  let onReportTx: ((r: any) => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onReportTx = cb.onReportTransaction ?? null;
+    return { close: alatpayCloseMock };
+  });
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  act(() => {
+    onReportTx?.({
+      bellsReference: 'PAY-REF-001',
+      orderReference: 'ORD-1',
+      initPaymentReference: 'INIT-1',
+      providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
+      extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+    });
+  });
+
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledWith(
+    '/student/payments/callback/PAY-REF-001?providerReference=7162fb44-6d04-4590-ac65-a96061e272ab',
+  );
+});
+
+// ---- S. onReportTransaction preserves providerReference over onClosed ------
+// close() fires the SDK's onClose callback synchronously. Our onClosed handler
+// calls navigateToCallback(null). Because onReportTransaction navigated first
+// (with the provider reference), navigatedRef is already true, so the onClosed
+// navigation is a no-op and the provider reference is preserved.
+
+it('S: close() from onReportTransaction does not overwrite providerReference', async () => {
+  let onReportTx: ((r: any) => void) | null = null;
+  let onClosedCb: (() => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onReportTx = cb.onReportTransaction ?? null;
+    onClosedCb = cb.onClosed ?? null;
+    return {
+      close: () => {
+        alatpayCloseMock();
+        // Simulate the SDK firing onClose synchronously when close() is called.
+        onClosedCb?.();
+      },
+    };
+  });
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  act(() => {
+    onReportTx?.({
+      bellsReference: 'PAY-REF-001',
+      orderReference: 'ORD-1',
+      initPaymentReference: 'INIT-1',
+      providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
+      extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+    });
+  });
+
+  // Exactly one navigation — with the provider reference.
+  expect(navigateMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledWith(
+    '/student/payments/callback/PAY-REF-001?providerReference=7162fb44-6d04-4590-ac65-a96061e272ab',
+  );
+});
+
+// ---- T. Unmount while popup open → popup is closed ------------------------
+// The SDK appends its popup iframes to document.body, outside the React tree.
+// If the student navigates away (e.g. "Back to Invoices") while the popup is
+// open, the component must dismiss it on unmount.
+
+it('T: unmount while popup open → closes popup', async () => {
+  launchAlatpayMock.mockResolvedValue({ close: alatpayCloseMock });
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+
+  cleanup();
+
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+});

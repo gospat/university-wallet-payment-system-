@@ -116,10 +116,18 @@ const PaymentConfirmation: React.FC = () => {
   useEffect(() => {
     return () => {
       popupPollActiveRef.current = false;
+      // Mark as navigated so the SDK's onClose callback (fired by close()
+      // below) does not trigger an unwanted navigateToCallback.
+      navigatedRef.current = true;
       if (pollTimerRef.current) {
         clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
       }
+      // Dismiss the ALATPay popup. The SDK appends its popup iframes directly
+      // to document.body, so they survive React unmount unless explicitly
+      // closed. Without this, navigating away (e.g. "Back to Invoices") would
+      // leave a stuck "Payment Processing" overlay on screen.
+      try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
     };
   }, []);
 
@@ -208,7 +216,12 @@ const PaymentConfirmation: React.FC = () => {
           const handle = await launchAlatpayNativeModal(alatpayCheckout, {
             onReportTransaction: (report) => {
               const finalUuid = report?.extractedFinalTxId ?? null;
+              // Navigate first so the provider reference is preserved via the
+              // navigatedRef guard. Then dismiss the ALATPay popup. The SDK
+              // renders its popup as iframes directly on document.body, so a
+              // plain React navigation would leave it on screen forever.
               navigateToCallback(finalUuid);
+              try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
             },
             onError: (e) => {
               const m = e?.message || 'Unable to initiate payment. Please try again shortly.';
