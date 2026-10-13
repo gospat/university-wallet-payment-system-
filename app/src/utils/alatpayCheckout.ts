@@ -32,24 +32,30 @@ function isWindowAlatpayReady(): boolean {
 }
 
 function extractAlatpayFinalTxId(providerTx: unknown): string | null {
-  if (providerTx == null) return null;
-  // RESTRICTED to the ONLY officially-documented proven final transaction ID locations
-  // from the ALATPay SDK onTransaction callback:
-  //   1. providerTx.data.id (ALATPAY webhook-style Value.Data.Id equivalent)
-  //   2. providerTx.id
-  // Strict UUID-v4 validation applied. If neither contains a valid strict UUID-v4,
-  // return null — we deliberately refuse to pick up arbitrary nested
-  // correlationId, customerId, sessionId or other UUID-looking values.
-  if (typeof providerTx !== 'object') return null;
-  const root = providerTx as Record<string, unknown>;
-  const data = root.data;
-  if (data != null && typeof data === 'object') {
-    const inner = data as Record<string, unknown>;
-    if (isAlatpayUuid(inner.id)) return String(inner.id).trim();
-    if (isAlatpayUuid(inner.Id)) return String(inner.Id).trim();
+  if (providerTx == null || typeof providerTx !== 'object') return null;
+  const root = providerTx as Record<string, any>;
+  const candidates: Array<unknown> = [
+    root?.Value?.Data?.Id,
+    root?.Value?.Data?.id,
+    root?.data?.id,
+    root?.data?.Id,
+    root?.data?.transactionId,
+    root?.data?.TransactionId,
+    root?.Id,
+    root?.id,
+    root?.Value?.Data?.transactionId,
+    root?.Value?.Data?.TransactionId,
+    root?.transactionId,
+    root?.TransactionId,
+    root?.Customer?.TransactionId,
+    root?.Customer?.transactionId,
+    root?.data?.customer?.TransactionId,
+    root?.data?.customer?.transactionId,
+    root?.data?.customer?.transaction_id,
+  ];
+  for (const c of candidates) {
+    if (isAlatpayUuid(c)) return String(c).trim().toLowerCase();
   }
-  if (isAlatpayUuid(root.id)) return String(root.id).trim();
-  if (isAlatpayUuid(root.Id)) return String(root.Id).trim();
   return null;
 }
 
@@ -153,6 +159,19 @@ export async function launchAlatpayNativeModal(
     throw new Error('ALATPAY_SDK_NOT_AVAILABLE');
   }
   const fallback = checkout.fallback ?? {};
+  let lastReportedFinalTxId: string | null = null;
+  const reportTransaction = (providerTx: unknown) => {
+    const finalTxId = extractAlatpayFinalTxId(providerTx);
+    if (finalTxId && lastReportedFinalTxId === finalTxId) return;
+    lastReportedFinalTxId = finalTxId;
+    callbacks.onReportTransaction({
+      bellsReference: String(checkout.metadata?.bells_payment_reference ?? ''),
+      orderReference: String(checkout.metadata?.order_reference ?? ''),
+      initPaymentReference: String(checkout.metadata?.init_payment_reference ?? ''),
+      providerTx,
+      extractedFinalTxId: finalTxId,
+    });
+  };
   const cfg = {
     apiKey: checkout.apiKey,
     businessId: checkout.businessId,
@@ -170,13 +189,10 @@ export async function launchAlatpayNativeModal(
       handshakeTimeoutMs: Number.isFinite(fallback.handshakeTimeoutMs) ? fallback.handshakeTimeoutMs : 4500,
     },
     onTransaction: (providerTx: unknown) => {
-      callbacks.onReportTransaction({
-        bellsReference: String(checkout.metadata?.bells_payment_reference ?? ''),
-        orderReference: String(checkout.metadata?.order_reference ?? ''),
-        initPaymentReference: String(checkout.metadata?.init_payment_reference ?? ''),
-        providerTx,
-        extractedFinalTxId: extractAlatpayFinalTxId(providerTx),
-      });
+      reportTransaction(providerTx);
+    },
+    onSuccess: (providerTx: unknown) => {
+      reportTransaction(providerTx);
     },
     onClose: () => {
       callbacks.onClosed?.();

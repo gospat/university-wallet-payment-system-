@@ -2073,64 +2073,82 @@ describe('ALATPAY correlation + reference lifecycle (24 tests)', () => {
   //   providerTx.data.id only — must NOT pick correlationId or others.
   //   Exact copy of frontend extractAlatpayFinalTxId logic for test.
   // -----------------------------------------------------------------
-  it('T39 — UUID extractor only picks providerTx.data.id/providerTx.id and IGNORES nested correlationId/customerId/sessionId UUIDs', () => {
+  it('T39 — UUID extractor picks all 17 canonical shapes (Value.Data.Id, data.id, id, transactionId, Customer.TransactionId, ...) and IGNORES correlationId/customerId/sessionId', () => {
     setupBaseMocks();
-    // ---- Exact copy of frontend extractor (mirrors app/src/utils/alatpayCheckout.ts) ----
     const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const isAlatpayUuid = (s: any): boolean => typeof s === 'string' && UUID_V4_RE.test(s.trim());
     const extract = (providerTx: unknown): string | null => {
-      if (providerTx == null) return null;
-      if (typeof providerTx !== 'object') return null;
-      const root = providerTx as Record<string, unknown>;
-      const data = root.data;
-      if (data != null && typeof data === 'object') {
-        const inner = data as Record<string, unknown>;
-        if (isAlatpayUuid(inner.id)) return String(inner.id).trim();
-        if (isAlatpayUuid(inner.Id)) return String(inner.Id).trim();
+      if (providerTx == null || typeof providerTx !== 'object') return null;
+      const root = providerTx as Record<string, any>;
+      const candidates: Array<unknown> = [
+        root?.Value?.Data?.Id,
+        root?.Value?.Data?.id,
+        root?.data?.id,
+        root?.data?.Id,
+        root?.data?.transactionId,
+        root?.data?.TransactionId,
+        root?.Id,
+        root?.id,
+        root?.Value?.Data?.transactionId,
+        root?.Value?.Data?.TransactionId,
+        root?.transactionId,
+        root?.TransactionId,
+        root?.Customer?.TransactionId,
+        root?.Customer?.transactionId,
+        root?.data?.customer?.TransactionId,
+        root?.data?.customer?.transactionId,
+        root?.data?.customer?.transaction_id,
+      ];
+      for (const c of candidates) {
+        if (isAlatpayUuid(c)) return String(c).trim().toLowerCase();
       }
-      if (isAlatpayUuid(root.id)) return String(root.id).trim();
-      if (isAlatpayUuid(root.Id)) return String(root.Id).trim();
       return null;
     };
-    // CASE A: correlationId UUID + unrelated customerId UUID + correct data.id
     const CORRELATION_UUID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const CUSTOMER_UUID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
     const SESSION_UUID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
     const REAL_TX_UUID = FINAL_UUID;
-    const payloadCorrectDataId = {
+
+    // All 17 canonical shapes resolve to the real UUID.
+    const shapes: Array<Record<string, any>> = [
+      { Value: { Data: { Id: REAL_TX_UUID } } },
+      { Value: { Data: { id: REAL_TX_UUID } } },
+      { data: { id: REAL_TX_UUID } },
+      { data: { Id: REAL_TX_UUID } },
+      { data: { transactionId: REAL_TX_UUID } },
+      { data: { TransactionId: REAL_TX_UUID } },
+      { Id: REAL_TX_UUID },
+      { id: REAL_TX_UUID },
+      { Value: { Data: { transactionId: REAL_TX_UUID } } },
+      { Value: { Data: { TransactionId: REAL_TX_UUID } } },
+      { transactionId: REAL_TX_UUID },
+      { TransactionId: REAL_TX_UUID },
+      { Customer: { TransactionId: REAL_TX_UUID } },
+      { Customer: { transactionId: REAL_TX_UUID } },
+      { data: { customer: { TransactionId: REAL_TX_UUID } } },
+      { data: { customer: { transactionId: REAL_TX_UUID } } },
+      { data: { customer: { transaction_id: REAL_TX_UUID } } },
+    ];
+    for (const shape of shapes) {
+      expect(extract(shape)).toBe(REAL_TX_UUID.toLowerCase());
+    }
+
+    // Priority: Value.Data.Id wins over data.id when both present.
+    expect(extract({ Value: { Data: { Id: REAL_TX_UUID } }, data: { id: '11111111-1111-4111-8111-111111111111' } }))
+      .toBe(REAL_TX_UUID.toLowerCase());
+
+    // correlationId / customerId / sessionId are NEVER picked (not in candidate list).
+    const payloadWithNoise = {
       correlationId: CORRELATION_UUID,
       customerId: CUSTOMER_UUID,
       sessionId: SESSION_UUID,
-      id: null as any,
-      data: { id: REAL_TX_UUID, status: 'SUCCESSFUL' },
-      nested: { deep: { anotherRandomUuid: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' } },
+      data: { status: 'SUCCESSFUL' },
     };
-    expect(extract(payloadCorrectDataId)).toBe(REAL_TX_UUID);
-    expect(extract(payloadCorrectDataId)).not.toBe(CORRELATION_UUID);
-    expect(extract(payloadCorrectDataId)).not.toBe(CUSTOMER_UUID);
-    // CASE B: only correlationId and customerId UUIDs present; NO data.id, NO top-level.id => return null
-    const payloadOnlyCorrelation = {
-      correlationId: CORRELATION_UUID,
-      customerId: CUSTOMER_UUID,
-      sessionId: SESSION_UUID,
-      data: { status: 'PENDING' },
-    };
-    expect(extract(payloadOnlyCorrelation)).toBeNull();
-    // CASE C: valid top-level .id (real tx) present alongside random nested ones => picks .id
-    const payloadTopId = {
-      correlationId: CORRELATION_UUID,
-      reference: ORDER_REF,
-      id: REAL_TX_UUID,
-      inner: { someOther: SESSION_UUID },
-    };
-    expect(extract(payloadTopId)).toBe(REAL_TX_UUID);
-    // CASE D: malformed non-UUID v4 string in .data.id => return null, not that string
-    const payloadMalformedId = {
-      id: 'not-a-uuid',
-      data: { id: 'PAY-123' },
-      correlationId: CORRELATION_UUID,
-    };
-    expect(extract(payloadMalformedId)).toBeNull();
+    expect(extract(payloadWithNoise)).toBeNull();
+
+    // Malformed non-UUID v4 strings are rejected.
+    expect(extract({ id: 'not-a-uuid', data: { id: 'PAY-123' } })).toBeNull();
+    expect(extract({ Value: { Data: { Id: ORDER_REF } } })).toBeNull();
   });
 
   // -----------------------------------------------------------------
