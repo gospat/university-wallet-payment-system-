@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams, Link } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Loader2, CreditCard, Receipt, ShieldCheck, User, GraduationCap, Calculator } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
@@ -47,6 +47,16 @@ const PaymentConfirmation: React.FC = () => {
   const [checkoutMode, setCheckoutMode] = useState<'hosted_url_iframe' | 'alatpay_native_modal_v1' | undefined>(undefined);
   const [alatpayNativeModal, setAlatpayNativeModal] = useState<any>(null);
   const [alatpayRefs, setAlatpayRefs] = useState<any>(null);
+
+  // Refs for backend status polling while the ALATPay popup is open.
+  // The popup has been observed to remain on "Payment Processing/Pending"
+  // even after our backend confirms SUCCESS via the webhook, so we monitor
+  // the authoritative persisted backend state and transition the student
+  // ourselves once the webhook-driven posting completes.
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alatpayHandleRef = useRef<{ close?: () => void } | null>(null);
+  const navigatedRef = useRef(false);
+  const popupPollActiveRef = useRef(false);
   const load = useCallback(async () => {
     if (!invoiceId) {
       setError('Missing invoice id');
@@ -103,6 +113,16 @@ const PaymentConfirmation: React.FC = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    return () => {
+      popupPollActiveRef.current = false;
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const proceed = async () => {
     if (!payload || proceeding) return;
     setProceeding(true);
@@ -129,30 +149,88 @@ const PaymentConfirmation: React.FC = () => {
       const ref = (init as any)?.reference || (init as any)?.data?.reference || '';
       if (checkoutPopupMode === 'alatpay_native_modal_v1' && alatpayCheckout) {
         const bellsReference = alatpayRef?.bells_reference || ref;
+        navigatedRef.current = false;
+        alatpayHandleRef.current = null;
+        popupPollActiveRef.current = false;
+        if (pollTimerRef.current) {
+          clearTimeout(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
+
+        const navigateToCallback = (providerReference?: string | null) => {
+          if (navigatedRef.current) return;
+          navigatedRef.current = true;
+          popupPollActiveRef.current = false;
+          if (pollTimerRef.current) {
+            clearTimeout(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          const bellsRef = bellsReference || ref;
+          if (!bellsRef) return;
+          const base = `/student/payments/callback/${encodeURIComponent(bellsRef)}`;
+          if (providerReference && typeof providerReference === 'string' && providerReference.trim()) {
+            const qs = new URLSearchParams({ providerReference: providerReference.trim() }).toString();
+            navigate(`${base}?${qs}`);
+          } else {
+            navigate(base);
+          }
+        };
+
+        const pollBackendStatus = async () => {
+          if (!popupPollActiveRef.current || navigatedRef.current) return;
+          const bellsRef = bellsReference || ref;
+          if (!bellsRef) return;
+          try {
+            const r: any = await studentFeeApi.getPaymentStatus(bellsRef);
+            const status = String(r?.status ?? '').toUpperCase();
+            if (status === 'SUCCESS' || status === 'PAID') {
+              // Backend has authoritatively confirmed the payment via the webhook.
+              // Dismiss the ALATPay popup if the SDK supports programmatic close,
+              // then transition the student to our confirmed Payment Successful screen.
+              try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
+              navigateToCallback(null);
+              return;
+            }
+            if (status === 'FAILED' || status === 'REVERSED' || status === 'REFUNDED') {
+              try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
+              navigateToCallback(null);
+              return;
+            }
+          } catch {
+            // Network/API error while polling: NOT a failure. Keep polling.
+          }
+          if (popupPollActiveRef.current && !navigatedRef.current) {
+            pollTimerRef.current = setTimeout(pollBackendStatus, 2500);
+          }
+        };
+
         try {
-          await launchAlatpayNativeModal(alatpayCheckout, {
+          const handle = await launchAlatpayNativeModal(alatpayCheckout, {
             onReportTransaction: (report) => {
-              const bellsRef = bellsReference || ref;
-              const base = `/student/payments/callback/${encodeURIComponent(bellsRef)}`;
               const finalUuid = report?.extractedFinalTxId ?? null;
-              if (finalUuid && typeof finalUuid === 'string' && finalUuid.trim()) {
-                const qs = new URLSearchParams({ providerReference: finalUuid.trim() }).toString();
-                navigate(`${base}?${qs}`);
-              } else {
-                navigate(base);
-              }
+              navigateToCallback(finalUuid);
             },
             onError: (e) => {
               const m = e?.message || 'Unable to initiate payment. Please try again shortly.';
               setMsg(typeof m === 'string' ? m : 'Unable to initiate payment. Please try again shortly.');
             },
             onClosed: () => {
-              const bellsRef = bellsReference || ref;
-              if (bellsRef) {
-                navigate(`/student/payments/callback/${encodeURIComponent(bellsRef)}`);
+              // Popup closed by the student or by the SDK. Stop polling and
+              // navigate to the callback page so the persisted backend status
+              // (which may already be SUCCESS via the webhook) is reflected.
+              popupPollActiveRef.current = false;
+              if (pollTimerRef.current) {
+                clearTimeout(pollTimerRef.current);
+                pollTimerRef.current = null;
               }
+              navigateToCallback(null);
             },
           });
+          alatpayHandleRef.current = handle ?? null;
+          // Begin monitoring the authoritative persisted backend status
+          // immediately, even while the ALATPay popup remains open.
+          popupPollActiveRef.current = true;
+          pollTimerRef.current = setTimeout(pollBackendStatus, 2500);
         } catch (_e: any) {
           const m = _e?.message || 'Unable to initiate payment';
           setMsg(typeof m === 'string' ? m : 'Unable to initiate payment');

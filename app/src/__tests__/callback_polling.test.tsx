@@ -311,7 +311,7 @@ it('C: popup close without SDK callback navigates to callback page (no failure d
     'utf8',
   );
   expect(src).toMatch(/onClosed:\s*\(\)\s*=>\s*\{/);
-  expect(src).toMatch(/navigate\(`\/student\/payments\/callback\/\$\{encodeURIComponent\(bellsRef\)\}`\)/);
+  expect(src).toMatch(/navigateToCallback\(null\)/);
   // onClosed must NOT set any error/failure state
   expect(src).not.toMatch(/onClosed[^}]*setMsg[^}]*[Ff]ail/);
 });

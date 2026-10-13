@@ -151,7 +151,7 @@ export function loadAlatpaySdk(env?: AlatpayCheckoutEnv): Promise<void> {
 export async function launchAlatpayNativeModal(
   checkout: AlatpayPublicCheckout,
   callbacks: AlatpayNativeModalLaunchCallbacks,
-): Promise<void> {
+): Promise<{ close?: () => void } | null> {
   await loadAlatpaySdk();
   const Alatpay = (window as any).Alatpay;
   if (!Alatpay || typeof Alatpay.setup !== 'function') {
@@ -206,6 +206,12 @@ export async function launchAlatpayNativeModal(
     } else {
       callbacks.onError?.({ code: 'ALATPAY_SDK_NO_OPEN', message: 'SDK did not expose an open/show method.' });
     }
+    // Return the handle so the caller can attempt a programmatic close() if
+    // the SDK exposes one. ALATPay's popup has been observed to remain on
+    // "Payment Processing/Pending" even after our backend confirms SUCCESS
+    // via the webhook, so we need a way to dismiss it ourselves.
+    const close = typeof handle.close === 'function' ? handle.close.bind(handle) : undefined;
+    return { close };
   } catch (err: any) {
     callbacks.onError?.({
       code: err?.code ?? 'ALATPAY_NATIVE_LAUNCH_ERROR',
