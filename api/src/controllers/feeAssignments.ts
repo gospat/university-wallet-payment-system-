@@ -18,6 +18,11 @@ import {
   CancelInvoiceBodySchema,
   InvoiceCancellationService,
 } from '../services/invoiceCancellation';
+import {
+  acquireInvoiceOperationLock,
+  releaseInvoiceOperationLockByToken,
+} from '../utils/invoiceLock';
+import { AppError } from '../utils/AppError';
 
 const IdParam = z.object({ id: z.coerce.number().int().positive() });
 const InvoiceIdParam = z.object({ id: z.coerce.number().int().positive() });
@@ -51,6 +56,17 @@ const setInvoiceActive = (isActive: boolean) => [
       return res.status(401).json({ status: 'fail', message: 'Authentication required' });
     }
     const invoiceId = Number(req.params.id);
+
+    // Acquire the invoice operation lock so enable/disable cannot race
+    // initiatePayment (which also acquires this lock before mutating).
+    const invoiceLock = await acquireInvoiceOperationLock(invoiceId, 8_000);
+    if (!invoiceLock.ok) {
+      throw new AppError(
+        'Another operation is currently in progress for this invoice. Please wait a moment and try again.',
+        429,
+      );
+    }
+    try {
     const invoice = await prisma.invoice.findUnique({
       where: { id: invoiceId },
       select: { id: true, invoiceNumber: true, isActive: true, status: true, amountDue: true, amountPaid: true },
@@ -102,6 +118,17 @@ const setInvoiceActive = (isActive: boolean) => [
       data: { invoice: updated },
       message: isActive ? 'Invoice enabled.' : 'Invoice disabled.',
     });
+    } finally {
+      try {
+        await releaseInvoiceOperationLockByToken(invoiceId, invoiceLock.ok ? invoiceLock.token : null, {
+          acquiredAtMs: invoiceLock.ok ? invoiceLock.acquiredAtMs : undefined,
+          ttlMs: invoiceLock.ok ? invoiceLock.ttlMs : undefined,
+          opName: isActive ? 'enableInvoice' : 'disableInvoice',
+        });
+      } catch {
+        /* CAS release failed; allow TTL auto-expiry */
+      }
+    }
   }),
 ];
 

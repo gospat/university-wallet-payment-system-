@@ -617,10 +617,17 @@ export class PaymentService {
           session: true,
           semester: true,
           feeId: true,
+          isActive: true,
           fee: { select: { id: true, name: true, feeCode: true, categoryId: true } },
         },
       });
       if (!invRelock) throw new AppError(i18n.errors.invoice.notFound, 404);
+      if (invRelock.isActive === false) {
+        throw new AppError(
+          'Payment for this invoice is currently disabled. Please contact the Bursary.',
+          403,
+        );
+      }
       if (
         invRelock.status === 'PAID' ||
         invRelock.status === 'CANCELLED' ||
@@ -1873,6 +1880,76 @@ export class PaymentService {
             receipt: null,
             reconciliationException: true,
             reconciliationExceptionKind: 'PAID_INVOICE_LATE_SUCCESS',
+            noLedgerPosted: true,
+            noReceiptIssued: true,
+            noInvoiceAmountPosted: true,
+          };
+        }
+
+        // --- PARTIAL INVOICE LATE SUCCESS / OVER-CREDIT GUARD ---
+        // If a prior payment attempt already partially credited this invoice
+        // (amountPaid > 0 but < amountDue), and this new authoritative SUCCESS
+        // would push amountPaid beyond amountDue, we MUST NOT over-credit.
+        // remainingBalance = amountDue - amountPaid. If baseAmount >
+        // remainingBalance, posting would create amountPaid > amountDue.
+        // Preserve the SUCCESS tx for audit, flag reconciliation exception,
+        // and skip ALL financial posting (invoice credit, receipt, GL).
+        // Admin/Bursary reconcile the partial overpayment manually.
+        const remainingBalance = +(before.amountDue - before.amountPaid).toFixed(2);
+        if (baseAmount > remainingBalance + 0.001) {
+          await tx.auditLog.create({
+            data: {
+              userId: (opts.req as any)?.user?.id ?? null,
+              action: 'PAYMENT_SUCCESS_OVER_REMAINING_BALANCE',
+              entityType: 'TRANSACTION',
+              entityId: String(latest.id),
+              oldValue: {
+                status: String(latest.status),
+                invoiceStatus: String(before.status),
+                invoiceAmountPaid: before.amountPaid,
+                invoiceAmountDue: before.amountDue,
+                invoiceRemainingBalance: remainingBalance,
+                invoiceId,
+              } as Prisma.InputJsonValue,
+              newValue: {
+                status: TransactionStatus.SUCCESS,
+                providerRef,
+                paidNaira,
+                baseAmount,
+                txGateway,
+              } as Prisma.InputJsonValue,
+              details: {
+                code: 'PARTIAL_INVOICE_OVERPAYMENT',
+                note:
+                  'Provider reported SUCCESS but this invoice was already partially paid by a prior attempt, and this payment would push amountPaid beyond amountDue. Transaction is recorded SUCCESS for audit; no invoice credit, receipt, or ledger was posted to prevent over-crediting. The overpayment requires Bursary reconciliation.',
+                invoiceId,
+                invoiceNumber: latest.invoice.invoiceNumber,
+                transactionId: latest.id,
+                reference: latest.reference,
+                providerRef,
+                paidAt: paidAt.toISOString(),
+                paidNaira,
+                baseAmount,
+                invoiceAmountDue: before.amountDue,
+                invoiceAmountPaid: before.amountPaid,
+                invoiceRemainingBalance: remainingBalance,
+                overpaymentAmount: +(baseAmount - remainingBalance).toFixed(2),
+              } as Prisma.InputJsonValue,
+              ipAddress: opts.req?.ip ?? (opts.req?.headers?.['x-forwarded-for'] as string | undefined)?.split(',')[0] ?? null,
+              userAgent: opts.req?.headers?.['user-agent'] ?? null,
+            },
+          });
+          const auditForTx = await tx.transaction.findUnique({
+            where: { id: latest.id },
+          });
+          return {
+            verified: true,
+            status: TransactionStatus.SUCCESS,
+            transaction: auditForTx ?? latest,
+            invoice: latest.invoice,
+            receipt: null,
+            reconciliationException: true,
+            reconciliationExceptionKind: 'PARTIAL_INVOICE_OVERPAYMENT',
             noLedgerPosted: true,
             noReceiptIssued: true,
             noInvoiceAmountPosted: true,
