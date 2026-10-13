@@ -60,6 +60,7 @@ const CallbackPage: React.FC = () => {
   const cancelledRef = useRef(false);
   const startedAtRef = useRef<number>(Date.now());
   const pollSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
 
   const clearTimers = useCallback(() => {
     if (timerRef.current) {
@@ -85,6 +86,7 @@ const CallbackPage: React.FC = () => {
 
   const pollStatus = useCallback(async (): Promise<string | null> => {
     if (!ref || cancelledRef.current) return null;
+    inFlightRef.current = true;
     const seq = ++pollSeqRef.current;
     try {
       const r: any = await studentFeeApi.getPaymentStatus(ref);
@@ -94,6 +96,10 @@ const CallbackPage: React.FC = () => {
       return status || null;
     } catch {
       return null;
+    } finally {
+      if (seq === pollSeqRef.current) {
+        inFlightRef.current = false;
+      }
     }
   }, [ref, applyStatusData]);
 
@@ -101,6 +107,11 @@ const CallbackPage: React.FC = () => {
     if (cancelledRef.current) return;
     const elapsed = Date.now() - startedAtRef.current;
     if (elapsed >= MAX_POLL_MS) return;
+    // Guarantee at most ONE scheduled polling timer at any time.
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     const interval = elapsed < FAST_PHASE_MS ? FAST_INTERVAL_MS : SLOW_INTERVAL_MS;
     timerRef.current = setTimeout(async () => {
       const status = await pollStatus();
@@ -119,6 +130,12 @@ const CallbackPage: React.FC = () => {
   }, [pollStatus]);
 
   const forceCheckNow = useCallback(async () => {
+    // Cancel any currently scheduled polling timeout before doing an
+    // immediate check, so we never have more than one polling chain.
+    clearTimers();
+    // If a status request is already in flight, do NOT start a parallel one.
+    // The in-flight request will reschedule on completion if still pending.
+    if (inFlightRef.current) return;
     const status = await pollStatus();
     if (cancelledRef.current) return;
     if (status && TERMINAL_SUCCESS.has(status)) {
@@ -132,12 +149,13 @@ const CallbackPage: React.FC = () => {
     }
     setStage('pending');
     scheduleNext();
-  }, [pollStatus, scheduleNext]);
+  }, [pollStatus, scheduleNext, clearTimers]);
 
   useEffect(() => {
     cancelledRef.current = false;
     startedAtRef.current = Date.now();
     pollSeqRef.current = 0;
+    inFlightRef.current = false;
 
     if (!ref) {
       setStage('unknown');

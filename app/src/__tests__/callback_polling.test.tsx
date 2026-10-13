@@ -315,3 +315,193 @@ it('C: popup close without SDK callback navigates to callback page (no failure d
   // onClosed must NOT set any error/failure state
   expect(src).not.toMatch(/onClosed[^}]*setMsg[^}]*[Ff]ail/);
 });
+
+// =============================================================================
+// Polling concurrency guarantees (single chain, no duplicate in-flight)
+// =============================================================================
+
+function clickCheckStatusNow() {
+  const btn = Array.from(container.querySelectorAll('button')).find(
+    (b) => /check status/i.test(b.textContent ?? ''),
+  );
+  if (!btn) throw new Error('Check Status Now button not found');
+  act(() => { (btn as HTMLButtonElement).click(); });
+}
+
+// ---- K. Repeated focus events → one polling chain -------------------------
+
+it('K: repeated focus events do not create multiple polling chains', async () => {
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING', reference: 'PAY-TEST' });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  // Initial poll has completed; one timer scheduled.
+  const callsAfterLoad = getPaymentStatusMock.mock.calls.length;
+
+  // Fire several focus events synchronously while no request is in flight
+  // (after the initial poll resolved). With the concurrency fix, only the
+  // first forceCheckNow starts a request; the rest see inFlightRef=true and
+  // return early.
+  await act(async () => {
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new Event('focus'));
+    await Promise.resolve();
+  });
+
+  // Exactly ONE additional poll from the focus burst (not three).
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 1);
+
+  // Advance one interval — only ONE scheduled poll fires (single chain).
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 2);
+});
+
+// ---- L. visibility + focus together → no duplicate polling ----------------
+
+it('L: visibilitychange and focus together do not duplicate polling', async () => {
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING', reference: 'PAY-TEST' });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  const callsAfterLoad = getPaymentStatusMock.mock.calls.length;
+
+  // Fire visibility + focus events back-to-back.
+  await act(async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+  });
+
+  // Only ONE immediate poll should result from the burst.
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 1);
+
+  // Advance one interval → exactly one scheduled poll.
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 2);
+});
+
+// ---- M. Repeated "Check Status Now" clicks → no parallel timers -----------
+
+it('M: repeated Check Status Now clicks do not create parallel polling timers', async () => {
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING', reference: 'PAY-TEST' });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  const callsAfterLoad = getPaymentStatusMock.mock.calls.length;
+
+  // Click the button several times rapidly.
+  await act(async () => {
+    clickCheckStatusNow();
+    clickCheckStatusNow();
+    clickCheckStatusNow();
+    await Promise.resolve();
+  });
+
+  // Only ONE immediate poll.
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 1);
+
+  // Advance one interval → one scheduled poll, proving only one timer exists.
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 2);
+
+  // Advance another interval → still only one poll (no duplicate chains).
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterLoad + 3);
+});
+
+// ---- N. Stale PENDING cannot overwrite a newer SUCCESS --------------------
+
+it('N: an old/stale PENDING response cannot overwrite a newer SUCCESS', async () => {
+  // First poll returns PENDING; second poll returns SUCCESS.
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING', reference: 'PAY-TEST' })
+    .mockResolvedValueOnce({ status: 'PENDING', reference: 'PAY-TEST' })
+    .mockResolvedValueOnce({
+      status: 'SUCCESS', reference: 'PAY-TEST', amount: 100,
+      receipt: { receiptNumber: 'RCPT/2026/STALE' },
+    });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  // Advance to the SUCCESS poll.
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+
+  // UI shows SUCCESS.
+  expect(text()).toMatch(/successful|success/i);
+
+  // Now make the backend return PENDING. Because polling stops on SUCCESS,
+  // no automatic poll runs. Even if a manual check returned PENDING, the
+  // seq guard (pollSeqRef) ensures a stale lower-seq response cannot
+  // overwrite the terminal SUCCESS state.
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING', reference: 'PAY-TEST' });
+
+  // Advance well past any interval — no poll should fire (polling stopped).
+  await act(async () => { vi.advanceTimersByTime(30000); await Promise.resolve(); });
+
+  // UI must still show SUCCESS.
+  expect(text()).toMatch(/successful|success/i);
+  expect(text()).not.toMatch(/pending|confirming|waiting/i);
+
+  // Source-level guard: the seq check exists so a stale response is dropped.
+  const src = require('node:fs').readFileSync(
+    require('node:path').resolve(__dirname, '..', 'pages', 'student', 'Callback.tsx'),
+    'utf8',
+  );
+  expect(src).toMatch(/pollSeqRef/);
+  expect(src).toMatch(/seq\s*!==\s*pollSeqRef\.current/);
+});
+
+// ---- O. SUCCESS stops all future polling ----------------------------------
+
+it('O: SUCCESS stops all future automatic polling', async () => {
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING', reference: 'PAY-TEST' })
+    .mockResolvedValueOnce({
+      status: 'SUCCESS', reference: 'PAY-TEST', amount: 100,
+      receipt: { receiptNumber: 'RCPT/2026/STOP' },
+    });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  // Advance to SUCCESS.
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+
+  expect(text()).toMatch(/successful|success/i);
+
+  // Now capture the call count AFTER success.
+  const callsAfterSuccess = getPaymentStatusMock.mock.calls.length;
+
+  // Advance far past any polling interval.
+  await act(async () => { vi.advanceTimersByTime(60000); await Promise.resolve(); });
+
+  // No additional polls should have been made after SUCCESS.
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsAfterSuccess);
+});
+
+// ---- P. Unmount stops polling (regression) --------------------------------
+
+it('P: component unmount cancels timers and prevents stale state updates', async () => {
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING', reference: 'PAY-TEST' });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  const callsBefore = getPaymentStatusMock.mock.calls.length;
+
+  // Unmount.
+  cleanup();
+
+  // Advance timers — no further polls.
+  await act(async () => { vi.advanceTimersByTime(30000); await Promise.resolve(); });
+
+  expect(getPaymentStatusMock.mock.calls.length).toBe(callsBefore);
+});
