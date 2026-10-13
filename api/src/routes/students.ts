@@ -51,6 +51,8 @@ import {
   confirmPayloadValidator,
   getContinueOption,
   getContinueOptionValidator,
+  getPaymentStatus,
+  getPaymentStatusValidator,
   initiatePayment,
   initiatePaymentValidator,
   verifyPayment,
@@ -62,6 +64,7 @@ import { PaymentService, InitiatePaymentSchema } from '../services/payment';
 import { Prisma } from '@prisma/client';
 import { generateInvoiceReference } from '../utils/paystack';
 import { isAlatpayUuid } from '../utils/alatpay';
+import { yearFromSession } from '../utils/yearlyCounter';
 
 const router = express.Router();
 
@@ -113,6 +116,13 @@ router.get(
   restrictTo(Role.STUDENT),
   ...(verifyPaymentValidator as any),
   verifyPayment,
+);
+router.get(
+  '/payments/status/:reference',
+  protect,
+  restrictTo(Role.STUDENT),
+  getPaymentStatusValidator,
+  getPaymentStatus,
 );
 router.get(
   '/payments/:transactionId/continue-option',
@@ -701,7 +711,7 @@ async function ensureInvoiceForFee(studentId: number, feeId: number, opts?: { id
     )) as unknown as Array<{ next_id: number }>;
     let nextId = Number(baseRow?.[0]?.next_id ?? 0);
     if (Number.isNaN(nextId) || nextId <= 0) nextId = 1;
-    const fiscalYear = fee.academicSession?.split('/')?.[0] ?? String(new Date().getFullYear());
+    const fiscalYear = yearFromSession(fee.academicSession);
     const invRef = generateInvoiceReference(nextId, fiscalYear);
     return tx.invoice.create({
       data: {
@@ -795,9 +805,7 @@ async function ensureInvoiceForFeeAssignment(studentId: number, assignmentId: nu
     )) as unknown as Array<{ next_id: number }>;
     let nextId = Number(baseRow?.[0]?.next_id ?? 0);
     if (Number.isNaN(nextId) || nextId <= 0) nextId = 1;
-    const fiscalYear = (fee.academicSession && fee.academicSession.split('/')?.[0])
-      ?? ((assignment as any).session && (assignment as any).session.split('/')?.[0])
-      ?? String(new Date().getFullYear());
+    const fiscalYear = yearFromSession(fee.academicSession || (assignment as any).session);
     const invRef = generateInvoiceReference(nextId, fiscalYear);
     return tx.invoice.create({
       data: {

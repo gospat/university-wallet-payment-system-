@@ -96,7 +96,8 @@ function pad(n: number, width: number): string {
  * for formal invoice numbers (auditors prefer contiguous, human-typable refs).
  */
 export function generateInvoiceReference(nextId: number, year?: string): string {
-  const fiscal = year ?? String(new Date().getFullYear());
+  const trimmed = year != null ? String(year).trim() : '';
+  const fiscal = trimmed.length > 0 ? trimmed : String(new Date().getFullYear());
   return `INV/${fiscal}/${pad(nextId, 5)}`;
 }
 

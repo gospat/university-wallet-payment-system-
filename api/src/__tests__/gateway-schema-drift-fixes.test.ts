@@ -633,7 +633,9 @@ test('N. providerReference strict validation — malformed values are rejected; 
   expect(callbackSrc).toMatch(/isAlatpayUuid\(\s*t\s*\)/);
   expect(callbackSrc).toMatch(/return\s*null/);
   expect(callbackSrc).toMatch(/verifyPayment\(\s*ref\s*,/);
-  expect(callbackSrc).toMatch(/providerReferenceOpt\s*\?\s*\{\s*providerReference:\s*providerReferenceOpt\s*\}\s*:\s*undefined/);
+  // providerReferenceOpt is already UUID-validated in the useMemo (isAlatpayUuid),
+  // so it's safe to pass directly to verifyPayment (the surrounding if guards null).
+  expect(callbackSrc).toMatch(/\{\s*providerReference:\s*providerReferenceOpt\s*\}/);
 
   // ============== 5) Paystack legacy path UNCHANGED (no providerReference required, works with just ref) ==============
   const paystackSrc = require('node:fs').readFileSync(

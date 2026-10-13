@@ -114,35 +114,85 @@ export interface DispatchEmailArgs {
   forceSmtp?: boolean;
 }
 
+interface PendingLogResult {
+  id: bigint;
+  enqueue: boolean;
+}
+
 async function createPendingDeliveryLog(
   args: DispatchEmailArgs,
   idempotencyKey: string,
   provider: EmailProviderType,
-): Promise<bigint | null> {
+): Promise<PendingLogResult | null> {
+  const trimmedKey = idempotencyKey.slice(0, 128);
   try {
     const emailType = normalizeEmailType(args.emailType);
     const summary = sanitizeEmailPayload({ ...(args.payload || {}), emailType: args.emailType });
     const recipientIdNum = args.recipientId !== undefined && args.recipientId !== null
       ? Number(args.recipientId)
       : null;
-    const row = await prisma.emailDeliveryLog.create({
-      data: {
-        emailType,
-        toAddress: String(args.to).slice(0, 254),
-        recipientId: Number.isFinite(recipientIdNum) && recipientIdNum !== null ? recipientIdNum : null,
-        triggeredByAdminId: args.triggeredByAdminId ?? null,
-        studentImportId: args.studentImportId ?? null,
-        idempotencyKey: idempotencyKey.slice(0, 128),
-        provider,
-        status: EmailDeliveryStatus.PENDING,
-        attempts: 0,
-        payloadSummary: summary as any,
-      },
-      select: { id: true },
+
+    // 1. Check persistent idempotency state FIRST — the database
+    //    idempotencyKey is the source of truth for dedup.
+    const existing = await prisma.emailDeliveryLog.findFirst({
+      where: { idempotencyKey: trimmedKey },
+      select: { id: true, status: true },
     });
-    return row.id;
+
+    if (existing) {
+      const st = String(existing.status);
+      // Already queued / sent / retrying: do NOT enqueue another copy.
+      if (st === EmailDeliveryStatus.PENDING || st === EmailDeliveryStatus.SENT || st === EmailDeliveryStatus.RETRIED) {
+        return { id: existing.id, enqueue: false };
+      }
+      // FAILED: allow a fresh retry attempt. Reset to PENDING.
+      if (st === EmailDeliveryStatus.FAILED) {
+        await prisma.emailDeliveryLog.update({
+          where: { id: existing.id },
+          data: { status: EmailDeliveryStatus.PENDING, lastError: null, retryAfter: null },
+        }).catch(() => { /* row may have been updated concurrently; proceed */ });
+        return { id: existing.id, enqueue: true };
+      }
+      // Unknown status: be conservative, do not enqueue a duplicate.
+      return { id: existing.id, enqueue: false };
+    }
+
+    // 2. No existing row — create it. Catch P2002 specifically because a
+    //    concurrent dispatch may have inserted the same idempotencyKey
+    //    between our findFirst and create. In that case, quietly return the
+    //    winner's row and suppress the enqueue (it is already being handled).
+    try {
+      const row = await prisma.emailDeliveryLog.create({
+        data: {
+          emailType,
+          toAddress: String(args.to).slice(0, 254),
+          recipientId: Number.isFinite(recipientIdNum) && recipientIdNum !== null ? recipientIdNum : null,
+          triggeredByAdminId: args.triggeredByAdminId ?? null,
+          studentImportId: args.studentImportId ?? null,
+          idempotencyKey: trimmedKey,
+          provider,
+          status: EmailDeliveryStatus.PENDING,
+          attempts: 0,
+          payloadSummary: summary as any,
+        },
+        select: { id: true },
+      });
+      return { id: row.id, enqueue: true };
+    } catch (createErr: any) {
+      if (createErr?.code === 'P2002') {
+        const winner = await prisma.emailDeliveryLog.findFirst({
+          where: { idempotencyKey: trimmedKey },
+          select: { id: true },
+        });
+        if (winner) return { id: winner.id, enqueue: false };
+      }
+      throw createErr;
+    }
   } catch (err: any) {
-    try { console.warn('[emailQueue] createPendingDeliveryLog failed:', err?.code || err?.message || String(err).slice(0, 120)); } catch {}
+    // P2002 is an expected idempotency outcome, never an operational error.
+    if (err?.code !== 'P2002') {
+      try { console.warn('[emailQueue] createPendingDeliveryLog failed:', err?.code || err?.message || String(err).slice(0, 120)); } catch {}
+    }
     return null;
   }
 }
@@ -170,7 +220,12 @@ export async function dispatchEmail(args: DispatchEmailArgs): Promise<void> {
   }
 
   const provider = resolveProviderType(Boolean(args.forceSmtp));
-  await createPendingDeliveryLog(args, idempotencyKey, provider);
+  const logResult = await createPendingDeliveryLog(args, idempotencyKey, provider);
+  // Dedup decision is authoritative: if the persistent log says no enqueue,
+  // do not enqueue / send a duplicate.
+  if (logResult && logResult.enqueue === false) {
+    return;
+  }
 
   try {
     const q = ensureQueue();

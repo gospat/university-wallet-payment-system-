@@ -318,6 +318,19 @@ export const studentFeeApi = {
     const url = `/students/payments/verify/${encodeURIComponent(reference)}` + (qs ? `?${qs}` : '');
     return api.get(url).then((r) => unwrap(r));
   },
+  getPaymentStatus(reference: string): Promise<any> {
+    return api.get(`/students/payments/status/${encodeURIComponent(reference)}`).then((r) => unwrap(r));
+  },
+  async refreshStudentPaymentCaches(): Promise<void> {
+    try {
+      await Promise.allSettled([
+        studentFeeApi.listInvoices({ page: 1, pageSize: 50 }),
+        studentFeeApi.listReceipts({ page: 1, pageSize: 50 }),
+      ]);
+    } catch {
+      // Best-effort cache warm; never block the success flow.
+    }
+  },
   async downloadReceiptPdfByReference(reference: string): Promise<Blob> {
     const r: any = await api.get('/students/receipts', { params: { reference, limit: 1 } });
     const list = unwrap<any>(r);

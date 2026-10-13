@@ -146,7 +146,12 @@ const PaymentConfirmation: React.FC = () => {
               const m = e?.message || 'Unable to initiate payment. Please try again shortly.';
               setMsg(typeof m === 'string' ? m : 'Unable to initiate payment. Please try again shortly.');
             },
-            onClosed: () => {},
+            onClosed: () => {
+              const bellsRef = bellsReference || ref;
+              if (bellsRef) {
+                navigate(`/student/payments/callback/${encodeURIComponent(bellsRef)}`);
+              }
+            },
           });
         } catch (_e: any) {
           const m = _e?.message || 'Unable to initiate payment';

@@ -337,6 +337,7 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
     generateFeeAssignedInvoices: noop, confirmPayload: noop, confirmPayloadValidator: passArr,
     getDirectBillInvoice: noop, getDirectBillInvoiceValidator: passArr,
     getContinueOption: noop, getContinueOptionValidator: passArr,
+    getPaymentStatus: noop, getPaymentStatusValidator: passArr,
     getTransactionForVerify: noop, lookupTransactionForVerify: noop, verifyPaymentByTransactionId: noop,
   }));
   jest.mock('../controllers/fees', () => ({
@@ -550,6 +551,7 @@ describe('8 limiters + webhook regression', () => {
       generateFeeAssignedInvoices: noop, confirmPayload: noop, confirmPayloadValidator: passArr,
       getDirectBillInvoice: noop, getDirectBillInvoiceValidator: passArr,
       getContinueOption: noop, getContinueOptionValidator: passArr,
+      getPaymentStatus: noop, getPaymentStatusValidator: passArr,
       getTransactionForVerify: noop, lookupTransactionForVerify: noop, verifyPaymentByTransactionId: noop,
     }));
     jest.mock('../controllers/fees', () => ({

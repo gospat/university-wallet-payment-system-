@@ -100,6 +100,105 @@ export const verifyPayment = catchAsync(async (req: Request, res: Response) => {
   res.status(200).json({ status: 'success', data: result });
 });
 
+// -----------------------------------------------------------------------------
+// READ-ONLY payment status (webhook-aware frontend polling)
+// -----------------------------------------------------------------------------
+//   GET /students/payments/status/:reference
+//
+// Security invariants:
+//   • Strict ownership: transaction.userId === authenticated student.id
+//     (403 otherwise — never allow cross-student transaction enumeration).
+//   • READ-ONLY: never mutates financial state, never calls provider APIs,
+//     never creates receipts / ledger entries, never triggers verification.
+//   • Returns ONLY persisted, student-safe fields. No sensitive keys, raw provider
+//     payloads, HMAC data, metadata, ALATPay checkout URL/session id, or
+//     internal security information.
+//   • The authoritative completion signal is the server-side webhook. This
+//     endpoint merely reflects what is already persisted so the browser can
+//     poll until the webhook marks the transaction SUCCESS.
+// -----------------------------------------------------------------------------
+const StatusParamSchema = z.object({ reference: z.string().min(1).max(255).trim() });
+export const getPaymentStatusValidator = validateParams(StatusParamSchema);
+
+export const getPaymentStatus = catchAsync(async (req: Request, res: Response) => {
+  const studentId = Number((req as any).user?.id);
+  const reference = String(req.params.reference);
+
+  const tx = await prisma.transaction.findFirst({
+    where: { reference },
+    orderBy: [{ updatedAt: 'desc' }],
+    select: {
+      id: true,
+      reference: true,
+      status: true,
+      gateway: true,
+      amount: true,
+      expectedAmount: true,
+      userId: true,
+      invoiceId: true,
+      alatpayFinalTransactionId: true,
+      updatedAt: true,
+    },
+  });
+
+  if (!tx) {
+    throw new AppError('Transaction not found.', 404);
+  }
+  if (Number(tx.userId) !== Number(studentId)) {
+    throw new AppError('Transaction not owned by authenticated student.', 403, {
+      code: 'STATUS_NOT_OWNER',
+    });
+  }
+
+  let invoice: { id: number; invoiceNumber: string | null; amountDue: any; amountPaid: any; status: string } | null = null;
+  if (tx.invoiceId) {
+    invoice = await prisma.invoice.findUnique({
+      where: { id: tx.invoiceId },
+      select: {
+        id: true,
+        invoiceNumber: true,
+        amountDue: true,
+        amountPaid: true,
+        status: true,
+      },
+    });
+  }
+
+  let receipt: { id: number; receiptNumber: string } | null = null;
+  const rec = await prisma.receipt.findFirst({
+    where: { transactionId: tx.id, isVoided: false },
+    select: { id: true, receiptNumber: true },
+    orderBy: { generatedAt: 'desc' },
+  });
+  if (rec) receipt = { id: rec.id, receiptNumber: rec.receiptNumber };
+
+  const invoiceStatus = invoice ? String(invoice.status) : null;
+  const amountDue = invoice ? Number(invoice.amountDue) : null;
+  const amountPaid = invoice ? Number(invoice.amountPaid) : null;
+  const outstanding = invoice ? Math.max(0, amountDue! - amountPaid!) : null;
+
+  res.status(200).json({
+    status: 'success',
+    data: {
+      reference: tx.reference,
+      transactionId: tx.id,
+      status: String(tx.status),
+      gateway: tx.gateway,
+      amount: tx.amount != null ? Number(tx.amount) : null,
+      expectedAmount: tx.expectedAmount != null ? Number(tx.expectedAmount) : null,
+      alatpayFinalTransactionIdPresent: !!tx.alatpayFinalTransactionId,
+      invoiceId: tx.invoiceId,
+      invoiceNumber: invoice?.invoiceNumber ?? null,
+      invoiceStatus,
+      amountDue,
+      amountPaid,
+      outstanding,
+      receipt,
+      updatedAt: tx.updatedAt?.toISOString?.() ?? tx.updatedAt,
+    },
+  });
+});
+
 const ConfirmPayloadQuerySchema = z.object({
   invoiceId: z.coerce.number().int().positive(),
 });
@@ -528,6 +627,7 @@ export const verifyPaymentByTransactionId = catchAsync(async (req: Request, res:
 export default {
   initiatePayment,
   verifyPayment,
+  getPaymentStatus,
   confirmPayload,
   getContinueOption,
   getTransactionForVerify,
