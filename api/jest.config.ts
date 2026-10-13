@@ -7,9 +7,12 @@ const jestDefaults: Record<string, string> = {
   PAYSTACK_SECRET_KEY: 'sk_test_dummy',
   PAYSTACK_PUBLIC_KEY: 'pk_test_dummy',
   ALATPAY_SECRET_KEY: 'sk_test_alat_dummy',
+  ALATPAY_PUBLIC_KEY: 'pk_test_alat_dummy',
+  ALATPAY_BUSINESS_ID: 'test-alat-business-id',
   ALATPAY_WEBHOOK_SECRET: 'wbhk_test_alat_dummy',
   PAYSTACK_WEBHOOK_SECRET: 'wbhk_test_paystack_dummy',
   REDIS_URL: '',
+  REDIS_LAZY_CONNECT: 'true',
 };
 for (const [k, v] of Object.entries(jestDefaults)) {
   if (!process.env[k]) process.env[k] = v;
