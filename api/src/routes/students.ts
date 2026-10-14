@@ -1015,14 +1015,37 @@ router.delete(
       });
     }
 
-    // Perform the deletion. If an unexpected foreign-key constraint blocks it
-    // (e.g. a dependency the explicit counts missed), return a controlled 409
-    // instead of leaking a raw Prisma/MySQL 500 error.
+    // Perform the deletion + audit creation atomically in a single transaction.
+    // If the DELETE_STUDENT audit record cannot be written, the student deletion
+    // MUST roll back — a permanent deletion without audit evidence is unacceptable.
+    // The audit row's userId references the ADMIN performing the operation;
+    // entityId/oldValue preserve the deleted student's identity.
+    // If an unexpected foreign-key constraint blocks the delete, return a
+    // controlled 409 instead of leaking a raw Prisma/MySQL 500 error.
     try {
       await prisma.$transaction(async (tx: any) => {
         await tx.auditLog.updateMany({ where: { userId: id }, data: { userId: null } });
         await tx.refreshToken.deleteMany({ where: { userId: id } });
         await tx.user.delete({ where: { id } });
+        await tx.auditLog.create({
+          data: {
+            action: 'DELETE_STUDENT',
+            entityType: 'USER',
+            entityId: String(id),
+            userId: (req as any).user?.id ?? null,
+            ipAddress: (req as any).ip?.slice?.(0, 64) ?? null,
+            userAgent: (req as any).headers?.['user-agent']?.slice?.(0, 512) ?? null,
+            oldValue: {
+              id,
+              email: existing.email,
+              role: existing.role,
+              firstName: existing.firstName,
+              lastName: existing.lastName,
+              matricNumber: existing.matricNumber ?? null,
+            },
+            details: { noFinancialRecords: true },
+          },
+        });
       });
     } catch (err: any) {
       const code = err?.code;
@@ -1040,27 +1063,6 @@ router.delete(
       throw err;
     }
 
-    try {
-      await (prisma as any).auditLog.create({
-        data: {
-          action: 'DELETE_STUDENT',
-          entityType: 'USER',
-          entityId: String(id),
-          userId: (req as any).user?.id ?? null,
-          ipAddress: (req as any).ip?.slice?.(0, 64) ?? null,
-          userAgent: (req as any).headers?.['user-agent']?.slice?.(0, 512) ?? null,
-          oldValue: {
-            id,
-            email: existing.email,
-            role: existing.role,
-            firstName: existing.firstName,
-            lastName: existing.lastName,
-            matricNumber: existing.matricNumber ?? null,
-          },
-          details: { noFinancialRecords: true },
-        },
-      });
-    } catch { /* swallow audit failure — deletion already succeeded */ }
     return res.status(200).json({ status: 'success', data: { id, deleted: true } });
   }),
 );

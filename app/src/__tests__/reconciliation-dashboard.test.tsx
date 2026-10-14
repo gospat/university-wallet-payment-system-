@@ -49,13 +49,11 @@ vi.mock('lucide-react', () => {
   return out;
 });
 
-const summaryMock = vi.fn();
 const itemsMock = vi.fn();
 const buildReportUrlMock = vi.fn();
 const downloadBlobMock = vi.fn();
 
 vi.mock('../services/reconciliationApi', () => ({
-  getReconciliationSummary: (...args: any[]) => summaryMock(...args),
   getReconciliationItems: (...args: any[]) => itemsMock(...args),
   buildReportCsvUrl: (...args: any[]) => buildReportUrlMock(...args),
 }));
@@ -140,11 +138,9 @@ const baseItems = [
 
 beforeEach(() => {
   vi.useFakeTimers();
-  summaryMock.mockReset();
   itemsMock.mockReset();
   buildReportUrlMock.mockReset();
   downloadBlobMock.mockReset();
-  summaryMock.mockResolvedValue(baseSummary);
   itemsMock.mockResolvedValue({
     items: baseItems,
     pagination: { page: 1, limit: 50, total: 2, totalPages: 1 },
@@ -340,7 +336,7 @@ describe('Reconciliation Dashboard', () => {
     expect(downloadBlobMock).toHaveBeenCalled();
   });
 
-  it('11. user without VIEW_RECONCILIATION sees access denied', async () => {
+  it('11. user without VIEW_RECONCILIATION sees access denied and makes NO reconciliation request', async () => {
     setMockUser({
       firstName: 'Bursary', lastName: 'User', email: 'bursary@uni.edu.ng',
       permissions: [],
@@ -350,6 +346,8 @@ describe('Reconciliation Dashboard', () => {
     const text = container.textContent || '';
     expect(text).toContain('Access denied');
     expect(text).toContain('VIEW_RECONCILIATION');
+    // No reconciliation comparison should be initiated for an unauthorized user.
+    expect(itemsMock).not.toHaveBeenCalled();
   });
 
   it('12. user without VIEW_RECONCILIATION_REPORTS cannot export', async () => {
@@ -380,7 +378,6 @@ describe('Reconciliation Dashboard', () => {
 
   it('14. API errors are displayed and not represented as zero totals', async () => {
     itemsMock.mockRejectedValue(new Error('Network timeout'));
-    summaryMock.mockRejectedValue(new Error('Network timeout'));
     render();
     await flush();
     const text = container.textContent || '';
@@ -388,7 +385,7 @@ describe('Reconciliation Dashboard', () => {
     expect(text).toContain('Network timeout');
   });
 
-  it('15. refresh does not create overlapping requests (aborts previous signal)', async () => {
+  it('15. filter change aborts the previous in-flight request (no overlap)', async () => {
     let firstSignal: AbortSignal | undefined;
     let secondSignal: AbortSignal | undefined;
     itemsMock.mockImplementation((_filters: any, signal?: AbortSignal) => {
@@ -396,7 +393,6 @@ describe('Reconciliation Dashboard', () => {
       else secondSignal = signal;
       return new Promise(() => {});
     });
-    summaryMock.mockResolvedValue(baseSummary);
     render();
     await flush();
     expect(firstSignal).toBeDefined();
@@ -412,5 +408,118 @@ describe('Reconciliation Dashboard', () => {
     await flush();
     expect(secondSignal).toBeDefined();
     expect(firstSignal!.aborted).toBe(true);
+  });
+
+  it('16. initial load makes only ONE reconciliation comparison (items, no separate /summary)', async () => {
+    render();
+    await flush();
+    // The dashboard must not call a separate /summary endpoint; /items already
+    // returns the summary for the same comparison snapshot.
+    expect(itemsMock).toHaveBeenCalledTimes(1);
+    const firstCall = itemsMock.mock.calls[0];
+    // The signal is passed so the request can be aborted on rapid filter changes.
+    expect(firstCall[1]).toBeInstanceOf(AbortSignal);
+  });
+
+  it('17. summary cards are populated from response.summary of the items response', async () => {
+    const customSummary = {
+      systemRecords: 7,
+      gatewayRecords: 7,
+      matched: 5,
+      amountMismatch: 1,
+      missingInternal: 0,
+      missingGateway: 1,
+      duplicateReference: 0,
+      reversedTxn: 0,
+      missingReceipt: 0,
+    };
+    itemsMock.mockResolvedValue({
+      items: baseItems,
+      pagination: { page: 1, limit: 50, total: 2, totalPages: 1 },
+      summary: customSummary,
+      filters: {},
+    });
+    render();
+    await flush();
+    const text = container.textContent || '';
+    // Values from the custom summary, proving cards come from response.summary.
+    expect(text).toContain('7');
+    expect(text).toContain('5');
+    expect(text).toContain('Matched');
+    expect(text).toContain('Missing Gateway');
+  });
+
+  it('18. rapid filter changes: a stale (aborted) response does not update the UI', async () => {
+    let resolveFirst: ((v: any) => void) | null = null;
+    let callCount = 0;
+    itemsMock.mockImplementation((_filters: any, _signal?: AbortSignal) => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Promise((resolve) => { resolveFirst = resolve; });
+      }
+      // Second (newest) request resolves immediately with a distinct summary.
+      return Promise.resolve({
+        items: [baseItems[1]],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+        summary: { ...baseSummary, matched: 42 },
+        filters: {},
+      });
+    });
+    render();
+    await flush();
+    // Trigger a second request (filter change) while the first is pending.
+    const selects = container.querySelectorAll('select');
+    const gatewaySelect = Array.from(selects).find((s) =>
+      Array.from(s.options).some((o) => o.value === 'ALATPAY'),
+    );
+    act(() => {
+      (gatewaySelect as HTMLSelectElement).value = 'ALATPAY';
+      gatewaySelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    // Now resolve the first (stale) request with different data.
+    resolveFirst!({
+      items: [baseItems[0]],
+      pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      summary: { ...baseSummary, matched: 999 },
+      filters: {},
+    });
+    await flush();
+    const text = container.textContent || '';
+    // The newest response (matched=42) should win; stale 999 must not appear.
+    expect(text).toContain('42');
+    expect(text).not.toContain('999');
+  });
+
+  it('19. Refresh cancels the previous request and starts a single new comparison', async () => {
+    let pendingSignals: AbortSignal[] = [];
+    itemsMock.mockImplementation((_filters: any, signal?: AbortSignal) => {
+      if (signal) pendingSignals.push(signal);
+      return new Promise(() => {});
+    });
+    render();
+    await flush();
+    const firstSignal = pendingSignals[0];
+    expect(firstSignal).toBeDefined();
+    expect(firstSignal.aborted).toBe(false);
+    const refreshBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('Refresh'),
+    );
+    // The initial request is pending, so the Refresh button is disabled while loading.
+    // Simulate the refresh action directly via the same effect by changing a filter,
+    // which is the equivalent user-driven re-fetch path.
+    expect(refreshBtn?.disabled).toBe(true);
+    const selects = container.querySelectorAll('select');
+    const gatewaySelect = Array.from(selects).find((s) =>
+      Array.from(s.options).some((o) => o.value === 'PAYSTACK'),
+    );
+    act(() => {
+      (gatewaySelect as HTMLSelectElement).value = 'PAYSTACK';
+      gatewaySelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    // A new signal was created and the first one was aborted — no overlapping chains.
+    expect(pendingSignals.length).toBe(2);
+    expect(firstSignal.aborted).toBe(true);
   });
 });

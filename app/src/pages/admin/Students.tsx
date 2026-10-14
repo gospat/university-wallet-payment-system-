@@ -506,9 +506,14 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         } catch (err: any) {
           setConfirm((c) => ({ ...c, loading: false }));
           if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return;
-          const code = err?.response?.data?.code;
-          const breakdown: string[] = err?.response?.data?.breakdown ?? [];
-          const errMsg = err?.response?.data?.error ?? err?.message ?? i18n.errors.generic;
+          const payload = err?.payload ?? err?.response?.data;
+          const code = payload?.code;
+          const breakdown: string[] = payload?.breakdown ?? [];
+          const errMsg =
+            payload?.error ??
+            payload?.message ??
+            err?.message ??
+            i18n.errors.generic;
           if (code === 'STUDENT_HAS_FINANCIAL_RECORDS') {
             setAlert({
               isOpen: true,

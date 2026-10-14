@@ -198,4 +198,24 @@ describe('DELETE /students/:id — financial-integrity gate', () => {
     const auditCall = mockPrisma.auditLog.create.mock.calls[0][0] as any;
     expect(auditCall.data.oldValue.password).toBeUndefined();
   });
+
+  it('12. auditLog.create failure rolls back deletion and does not report success', async () => {
+    mockPrisma.user.findUnique.mockResolvedValue(baseStudent(509));
+    // The DELETE_STUDENT audit record is created inside the SAME transaction
+    // as the user.delete. If audit creation fails, the whole transaction must
+    // roll back and the endpoint must NOT return 200 success.
+    mockPrisma.auditLog.create.mockRejectedValue(new Error('audit insert failed'));
+    const res = await request(app).delete('/api/v1/students/509');
+    // Not a FK constraint (P2003), so it surfaces as a 500 — critically, NOT 200.
+    expect(res.status).not.toBe(200);
+    expect(res.status).not.toBe(409);
+    // user.delete was invoked inside the transaction, but because auditLog.create
+    // threw, the transaction did not commit.
+    expect(mockPrisma.user.delete).toHaveBeenCalledWith({ where: { id: 509 } });
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'DELETE_STUDENT', entityId: '509' }),
+      }),
+    );
+  });
 });

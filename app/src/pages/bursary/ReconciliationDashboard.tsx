@@ -5,7 +5,6 @@ import { i18n } from '../../i18n/en';
 import { downloadBlob } from '../../services/api';
 import {
   getReconciliationItems,
-  getReconciliationSummary,
   buildReportCsvUrl,
   type ReconciliationSummary,
   type ReconciliationItem,
@@ -112,7 +111,6 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
   const [page, setPage] = useState<number>(1);
 
   const [loading, setLoading] = useState(false);
-  const [summaryLoading, setSummaryLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [summary, setSummary] = useState<ReconciliationSummary | null>(null);
   const [items, setItems] = useState<ReconciliationItem[]>([]);
@@ -124,13 +122,6 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
 
   const dateValid = dateFrom && dateTo && dateFrom <= dateTo;
 
-  const summaryFilters = useMemo(() => ({
-    dateFrom,
-    dateTo,
-    gateway: gateway || undefined,
-    chargeSource,
-  }), [dateFrom, dateTo, gateway, chargeSource]);
-
   const itemsFilters = useMemo(() => ({
     dateFrom,
     dateTo,
@@ -141,22 +132,12 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
     chargeSource,
   }), [dateFrom, dateTo, page, pageSize, classification, gateway, chargeSource]);
 
-  const loadSummary = useCallback(async () => {
-    if (!dateValid) return;
-    setSummaryLoading(true);
-    try {
-      const s = await getReconciliationSummary(summaryFilters);
-      setSummary(s);
-    } catch (e: unknown) {
-      const err = e as { code?: string };
-      if (err?.code === 'ERR_CANCELED') return;
-      setSummary(null);
-    } finally {
-      setSummaryLoading(false);
-    }
-  }, [summaryFilters, dateValid]);
-
-  const loadItems = useCallback(async () => {
+  // Single reconciliation request lifecycle.
+  // /items already returns { items, pagination, filters, summary }, so the
+  // summary cards and the table are populated from the SAME response — one
+  // gateway comparison per refresh. Do not fire a separate /summary request.
+  const loadReconciliation = useCallback(async () => {
+    if (!canView) return;
     if (!dateValid) return;
     if (abortRef.current) {
       abortRef.current.abort();
@@ -171,35 +152,36 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
       if (ac.signal.aborted) return;
       setItems(resp.items ?? []);
       setPagination(resp.pagination ?? null);
+      setSummary(resp.summary ?? null);
       setEmptyState((resp.items?.length ?? 0) === 0);
     } catch (e: unknown) {
-      const err = e as { code?: string; name?: string; response?: { data?: { error?: string } }; message?: string };
+      const err = e as { code?: string; name?: string; payload?: { error?: string }; message?: string };
       if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return;
-      const msg = err?.response?.data?.error || err?.message || 'Failed to load reconciliation records.';
+      const msg = err?.payload?.error || err?.message || 'Failed to load reconciliation records.';
       setError(msg);
       setItems([]);
       setPagination(null);
+      setSummary(null);
     } finally {
       if (!ac.signal.aborted) setLoading(false);
     }
-  }, [itemsFilters, dateValid]);
+  }, [itemsFilters, dateValid, canView]);
 
   const refresh = useCallback(() => {
-    loadSummary();
-    loadItems();
-  }, [loadSummary, loadItems]);
+    loadReconciliation();
+  }, [loadReconciliation]);
 
-  // Load on mount and when filters change
+  // Load on mount and when filters change. Only fire if the user has
+  // VIEW_RECONCILIATION (backend remains authoritative regardless).
   useEffect(() => {
-    if (dateValid) {
-      loadSummary();
-      loadItems();
+    if (canView && dateValid) {
+      loadReconciliation();
     }
     return () => {
       abortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateFrom, dateTo, gateway, chargeSource, classification, pageSize, page]);
+  }, [dateFrom, dateTo, gateway, chargeSource, classification, pageSize, page, canView]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -213,8 +195,8 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
       const url = buildReportCsvUrl(itemsFilters);
       await downloadBlob(url, `reconciliation-${dateFrom}_to_${dateTo}.csv`);
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } }; message?: string };
-      const msg = err?.response?.data?.error || err?.message || 'Export failed.';
+      const err = e as { payload?: { error?: string }; message?: string };
+      const msg = err?.payload?.error || err?.message || 'Export failed.';
       setError(msg);
     } finally {
       setExporting(false);
@@ -400,7 +382,7 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                   <card.icon className={`w-4 h-4 ${card.cls}`} />
                 </div>
                 <div className="text-xl font-bold text-slate-900 mt-1">
-                  {summaryLoading ? '—' : card.value.toLocaleString()}
+                  {loading ? '—' : card.value.toLocaleString()}
                 </div>
               </div>
             ))}
