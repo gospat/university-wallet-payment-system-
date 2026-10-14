@@ -302,7 +302,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     onConfirm: () => {},
     loading: false,
   });
-  const DELETE_STUDENT_PROTECTED_IDS = new Set<number>([1, 2, 48]);
 
   // ---- create/edit modal -------------------------------------------------
   const [editorOpen, setEditorOpen] = useState<'create' | 'edit' | null>(null);
@@ -484,17 +483,12 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
 
   // ---- delete student (financial integrity gate) -------------------------
   const openDeleteStudent = (s: StudentRow) => {
-    if (DELETE_STUDENT_PROTECTED_IDS.has(s.id)) {
-      setAlert({
-        isOpen: true, title: 'Cannot delete protected account', type: 'error',
-        message: `${s.email} is a protected bootstrap account and cannot be removed. Suspend or mark WITHDRAWN instead.`,
-      });
-      return;
-    }
     setConfirm({
       isOpen: true,
-      title: 'Delete Student (Permanent)',
-      description: `Delete student ${s.firstName} ${s.lastName}? This cannot be undone. Sessions are invalidated immediately. Students with generated invoices, receipts, or payment history cannot be removed for financial integrity.`,
+      title: 'Delete this student permanently?',
+      description:
+        'This action is only allowed when the student has no financial or billing history and cannot be undone. ' +
+        'Students with invoices, receipts, transactions, refunds, or direct-bill assignments cannot be removed.',
       resourceLabel: `Student: ${s.firstName} ${s.lastName} (${s.matricNumber ?? '#' + s.id} · ${s.email})`,
       loading: false,
       onConfirm: async () => {
@@ -502,6 +496,12 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         try {
           await api.delete(`/students/${s.id}`);
           setConfirm((c) => ({ ...c, isOpen: false, loading: false }));
+          setAlert({
+            isOpen: true,
+            title: 'Student deleted',
+            message: `${s.firstName} ${s.lastName} has been permanently removed.`,
+            type: 'success',
+          });
           loadStudents();
         } catch (err: any) {
           setConfirm((c) => ({ ...c, loading: false }));
@@ -509,15 +509,21 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           const code = err?.response?.data?.code;
           const breakdown: string[] = err?.response?.data?.breakdown ?? [];
           const errMsg = err?.response?.data?.error ?? err?.message ?? i18n.errors.generic;
-          if (code === 'STUDENT_HAS_FINANCIAL_RECORDS' && breakdown.length > 0) {
+          if (code === 'STUDENT_HAS_FINANCIAL_RECORDS') {
             setAlert({
-              isOpen: true, title: 'Cannot delete — financial records exist', type: 'error',
-              message: `${errMsg} This student must be Suspended or marked WITHDRAWN for historical retention instead.`,
-              details: breakdown,
+              isOpen: true,
+              title: 'Cannot delete — financial records exist',
+              type: 'error',
+              message:
+                'This student cannot be deleted because financial or billing records exist. ' +
+                'Suspend or withdraw the student account instead.',
+              details: breakdown.length > 0 ? breakdown : undefined,
             });
           } else {
             setAlert({
-              isOpen: true, title: 'Delete failed', type: 'error',
+              isOpen: true,
+              title: 'Delete failed',
+              type: 'error',
               message: String(errMsg).slice(0, 500),
               details: breakdown.length > 0 ? breakdown : undefined,
             });
@@ -826,7 +832,6 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                         <button
                           className="inline-flex items-center gap-1 text-red-700 hover:text-red-900 hover:bg-red-50 px-2 py-1 rounded text-xs font-medium"
                           title="Delete student permanently"
-                          disabled={DELETE_STUDENT_PROTECTED_IDS.has(s.id)}
                           onClick={() => openDeleteStudent(s)}
                         >
                           <Trash2 className="w-3.5 h-3.5" /> Delete

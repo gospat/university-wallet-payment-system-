@@ -951,10 +951,9 @@ router.get('/matric/:matric', requirePermission('VIEW_STUDENTS'), validateParams
 
 // DELETE /students/:id — ADMIN only (Bursary cannot permanently delete).
 // Financial integrity gate: students with ANY invoice / receipt / transaction /
-// refund record cannot be deleted (409). Otherwise: cleanup audit_logs.userId +
-// refresh_tokens + user row, identical to /admin/users/:id handler.
+// refund / direct-bill (FeeAssignment) / general-ledger record cannot be
+// deleted (409). Numeric database IDs are NEVER used as a protection basis.
 const DeleteStudentParam = z.object({ id: z.coerce.number().int().min(1) });
-const DELETE_STUDENT_PROTECTED_IDS = new Set<number>([1, 2, 48]);
 router.delete(
   '/:id',
   restrictTo(Role.ADMIN),
@@ -964,7 +963,10 @@ router.delete(
     const id = Number(req.params.id);
     const existing = await prisma.user.findUnique({
       where: { id },
-      select: { id: true, role: true, email: true, firstName: true, lastName: true, accountStatus: true },
+      select: {
+        id: true, role: true, email: true, firstName: true, lastName: true,
+        matricNumber: true, accountStatus: true,
+      },
     });
     if (!existing) return res.status(404).json({ status: 'fail', error: 'Student not found' });
     if (existing.role !== Role.STUDENT) {
@@ -974,39 +976,70 @@ router.delete(
         code: 'WRONG_ROLE_FOR_ENDPOINT',
       });
     }
-    if (DELETE_STUDENT_PROTECTED_IDS.has(id)) {
-      return res.status(403).json({
-        status: 'fail',
-        error: 'Cannot delete protected id',
-        code: 'PROTECTED_ID',
-      });
-    }
-    const [invoices, receipts, transactions, refundsAsRequester, refundsViaTx] = await Promise.all([
+
+    // Check ALL financial / direct-billing dependencies before allowing
+    // permanent deletion. Numeric IDs are never used as a protection basis.
+    const [
+      invoices,
+      receipts,
+      transactions,
+      refundsAsRequester,
+      refundsViaTx,
+      feeAssignments,
+      ledgerEntries,
+    ] = await Promise.all([
       prisma.invoice.count({ where: { studentId: id } }),
       prisma.receipt.count({ where: { studentId: id } }),
       prisma.transaction.count({ where: { userId: id } }),
       prisma.refund.count({ where: { requestedById: id } }),
       prisma.refund.count({ where: { originalTransaction: { userId: id } } }),
+      prisma.feeAssignment.count({ where: { targetStudentId: id } }),
+      prisma.generalLedger.count({ where: { userId: id } }),
     ]);
-    const totalFin = invoices + receipts + transactions + refundsAsRequester + refundsViaTx;
+    const totalFin =
+      invoices + receipts + transactions + refundsAsRequester + refundsViaTx +
+      feeAssignments + ledgerEntries;
     if (totalFin > 0) {
       const breakdown: string[] = [];
       if (invoices > 0) breakdown.push(`${invoices} invoice(s)`);
       if (receipts > 0) breakdown.push(`${receipts} receipt(s)`);
       if (transactions > 0) breakdown.push(`${transactions} transaction(s)`);
       if (refundsAsRequester + refundsViaTx > 0) breakdown.push(`${refundsAsRequester + refundsViaTx} refund record(s)`);
+      if (feeAssignments > 0) breakdown.push(`${feeAssignments} direct-bill assignment(s)`);
+      if (ledgerEntries > 0) breakdown.push(`${ledgerEntries} ledger entry/entries`);
       return res.status(409).json({
         status: 'fail',
-        error: 'Cannot delete student with generated invoices / payments. Suspend or mark WITHDRAWN instead.',
+        error: 'This student cannot be permanently deleted because financial or billing records exist. Suspend or withdraw the account instead.',
         code: 'STUDENT_HAS_FINANCIAL_RECORDS',
         breakdown,
       });
     }
-    await prisma.$transaction(async (tx: any) => {
-      await tx.auditLog.updateMany({ where: { userId: id }, data: { userId: null } });
-      await tx.refreshToken.deleteMany({ where: { userId: id } });
-      await tx.user.delete({ where: { id } });
-    });
+
+    // Perform the deletion. If an unexpected foreign-key constraint blocks it
+    // (e.g. a dependency the explicit counts missed), return a controlled 409
+    // instead of leaking a raw Prisma/MySQL 500 error.
+    try {
+      await prisma.$transaction(async (tx: any) => {
+        await tx.auditLog.updateMany({ where: { userId: id }, data: { userId: null } });
+        await tx.refreshToken.deleteMany({ where: { userId: id } });
+        await tx.user.delete({ where: { id } });
+      });
+    } catch (err: any) {
+      const code = err?.code;
+      const isFk =
+        code === 'P2003' || // Prisma foreign key constraint
+        /foreign key|constraint|cannot delete|ER_ROW_IS_REFERENCED/i.test(String(err?.message ?? ''));
+      if (isFk) {
+        return res.status(409).json({
+          status: 'fail',
+          error: 'This student cannot be permanently deleted because dependent records exist. Suspend or withdraw the account instead.',
+          code: 'STUDENT_HAS_FINANCIAL_RECORDS',
+          breakdown: ['dependent record(s) detected by database constraint'],
+        });
+      }
+      throw err;
+    }
+
     try {
       await (prisma as any).auditLog.create({
         data: {
@@ -1016,11 +1049,18 @@ router.delete(
           userId: (req as any).user?.id ?? null,
           ipAddress: (req as any).ip?.slice?.(0, 64) ?? null,
           userAgent: (req as any).headers?.['user-agent']?.slice?.(0, 512) ?? null,
-          oldValue: { id, email: existing.email, role: existing.role, firstName: existing.firstName, lastName: existing.lastName },
+          oldValue: {
+            id,
+            email: existing.email,
+            role: existing.role,
+            firstName: existing.firstName,
+            lastName: existing.lastName,
+            matricNumber: existing.matricNumber ?? null,
+          },
           details: { noFinancialRecords: true },
         },
       });
-    } catch { /* swallow */ }
+    } catch { /* swallow audit failure — deletion already succeeded */ }
     return res.status(200).json({ status: 'success', data: { id, deleted: true } });
   }),
 );

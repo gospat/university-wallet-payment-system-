@@ -52,6 +52,7 @@ const BursaryReportsCentre = React.lazy(() => import('./pages/bursary/ReportsCen
 const BursaryGenericReport = React.lazy(() => import('./pages/bursary/GenericReport'));
 const BursaryStudentStatementPage = React.lazy(() => import('./pages/bursary/StudentStatementPage'));
 const BursaryReconciliationExceptionsPage = React.lazy(() => import('./pages/bursary/ReconciliationExceptionsPage'));
+const BursaryReconciliationDashboard = React.lazy(() => import('./pages/bursary/ReconciliationDashboard').then(m => ({ default: m.BursaryReconciliationDashboard })));
 const BursaryExportCentre = React.lazy(() => import('./pages/bursary/ExportCentre'));
 const BursaryScheduledReports = React.lazy(() => import('./pages/bursary/ScheduledReports'));
 
@@ -492,7 +493,7 @@ const App: React.FC = () => {
             <Route path="/bursary/reports/programme" element={<Navigate to="/bursary/reports/view/hierarchical-revenue" replace />} />
             <Route path="/bursary/reports/student" element={<Navigate to="/bursary/reports/student-statement" replace />} />
             <Route path="/bursary/reconciliation" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/reconciliation" title="Reconciliation Dashboard" subtitle="Bursary reconciliation and settlement" />
+              <Suspense fallback={<PageLoader />}><BursaryReconciliationDashboard /></Suspense>
             } />
 
             <Route path="/bursary/academic/faculties" element={

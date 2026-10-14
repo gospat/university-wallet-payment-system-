@@ -719,8 +719,18 @@ async function hasFinancialRecordsForStudent(userId: number): Promise<{
   transactions: number;
   refundsAsRequester: number;
   refundsViaTransactions: number;
+  feeAssignments: number;
+  ledgerEntries: number;
 }> {
-  const [invoices, receipts, transactions, refundsAsRequester, refundsViaTransactions] = await Promise.all([
+  const [
+    invoices,
+    receipts,
+    transactions,
+    refundsAsRequester,
+    refundsViaTransactions,
+    feeAssignments,
+    ledgerEntries,
+  ] = await Promise.all([
     prisma.invoice.count({ where: { studentId: userId } }),
     prisma.receipt.count({ where: { studentId: userId } }),
     prisma.transaction.count({ where: { userId } }),
@@ -728,14 +738,20 @@ async function hasFinancialRecordsForStudent(userId: number): Promise<{
     prisma.refund.count({
       where: { originalTransaction: { userId } },
     }),
+    prisma.feeAssignment.count({ where: { targetStudentId: userId } }),
+    prisma.generalLedger.count({ where: { userId } }),
   ] as const);
   return {
-    any: invoices + receipts + transactions + refundsAsRequester + refundsViaTransactions > 0,
+    any:
+      invoices + receipts + transactions + refundsAsRequester +
+      refundsViaTransactions + feeAssignments + ledgerEntries > 0,
     invoices,
     receipts,
     transactions,
     refundsAsRequester,
     refundsViaTransactions,
+    feeAssignments,
+    ledgerEntries,
   };
 }
 
@@ -774,6 +790,8 @@ router.delete(
         if (fin.refundsAsRequester > 0 || fin.refundsViaTransactions > 0) {
           counts.push(`${fin.refundsAsRequester + fin.refundsViaTransactions} refund record(s)`);
         }
+        if (fin.feeAssignments > 0) counts.push(`${fin.feeAssignments} direct-bill assignment(s)`);
+        if (fin.ledgerEntries > 0) counts.push(`${fin.ledgerEntries} ledger entry/entries`);
         return res.status(409).json({
           status: 'fail',
           error: 'Cannot delete student with existing financial records. Use accountStatus=SUSPENDED/GRADUATED instead.',
