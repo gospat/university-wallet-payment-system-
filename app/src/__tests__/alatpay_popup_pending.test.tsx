@@ -525,3 +525,141 @@ it('T: unmount while popup open → closes popup, no unwanted redirect', async (
   // No navigation triggered by the unmount close.
   expect(navigateMock).not.toHaveBeenCalled();
 });
+
+// ---- A. onTransaction(UUID) then onSuccess(same UUID) ---------------------
+// The SDK may fire onTransaction with the provider UUID, then later fire
+// onSuccess with the SAME UUID. Even though onReportTransaction is
+// deduplicated for the same UUID, onSuccess MUST still run so it can trigger
+// an immediate authoritative backend status check. onSuccess must never
+// create financial SUCCESS on its own.
+
+it('A: onTransaction(UUID) then onSuccess(same UUID) → onSuccess still triggers backend check, no SUCCESS, popup stays open', async () => {
+  let onReportTx: ((r: any) => void) | null = null;
+  let onSuccessCb: (() => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onReportTx = cb.onReportTransaction ?? null;
+    onSuccessCb = cb.onSuccess ?? null;
+    return { close: alatpayCloseMock };
+  });
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  const report = {
+    bellsReference: 'PAY-REF-001',
+    orderReference: 'ORD-1',
+    initPaymentReference: 'INIT-1',
+    providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
+    extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+    source: 'transaction' as const,
+  };
+
+  act(() => { onReportTx?.(report); });
+
+  const callsBeforeSuccess = getPaymentStatusMock.mock.calls.length;
+
+  // Fire onSuccess with the SAME UUID as onTransaction.
+  act(() => { onSuccessCb?.(); });
+  await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
+
+  // onSuccess triggered an immediate backend status check.
+  expect(getPaymentStatusMock.mock.calls.length).toBeGreaterThan(callsBeforeSuccess);
+  // Backend says PENDING: no close, no navigation, no frontend SUCCESS.
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+});
+
+// ---- B. Backend SUCCESS: close() exactly once, navigate exactly once ------
+
+it('B: backend SUCCESS → close() exactly once, navigate exactly once', async () => {
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING' })
+    .mockResolvedValueOnce({ status: 'SUCCESS', reference: 'PAY-REF-001' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  await tickPolls(5000);
+
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledWith('/student/payments/callback/PAY-REF-001');
+});
+
+// ---- C. close() synchronously fires SDK onClose → still close once --------
+// ALATPay's close() can synchronously fire the onClose/onClosed callback.
+// Because closeAlatpayPopup clears the handle ref BEFORE calling close(), and
+// navigatedRef guards navigation, the synchronous onClosed re-entry must not
+// cause a double close or double navigate.
+
+it('C: close() synchronously fires onClose → close() exactly once, navigate exactly once', async () => {
+  let onClosedCb: (() => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onClosedCb = cb.onClosed ?? null;
+    return {
+      close: () => {
+        alatpayCloseMock();
+        // Simulate the SDK firing onClose synchronously inside close().
+        onClosedCb?.();
+      },
+    };
+  });
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING' })
+    .mockResolvedValueOnce({ status: 'SUCCESS', reference: 'PAY-REF-001' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  await tickPolls(5000);
+
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledTimes(1);
+});
+
+// ---- D. Unmount while popup actually open → close once, no redirect -------
+
+it('D: unmount while popup open → close() exactly once, no unwanted navigation', async () => {
+  launchAlatpayMock.mockResolvedValue({ close: alatpayCloseMock });
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  cleanup();
+
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).not.toHaveBeenCalled();
+  // closeAlatpayPopup clears the handle ref before close(), so a subsequent
+  // unmount (e.g. route change) cannot double-close.
+});
+
+// ---- E. Network error / PENDING → no close, no false terminal, poll continues
+
+it('E: network error then PENDING → no close, no false success/failure, polling continues', async () => {
+  getPaymentStatusMock
+    .mockRejectedValueOnce(new Error('Network error'))
+    .mockResolvedValue({ status: 'PENDING' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  await tickPolls(2500);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  const callsAfterError = getPaymentStatusMock.mock.calls.length;
+  await tickPolls(2500);
+  expect(getPaymentStatusMock.mock.calls.length).toBeGreaterThan(callsAfterError);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+});

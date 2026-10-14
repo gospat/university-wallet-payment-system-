@@ -163,8 +163,6 @@ export async function launchAlatpayNativeModal(
   let lastReportedFinalTxId: string | null = null;
   const reportTransaction = (providerTx: unknown, source: AlatpayTransactionSource) => {
     const finalTxId = extractAlatpayFinalTxId(providerTx);
-    if (finalTxId && lastReportedFinalTxId === finalTxId) return;
-    lastReportedFinalTxId = finalTxId;
     const ctx = {
       bellsReference: String(checkout.metadata?.bells_payment_reference ?? ''),
       orderReference: String(checkout.metadata?.order_reference ?? ''),
@@ -173,7 +171,11 @@ export async function launchAlatpayNativeModal(
       extractedFinalTxId: finalTxId,
       source,
     };
-    callbacks.onReportTransaction(ctx);
+    const isDuplicate = Boolean(finalTxId && lastReportedFinalTxId === finalTxId);
+    if (!isDuplicate) {
+      lastReportedFinalTxId = finalTxId;
+      callbacks.onReportTransaction(ctx);
+    }
     if (source === 'success') {
       callbacks.onSuccess?.({
         bellsReference: ctx.bellsReference,

@@ -65,6 +65,19 @@ const PaymentConfirmation: React.FC = () => {
   // Guards against overlapping in-flight status requests (e.g. when onSuccess
   // triggers an immediate poll while a scheduled poll is already running).
   const pollInFlightRef = useRef(false);
+
+  // Safely closes the ALATPay popup exactly once. The ref is cleared BEFORE
+  // calling close() because the SDK's close() can synchronously fire onClose,
+  // which (if it re-entered close logic) would otherwise double-close.
+  const closeAlatpayPopup = () => {
+    const handle = alatpayHandleRef.current;
+    alatpayHandleRef.current = null;
+    try {
+      handle?.close?.();
+    } catch {
+      /* ignore */
+    }
+  };
   const load = useCallback(async () => {
     if (!invoiceId) {
       setError('Missing invoice id');
@@ -135,7 +148,7 @@ const PaymentConfirmation: React.FC = () => {
       // to document.body, so they survive React unmount unless explicitly
       // closed. Without this, navigating away (e.g. "Back to Invoices") would
       // leave a stuck "Payment Processing" overlay on screen.
-      try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
+      closeAlatpayPopup();
     };
   }, []);
 
@@ -209,12 +222,12 @@ const PaymentConfirmation: React.FC = () => {
               // We do NOT pass the provider UUID because the backend already has
               // persisted SUCCESS; the callback page's polling will see it directly
               // without needing a provider verification call.
-              try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
+              closeAlatpayPopup();
               navigateToCallback(null);
               return;
             }
             if (status === 'FAILED' || status === 'REVERSED' || status === 'REFUNDED') {
-              try { alatpayHandleRef.current?.close?.(); } catch { /* ignore */ }
+              closeAlatpayPopup();
               navigateToCallback(null);
               return;
             }
@@ -264,9 +277,9 @@ const PaymentConfirmation: React.FC = () => {
               setMsg(typeof m === 'string' ? m : 'Unable to initiate payment. Please try again shortly.');
             },
             onClosed: () => {
-              // Popup closed by the student or by the SDK. Stop polling and
-              // navigate to the callback page so the persisted backend status
-              // (which may already be SUCCESS via the webhook) is reflected.
+              // Popup closed by the student, by the SDK, or by our close().
+              // The handle is now stale — clear it so we never double-close.
+              alatpayHandleRef.current = null;
               popupPollActiveRef.current = false;
               if (pollTimerRef.current) {
                 clearTimeout(pollTimerRef.current);
