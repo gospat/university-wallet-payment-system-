@@ -476,16 +476,19 @@ function gatewayTxRef(row: GatewayTxRow): string {
  *
  * ALATPay reports `Amount` in NGN (major units). When a provider fee is
  * explicitly returned (FeeAmount / feeAmount) the effective amount is
- * gross - fee. A missing or structurally invalid fee is NEVER assumed to be
- * zero:
- *   - if the reported gross already equals the Bells amount there is no
- *     monetary discrepancy to explain, so effective == gross;
+ * gross - fee. A missing fee is NEVER assumed to be zero:
+ *   - if the fee is genuinely ABSENT and the reported gross already equals the
+ *     Bells amount there is no monetary discrepancy to explain, so
+ *     effective == gross;
  *   - otherwise effective stays null, and the caller classifies the record as
  *     UNABLE_TO_VERIFY (never a guessed AMOUNT_MISMATCH).
  *
- * Invalid fee data (NaN, non-numeric, negative, greater than gross) fails
- * closed and is treated exactly like a missing fee.
+ * A fee that is PRESENT but structurally invalid (NaN, non-numeric, negative,
+ * Infinity, greater than gross) fails closed: it is NEVER treated as absent or
+ * zero, and therefore can NEVER invoke the gross == Bells rescue rule.
  */
+type ProviderFeeState = 'FEE_ABSENT' | 'FEE_VALID' | 'FEE_INVALID';
+
 function providerAmountsMinor(
   row: GatewayTxRow,
   bellsKobo: number | null,
@@ -494,12 +497,19 @@ function providerAmountsMinor(
   feeKobo: number | null;
   effectiveKobo: number | null;
   feeAvailable: boolean;
+  feeState: ProviderFeeState;
 } {
   if (row.gateway === PaymentGateway.PAYSTACK) {
     const g = Number(row.amount ?? NaN);
     const grossKobo = Number.isFinite(g) ? g : null;
     // Paystack: no separate provider-fee model in this list response.
-    return { grossKobo, feeKobo: null, effectiveKobo: grossKobo, feeAvailable: false };
+    return {
+      grossKobo,
+      feeKobo: null,
+      effectiveKobo: grossKobo,
+      feeAvailable: false,
+      feeState: 'FEE_ABSENT',
+    };
   }
 
   // ALATPay - Amount is NGN (major units), NOT kobo.
@@ -509,32 +519,56 @@ function providerAmountsMinor(
   const grossValid = Number.isFinite(grossNum) && grossNum >= 0;
   const grossKobo = grossValid ? kobo.fromNaira(money(grossNum)) : null;
 
+  // A `feeKobo === null` result alone cannot distinguish "the provider did not
+  // return a fee" from "the provider returned a fee we cannot trust", so we
+  // track an explicit state:
+  //   FEE_ABSENT  - no fee field returned at all (undefined / null)
+  //   FEE_VALID   - fee is numeric, 0 <= fee <= gross
+  //   FEE_INVALID - fee is present but unusable (NaN / non-numeric / negative /
+  //                 Infinity / greater than gross)
+  // Only FEE_ABSENT may invoke the gross == Bells rescue rule.
   const rawFee = alat.FeeAmount ?? alat.feeAmount;
   const feePresent = rawFee !== undefined && rawFee !== null;
   const feeNum = feePresent ? Number(rawFee) : NaN;
-  const feeUsable =
-    feePresent &&
+  let feeState: ProviderFeeState;
+  let feeKobo: number | null = null;
+  if (!feePresent) {
+    feeState = 'FEE_ABSENT';
+  } else if (
     grossValid &&
     Number.isFinite(feeNum) &&
     feeNum >= 0 &&
-    kobo.fromNaira(money(feeNum)) <= (grossKobo ?? 0);
-  const feeKobo = feeUsable ? kobo.fromNaira(money(feeNum)) : null;
+    kobo.fromNaira(money(feeNum)) <= (grossKobo ?? 0)
+  ) {
+    feeState = 'FEE_VALID';
+    feeKobo = kobo.fromNaira(money(feeNum));
+  } else {
+    feeState = 'FEE_INVALID';
+  }
 
   let effectiveKobo: number | null = null;
-  if (grossKobo !== null && feeKobo !== null) {
+  if (grossKobo !== null && feeState === 'FEE_VALID' && feeKobo !== null) {
     effectiveKobo = grossKobo - feeKobo;
   } else if (
+    feeState === 'FEE_ABSENT' &&
     grossKobo !== null &&
     bellsKobo !== null &&
     Math.abs(grossKobo - bellsKobo) <= AMOUNT_TOLERANCE_KOBO
   ) {
-    // CASE A: no usable provider fee, but the reported gross already equals the
+    // CASE A: fee genuinely absent and the reported gross already equals the
     // Bells amount, so there is no monetary discrepancy to explain.
     effectiveKobo = grossKobo;
   }
-  // CASE C (gross != bells and no usable fee): effectiveKobo stays null.
+  // CASE C (gross != bells and no valid fee): effectiveKobo stays null, even
+  // when a fee was returned but invalid — we never rescue an unusable fee.
 
-  return { grossKobo, feeKobo, effectiveKobo, feeAvailable: feeUsable };
+  return {
+    grossKobo,
+    feeKobo,
+    effectiveKobo,
+    feeAvailable: feeState === 'FEE_VALID',
+    feeState,
+  };
 }
 
 function gatewayTxStatusSuccess(row: GatewayTxRow): boolean {
@@ -1028,7 +1062,14 @@ export class ReconciliationService {
         feeKobo: number | null;
         effectiveKobo: number | null;
         feeAvailable: boolean;
-      } = { grossKobo: null, feeKobo: null, effectiveKobo: null, feeAvailable: false };
+        feeState: ProviderFeeState;
+      } = {
+        grossKobo: null,
+        feeKobo: null,
+        effectiveKobo: null,
+        feeAvailable: false,
+        feeState: 'FEE_ABSENT',
+      };
       if (repGateway) {
         providerAmounts = providerAmountsMinor(repGateway, bellsKobo);
       }

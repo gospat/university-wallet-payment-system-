@@ -2452,4 +2452,90 @@ describe('Reconciliation Engine Corrections', () => {
     const row = lines.find((l) => l.includes(item.paymentReference!))!.split(',');
     expect(row[cFee]).toBe('');
   });
+
+  // ---------------------------------------------------------------------------
+  // Fail-closed: distinguish a genuinely ABSENT fee from a PRESENT-but-INVALID
+  // fee. The "gross == Bells => MATCHED" rescue rule applies ONLY when the fee
+  // is genuinely absent/null. An explicitly-present invalid fee must never be
+  // rescued (never MATCHED, never a guessed AMOUNT_MISMATCH).
+  // ---------------------------------------------------------------------------
+
+  // A. Fee genuinely absent, gross == Bells => MATCHED (TX30 shape).
+  it('AS19: Bells 100, gross 100, fee absent => MATCHED', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, includeFee: false });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
+
+  // A. Fee explicitly null, gross == Bells => MATCHED (null == absent).
+  it('AS20: Bells 100, gross 100, fee explicitly null => MATCHED', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, fee: null, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
+
+  // D. Fee present but malformed, gross == Bells => UNABLE_TO_VERIFY (NOT MATCHED).
+  it('AS21: Bells 100, gross 100, fee "not-a-number" => UNABLE_TO_VERIFY (never MATCHED)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, fee: 'not-a-number', includeFee: true });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.classification).not.toBe('MATCHED');
+    expect(item.classification).not.toBe('AMOUNT_MISMATCH');
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBeNull();
+    expect(item.variance).toBeNull();
+  });
+
+  // E. Fee present but negative, gross == Bells => UNABLE_TO_VERIFY.
+  it('AS22: Bells 100, gross 100, fee -5 => UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, fee: -5, includeFee: true });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.classification).not.toBe('MATCHED');
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBeNull();
+  });
+
+  // F. Fee present but greater than gross, gross == Bells => UNABLE_TO_VERIFY.
+  it('AS23: Bells 100, gross 100, fee 150 (> gross) => UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, fee: 150, includeFee: true });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.classification).not.toBe('MATCHED');
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBeNull();
+  });
+
+  // G. Explicit valid zero fee, gross == Bells => MATCHED.
+  it('AS24: Bells 100, gross 100, fee 0 => MATCHED', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, fee: 0, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerFee).toBe(0);
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
+
+  // B. Fee genuinely absent, gross != Bells => UNABLE_TO_VERIFY.
+  it('AS25: Bells 100, gross 450, fee absent => UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, includeFee: false });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.providerEffective).toBeNull();
+    expect(item.variance).toBeNull();
+  });
+
+  // C. Fee explicitly present and valid => MATCHED (unchanged behaviour).
+  it('AS26: Bells 100, gross 450, fee 350 => MATCHED', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, fee: 350, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
 });
