@@ -395,18 +395,30 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                   Incomplete gateway coverage — reconciliation totals are not fully reconciled
                 </p>
                 <ul className="mt-1 text-xs text-amber-700 space-y-0.5">
-                  {summary.providerAvailability.paystack !== 'AVAILABLE' && (
+                  {summary.providerAvailability.paystack === 'UNAVAILABLE' && (
                     <li>
-                      Paystack transaction listing is{' '}
-                      {summary.providerAvailability.paystack.toLowerCase()}. Some Paystack payments
+                      Paystack transaction listing is unavailable. Some Paystack payments
                       could not be independently reconciled.
                     </li>
                   )}
-                  {summary.providerAvailability.alatpay !== 'AVAILABLE' && (
+                  {summary.providerAvailability.paystack === 'PARTIALLY_AVAILABLE' && (
                     <li>
-                      ALATPay transaction listing is{' '}
-                      {summary.providerAvailability.alatpay.toLowerCase()}. Some ALATPay payments
+                      Paystack transaction listing is unavailable; individual transaction
+                      lookups are available. Gateway-only Paystack transactions cannot be
+                      discovered.
+                    </li>
+                  )}
+                  {summary.providerAvailability.alatpay === 'UNAVAILABLE' && (
+                    <li>
+                      ALATPay transaction listing is unavailable. Some ALATPay payments
                       could not be independently reconciled.
+                    </li>
+                  )}
+                  {summary.providerAvailability.alatpay === 'PARTIALLY_AVAILABLE' && (
+                    <li>
+                      ALATPay transaction listing is unavailable; individual transaction
+                      lookups are available. Gateway-only ALATPay transactions cannot be
+                      discovered.
                     </li>
                   )}
                 </ul>

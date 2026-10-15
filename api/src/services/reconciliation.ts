@@ -19,7 +19,11 @@ export type Classification =
   | 'FAILED_ATTEMPT'
   | 'UNABLE_TO_VERIFY';
 
-export type GatewayAvailability = 'AVAILABLE' | 'PARTIALLY_AVAILABLE' | 'UNAVAILABLE';
+export type GatewayAvailability =
+  | 'AVAILABLE'
+  | 'PARTIALLY_AVAILABLE'
+  | 'UNAVAILABLE'
+  | 'NOT_REQUESTED';
 
 export type VerificationMethod =
   | 'GATEWAY_LIST'
@@ -406,8 +410,17 @@ export class ReconciliationService {
   }): Promise<RunCompareResult> {
     const { dateFrom, dateTo, feeId, gateway, chargeSource = 'ALL' } = params;
 
+    // Authoritative financial date differs by status:
+    //   SUCCESS  -> receipt.paidAt (provider paid timestamp), fallback updatedAt
+    //   FAILED/PENDING/REVERSED -> createdAt (attempt creation)
+    // The Prisma OR catches transactions whose attempt was created in range OR
+    // whose receipt (successful payment) was issued in range. In-memory filtering
+    // then applies the precise authoritative financial date.
     const internalWhere: Prisma.TransactionWhereInput = {
-      createdAt: { gte: dateFrom, lte: dateTo },
+      OR: [
+        { createdAt: { gte: dateFrom, lte: dateTo } },
+        { receipts: { some: { paidAt: { gte: dateFrom, lte: dateTo } } } },
+      ],
     };
     if (feeId !== undefined && feeId !== null) {
       internalWhere.invoice = { feeId: Number(feeId) };
@@ -421,7 +434,7 @@ export class ReconciliationService {
       include: {
         user: { select: { id: true, firstName: true, lastName: true, matricNumber: true } },
         invoice: { select: { id: true, feeId: true } },
-        receipts: { select: { id: true, transactionId: true } },
+        receipts: { select: { id: true, transactionId: true, paidAt: true, isVoided: true } },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -460,6 +473,27 @@ export class ReconciliationService {
       internalTxs = internalTxsAll.filter((t) => t.chargeSource === 'CATALOGUE');
     }
 
+    // Filter by authoritative financial-payment date:
+    //   SUCCESS  -> receipt.paidAt (provider paid timestamp, authoritative)
+    //               fallback: createdAt (stable attempt time when no receipt exists)
+    //   FAILED/PENDING/REVERSED -> createdAt (attempt creation time)
+    // Note: updatedAt is intentionally NOT used as it can be bumped by any
+    // later edit, not just the status transition to SUCCESS.
+    const fromMs = dateFrom.getTime();
+    const toMs = dateTo.getTime();
+    const financialDateOf = (tx: InternalTx): Date => {
+      if (tx.status === TransactionStatus.SUCCESS) {
+        const rct = (tx.receipts ?? []).find((r) => !(r as any).isVoided) ?? (tx.receipts ?? [])[0];
+        if (rct && (rct as any).paidAt) return (rct as any).paidAt;
+        return tx.createdAt;
+      }
+      return tx.createdAt;
+    };
+    internalTxs = internalTxs.filter((t) => {
+      const ms = financialDateOf(t).getTime();
+      return ms >= fromMs && ms <= toMs;
+    });
+
     type ByKey = Map<string, InternalTx[]>;
     const internalByKey = new Map<PaymentGateway, ByKey>();
 
@@ -495,7 +529,8 @@ export class ReconciliationService {
 
     const gatewayRows: GatewayTxRow[] = [];
     let paystackAvailable = false;
-    let alatpayAvailable = false;
+    let alatpayListAvailable = false;
+    let alatpayIndividualAvailable = false;
     const alatpayVerifiedRefs = new Set<string>();
 
     for (const g of gatewaysToPull) {
@@ -521,12 +556,15 @@ export class ReconciliationService {
             from: dateFrom,
             to: dateTo,
           });
-          alatpayAvailable = available;
+          alatpayListAvailable = available;
           for (const r of rows) gatewayRows.push({ gateway: g, ...r });
           if (!available) {
             // List endpoint unavailable. Fall back to READ-ONLY individual
             // transaction lookup for each internal ALATPay transaction that
             // has a valid provider UUID. This does NOT write financial state.
+            // A successful individual lookup does NOT restore full gateway
+            // coverage — only known internal UUIDs can be verified; gateway-only
+            // transactions remain undiscoverable.
             const alatpayInternal = internalTxs.filter(
               (t) => (t.gateway ?? PaymentGateway.ALATPAY) === PaymentGateway.ALATPAY,
             );
@@ -539,12 +577,12 @@ export class ReconciliationService {
                 const { row, available: lookupAvailable } =
                   await _reconciliationInternals.fetchAlatpayTxById({ providerId });
                 if (lookupAvailable && row) {
-                  alatpayAvailable = true; // at least individual lookup works
+                  alatpayIndividualAvailable = true;
                   gatewayRows.push({ gateway: g, ...row });
                   alatpayVerifiedRefs.add(providerId);
                 }
               } catch {
-                // individual lookup failure — leave alatpayAvailable as-is
+                // individual lookup failure — leave availability flags as-is
               }
             }
           }
@@ -557,6 +595,24 @@ export class ReconciliationService {
         }
       }
     }
+
+    // Resolve per-gateway availability state:
+    //   list available            -> AVAILABLE
+    //   list unavailable + individual works -> PARTIALLY_AVAILABLE
+    //   both unavailable          -> UNAVAILABLE
+    //   not requested             -> NOT_REQUESTED
+    const paystackRequested = gatewaysToPull.includes(PaymentGateway.PAYSTACK);
+    const alatpayRequested = gatewaysToPull.includes(PaymentGateway.ALATPAY);
+    const paystackAvailability: GatewayAvailability = paystackRequested
+      ? (paystackAvailable ? 'AVAILABLE' : 'UNAVAILABLE')
+      : 'NOT_REQUESTED';
+    const alatpayAvailability: GatewayAvailability = alatpayRequested
+      ? (alatpayListAvailable
+          ? 'AVAILABLE'
+          : alatpayIndividualAvailable
+            ? 'PARTIALLY_AVAILABLE'
+            : 'UNAVAILABLE')
+      : 'NOT_REQUESTED';
 
     const gatewayByKey = new Map<PaymentGateway, Map<string, GatewayTxRow[]>>();
     for (const gr of gatewayRows) {
@@ -633,9 +689,16 @@ export class ReconciliationService {
       const gatewaySuccess = gwRowsArr.filter(gatewayTxStatusSuccess);
       const gatewayReversed = gwRowsArr.some(gatewayTxReversed);
 
-      // Provider availability for this specific gateway
+      // Provider availability for this specific gateway.
+      // providerFullAvailable = AVAILABLE (full list coverage).
+      // Under PARTIALLY_AVAILABLE (individual lookup only) we can verify known
+      // internal UUIDs but cannot discover gateway-only transactions, so a
+      // missing gateway match must NOT become MISSING_GATEWAY.
+      const gatewayAvailability =
+        g === PaymentGateway.PAYSTACK ? paystackAvailability : alatpayAvailability;
+      const providerFullAvailable = gatewayAvailability === 'AVAILABLE';
       const providerAvailable =
-        g === PaymentGateway.PAYSTACK ? paystackAvailable : alatpayAvailable;
+        gatewayAvailability === 'AVAILABLE' || gatewayAvailability === 'PARTIALLY_AVAILABLE';
 
       if (internalRows.length >= 2 || gwRowsArr.length >= 2) {
         flags.add('DUPLICATE_REFERENCE');
@@ -656,14 +719,18 @@ export class ReconciliationService {
         flags.add('PENDING_ATTEMPT');
       }
 
-      // MISSING_GATEWAY only when provider is available and there is a genuine
-      // successful internal record with no corresponding gateway record.
-      if (anyInternal && !anyGateway && hasInternalSuccess && providerAvailable) {
+      // MISSING_GATEWAY only when the provider has FULL list coverage
+      // (AVAILABLE) and there is a genuine successful internal record with no
+      // corresponding gateway record. Under PARTIALLY_AVAILABLE we cannot
+      // prove the gateway record is missing, so it is UNABLE_TO_VERIFY.
+      if (anyInternal && !anyGateway && hasInternalSuccess && providerFullAvailable) {
         flags.add('MISSING_GATEWAY');
       }
-      // If provider is unavailable and we have an internal success with no
-      // gateway match, classify as UNABLE_TO_VERIFY (not MISSING_GATEWAY).
-      if (anyInternal && !anyGateway && hasInternalSuccess && !providerAvailable) {
+      // If provider is not fully available (UNAVAILABLE or PARTIALLY_AVAILABLE
+      // without a successful individual lookup for this record) and we have an
+      // internal success with no gateway match, classify as UNABLE_TO_VERIFY
+      // (never MISSING_GATEWAY).
+      if (anyInternal && !anyGateway && hasInternalSuccess && !providerFullAvailable) {
         flags.add('UNABLE_TO_VERIFY');
       }
 
@@ -779,6 +846,13 @@ export class ReconciliationService {
       | 'failedAttempts'
       | 'unableToVerify';
 
+    // incompleteCoverage only considers gateways that were REQUESTED.
+    // A gateway that was not filtered-in does not contribute to incomplete
+    // coverage (e.g. ALATPay-only report must not warn about Paystack).
+    const incompleteCoverage =
+      (paystackRequested && paystackAvailability !== 'AVAILABLE') ||
+      (alatpayRequested && alatpayAvailability !== 'AVAILABLE');
+
     const summary: ReconciliationSummary = items.reduce(
       (acc, it) => {
         const key = mapKey(it.classification) as NumericSummaryKey;
@@ -799,10 +873,10 @@ export class ReconciliationService {
         failedAttempts: 0,
         unableToVerify: 0,
         providerAvailability: {
-          paystack: paystackAvailable ? 'AVAILABLE' : 'UNAVAILABLE',
-          alatpay: alatpayAvailable ? 'AVAILABLE' : 'UNAVAILABLE',
+          paystack: paystackAvailability,
+          alatpay: alatpayAvailability,
         },
-        incompleteCoverage: !paystackAvailable || !alatpayAvailable,
+        incompleteCoverage,
       } as ReconciliationSummary,
     );
 

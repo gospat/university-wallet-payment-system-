@@ -625,4 +625,376 @@ describe('Reconciliation Engine Corrections', () => {
     expect(receiptAfter).toBe(receiptBefore);
     expect(auditAfter).toBe(auditBefore);
   });
+
+  // ---- Scenario 17: ALATPay list unavailable but individual lookup works → PARTIALLY_AVAILABLE ----
+  it('S17: ALATPay list unavailable + individual lookup succeeds → PARTIALLY_AVAILABLE (not AVAILABLE)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const t = await createTx({
+      reference: 'PAY-ALAT-PARTIAL',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: ALAT_UUID,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-PART-${Date.now()}`,
+        verificationToken: `vt-part-${Date.now()}`,
+        transactionId: t.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt: TX_DATE,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    createdReceiptIds.push(r.id);
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: false });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { summary, items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+
+    expect(summary.providerAvailability.alatpay).toBe('PARTIALLY_AVAILABLE');
+    expect(summary.incompleteCoverage).toBe(true);
+    expect(summary.missingGateway).toBe(0);
+    const matched = items.find((i) => i.paymentReference === 'PAY-ALAT-PARTIAL');
+    expect(matched?.classification).toBe('MATCHED');
+  });
+
+  // ---- Scenario 18: One individual lookup succeeds, another fails ----
+  it('S18: one individual ALATPay lookup succeeds, another fails → failed one UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const UUID_A = '11111111-aaaa-4aaa-8aaa-111111111111';
+    const UUID_B = '22222222-bbbb-4bbb-8bbb-222222222222';
+    const ta = await createTx({
+      reference: 'PAY-ALAT-A',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: UUID_A,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+    const tb = await createTx({
+      reference: 'PAY-ALAT-B',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: UUID_B,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 30000,
+      amount: 30000,
+    });
+    const ra = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-A-${Date.now()}`,
+        verificationToken: `vt-a-${Date.now()}`,
+        transactionId: ta.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt: TX_DATE,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    const rb = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-B-${Date.now()}`,
+        verificationToken: `vt-b-${Date.now()}`,
+        transactionId: tb.id,
+        studentId: testStudentId!,
+        paidAmount: 30000,
+        paymentChannel: 'card',
+        paidAt: TX_DATE,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 30000,
+      },
+    });
+    createdReceiptIds.push(ra.id, rb.id);
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: false });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockImplementation(({ providerId }: any) => {
+        if (providerId === UUID_A) {
+          return Promise.resolve({ row: alatRow(UUID_A, 50000, 'SUCCESS'), available: true });
+        }
+        return Promise.resolve({ row: null, available: false });
+      });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { summary, items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+
+    expect(summary.providerAvailability.alatpay).toBe('PARTIALLY_AVAILABLE');
+    expect(summary.missingGateway).toBe(0);
+    const a = items.find((i) => i.paymentReference === 'PAY-ALAT-A');
+    const b = items.find((i) => i.paymentReference === 'PAY-ALAT-B');
+    expect(a?.classification).toBe('MATCHED');
+    expect(b?.classification).toBe('UNABLE_TO_VERIFY');
+    expect(b?.classification).not.toBe('MISSING_GATEWAY');
+  });
+
+  // ---- Scenario 19: ALATPay success without provider UUID while list unavailable → UNABLE_TO_VERIFY ----
+  it('S19: ALATPay success without usable provider UUID while list unavailable → UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-ALAT-NOUUID',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayReference: 'not-a-uuid-just-order-ref',
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: false });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: null, available: false });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { summary, items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+
+    expect(summary.providerAvailability.alatpay).toBe('UNAVAILABLE');
+    expect(summary.missingGateway).toBe(0);
+    const c = items.find((i) => i.paymentReference === 'PAY-ALAT-NOUUID');
+    expect(c?.classification).toBe('UNABLE_TO_VERIFY');
+    expect(c?.classification).not.toBe('MISSING_GATEWAY');
+  });
+
+  // ---- Scenario 20: ALATPay-only filter must not consider Paystack availability ----
+  it('S20: ALATPay-only filter does not consider Paystack availability', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    // Paystack not requested — its availability must not affect incompleteCoverage.
+
+    const { summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+
+    expect(summary.providerAvailability.paystack).toBe('NOT_REQUESTED');
+    expect(summary.providerAvailability.alatpay).toBe('AVAILABLE');
+    expect(summary.incompleteCoverage).toBe(false);
+  });
+
+  // ---- Scenario 21: Paystack-only filter must not consider ALATPay availability ----
+  it('S21: Paystack-only filter does not consider ALATPay availability', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.PAYSTACK,
+    });
+
+    expect(summary.providerAvailability.alatpay).toBe('NOT_REQUESTED');
+    expect(summary.providerAvailability.paystack).toBe('AVAILABLE');
+    expect(summary.incompleteCoverage).toBe(false);
+  });
+
+  // ---- Scenario 22: ALL filter considers both providers ----
+  it('S22: ALL filter considers both providers', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: false });
+
+    const { summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+    });
+
+    expect(summary.providerAvailability.paystack).toBe('AVAILABLE');
+    expect(summary.providerAvailability.alatpay).toBe('UNAVAILABLE');
+    expect(summary.incompleteCoverage).toBe(true);
+  });
+
+  // ---- Scenario 23: PARTIALLY_AVAILABLE causes incompleteCoverage when requested ----
+  it('S23: PARTIALLY_AVAILABLE always causes incompleteCoverage when provider requested', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-ALAT-PART2',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: ALAT_UUID,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: false });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+
+    expect(summary.providerAvailability.alatpay).toBe('PARTIALLY_AVAILABLE');
+    expect(summary.incompleteCoverage).toBe(true);
+  });
+
+  // ---- Scenario 24: NOT_REQUESTED provider produces no misleading warning ----
+  it('S24: NOT_REQUESTED provider is not reported as unavailable', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+
+    expect(summary.providerAvailability.paystack).toBe('NOT_REQUESTED');
+    expect(summary.incompleteCoverage).toBe(false);
+  });
+
+  // ---- Scenario 25: Successful transaction around midnight uses receipt.paidAt ----
+  it('S25: successful tx near midnight is included by receipt.paidAt financial date', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    // Attempt created on Oct 14 23:58, receipt paid on Oct 15 00:03.
+    const created = new Date('2026-10-14T23:58:00.000Z');
+    const paidAt = new Date('2026-10-15T00:03:00.000Z');
+    const dayFrom = new Date('2026-10-15T00:00:00.000Z');
+    const dayTo = new Date('2026-10-15T23:59:59.999Z');
+
+    const t = await createTx({
+      reference: 'PAY-PS-MIDNIGHT',
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref('PS-MIDNIGHT'),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      createdAt: created,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-MID-${Date.now()}`,
+        verificationToken: `vt-mid-${Date.now()}`,
+        transactionId: t.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    createdReceiptIds.push(r.id);
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [paystackRow('PS-MIDNIGHT', 50000, 'success', paidAt.toISOString())], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: dayFrom,
+      dateTo: dayTo,
+      gateway: PaymentGateway.PAYSTACK,
+    });
+
+    const item = items.find((i) => i.paymentReference === 'PAY-PS-MIDNIGHT');
+    expect(item).toBeDefined();
+    expect(item?.classification).toBe('MATCHED');
+  });
+
+  // ---- Scenario 26: No reconciliation read operation mutates financial state ----
+  it('S26: runCompare changes no transaction/receipt/invoice/ledger/settlement/refund state', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-PS-RO2',
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref('PS-RO2'),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [paystackRow('PS-RO2', 50000)], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const txBefore = await prisma.transaction.count();
+    const receiptBefore = await prisma.receipt.count();
+    const invoiceBefore = await prisma.invoice.count();
+    const auditBefore = await prisma.auditLog.count();
+    const settlementBefore = await prisma.settlement.count();
+    const refundBefore = await prisma.refund.count();
+
+    await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.PAYSTACK,
+    });
+
+    expect(await prisma.transaction.count()).toBe(txBefore);
+    expect(await prisma.receipt.count()).toBe(receiptBefore);
+    expect(await prisma.invoice.count()).toBe(invoiceBefore);
+    expect(await prisma.auditLog.count()).toBe(auditBefore);
+    expect(await prisma.settlement.count()).toBe(settlementBefore);
+    expect(await prisma.refund.count()).toBe(refundBefore);
+  });
 });

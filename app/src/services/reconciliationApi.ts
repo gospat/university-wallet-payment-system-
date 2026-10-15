@@ -12,7 +12,11 @@ export type Classification =
   | 'FAILED_ATTEMPT'
   | 'UNABLE_TO_VERIFY';
 
-export type GatewayAvailability = 'AVAILABLE' | 'PARTIALLY_AVAILABLE' | 'UNAVAILABLE';
+export type GatewayAvailability =
+  | 'AVAILABLE'
+  | 'PARTIALLY_AVAILABLE'
+  | 'UNAVAILABLE'
+  | 'NOT_REQUESTED';
 
 export type ChargeSource = 'ALL' | 'CATALOGUE' | 'DIRECT_BILL';
 
