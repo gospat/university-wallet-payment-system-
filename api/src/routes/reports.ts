@@ -61,6 +61,13 @@ const BaseFilterSchema = z.object({
   studentId: z.coerce.number().int().positive().optional(),
   paymentStatus: z.enum(['PENDING','PROCESSING','SUCCESS','FAILED','UNDERPAID','OVERPAID','REVERSED']).optional(),
   reconciliationStatus: ReconciliationStatusSchema,
+  // Canonical OUTSTANDING SETTLEMENT drill-down flag (query-string boolean).
+  // Filters the payment register by the exact outstanding predicate used by the
+  // R1 dashboard, so the card and its drill-down share one definition.
+  settlementOutstanding: z.preprocess(
+    (v) => (v === true || v === 'true' || v === '1' || v === 1 ? true : undefined),
+    z.literal(true).optional(),
+  ),
 });
 
 const PagedSchema = z.object({

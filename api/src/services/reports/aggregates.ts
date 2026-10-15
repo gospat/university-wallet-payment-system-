@@ -91,6 +91,10 @@ export interface ReportFilterCtx {
   provider?: PaymentGateway;
   paymentStatus?: TransactionStatus;
   reconciliationStatus?: string | string[];
+  // Canonical OUTSTANDING SETTLEMENT drill-down flag — filters by the exact
+  // outstanding predicate used by dashboardSummaryCards (see
+  // buildOutstandingSettlementFilter), never by a status list alone.
+  settlementOutstanding?: boolean;
   studentId?: number;
   studentMatric?: string;
   q?: string;
@@ -178,6 +182,32 @@ export function buildReconciliationStatusFilter(f: ReportFilterCtx): Prisma.Sql 
   if (list.length === 0) return null;
   const placeholders = Prisma.join(list.map(s => Prisma.sql`${s}`), ',');
   return Prisma.sql`COALESCE(s.status, 'PENDING_SETTLEMENT') IN (${placeholders})`;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical OUTSTANDING SETTLEMENT predicate.
+//
+// This is THE single definition of "outstanding settlement" and MUST be shared
+// by both the R1 dashboard count/amount and the OUTSTANDING_SETTLEMENT
+// drill-down, so the card and its drill-down always describe the same
+// population. A status list alone is NOT sufficient: e.g. a VARIANCE record
+// with actualSettlement >= expectedSettlement has zero outstanding and must not
+// appear in the outstanding drill-down.
+//
+//   expectedSettlement = COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee)
+//   outstanding        = GREATEST(expectedSettlement - COALESCE(s.actualSettlement, 0), 0)
+//
+// A transaction is outstanding when its outstanding amount is positive OR it
+// has no authoritative settlement evidence at all.
+//
+// Requires the caller to join receipts r and settlements s.
+// ---------------------------------------------------------------------------
+export function buildOutstandingSettlementFilter(f: ReportFilterCtx): Prisma.Sql | null {
+  if (!f.settlementOutstanding) return null;
+  return Prisma.sql`(
+    GREATEST(COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee) - COALESCE(s.actualSettlement, 0), 0) > 0
+    OR s.actualSettlement IS NULL
+  )`;
 }
 
 // ---------------------------------------------------------------------------
@@ -732,31 +762,34 @@ export async function paymentRegister(
   const skip = (page - 1) * pageSize;
 
   // Settlement-status (drill-down facet) filter — READ-ONLY. The dashboard
-  // Fully Settled / Partially Settled / Outstanding cards drill into this
-  // register with a reconciliationStatus facet, so it must be honoured (it was
-  // previously ignored). Shares the exact binding used by dashboardSummaryCards
-  // and settlementReport via buildReconciliationStatusFilter(). The settlements
-  // join is 1:1 (Settlement.transactionId is @unique), so it never multiplies
+  // Fully Settled / Partially Settled cards drill into this register with a
+  // reconciliationStatus facet, so it must be honoured (it was previously
+  // ignored). Shares the exact binding used by dashboardSummaryCards and
+  // settlementReport via buildReconciliationStatusFilter(). The settlements join
+  // is 1:1 (Settlement.transactionId is @unique), so it never multiplies
   // register rows or the summary sums.
   const reconFilter = buildReconciliationStatusFilter(f);
-  const baseWhere = reconFilter ? Prisma.join([where, reconFilter], ' AND ') : where;
+  // OUTSTANDING_SETTLEMENT drill-down — the SAME canonical predicate the R1
+  // dashboard count/amount uses, so the card and its drill-down describe exactly
+  // the same population (a zero-outstanding VARIANCE/MATCHED record is excluded).
+  const outstandingFilter = buildOutstandingSettlementFilter(f);
+  const whereParts: Prisma.Sql[] = [where];
+  if (reconFilter) whereParts.push(reconFilter);
+  if (outstandingFilter) whereParts.push(outstandingFilter);
 
   // Search filter (R5 spec: matric / studentName / receiptNo / txRef / gatewayRef)
-  let searchWhere = baseWhere;
   if (f.q && String(f.q).trim().length > 0) {
     const q = `%${String(f.q).trim()}%`;
-    searchWhere = Prisma.join([
-      baseWhere,
-      Prisma.sql`(
+    whereParts.push(Prisma.sql`(
         u.matricNumber LIKE ${q} OR
         CONCAT(u.firstName, ' ', u.lastName) LIKE ${q} OR
         r.receiptNumber LIKE ${q} OR
         t.reference LIKE ${q} OR
         t.paystackReference LIKE ${q} OR
         t.alatpayReference LIKE ${q}
-      )`,
-    ], ' AND ');
+      )`);
   }
+  const searchWhere = Prisma.join(whereParts, ' AND ');
 
   const summarySql = Prisma.sql`
     SELECT

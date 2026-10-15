@@ -43,10 +43,14 @@ describe('Reports Centre — settlement drill-down facets', () => {
     expect(DASHBOARD_FACETS.PARTIALLY_SETTLED.reconciliationStatus).not.toContain('SETTLED');
   });
 
-  it('OUTSTANDING_SETTLEMENT covers the incomplete statuses AND PARTIALLY_MATCHED', () => {
-    const expected = ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW', 'PARTIALLY_MATCHED'];
-    expect(applyFacetToFilters('OUTSTANDING_SETTLEMENT').reconciliationStatus).toEqual(expect.arrayContaining(expected));
-    expect(DASHBOARD_FACETS.OUTSTANDING_SETTLEMENT.reconciliationStatus).toEqual(expect.arrayContaining(expected));
+  it('OUTSTANDING_SETTLEMENT uses the canonical outstanding predicate (amount-based, not a status list)', () => {
+    const f = applyFacetToFilters('OUTSTANDING_SETTLEMENT');
+    expect(f.settlementOutstanding).toBe(true);
+    // Must NOT be a status list — a zero-outstanding VARIANCE/MATCHED record
+    // would otherwise leak into the outstanding drill-down.
+    expect(f.reconciliationStatus).toBeUndefined();
+    expect(DASHBOARD_FACETS.OUTSTANDING_SETTLEMENT.settlementOutstanding).toBe(true);
+    expect(DASHBOARD_FACETS.OUTSTANDING_SETTLEMENT.reconciliationStatus).toBeUndefined();
   });
 
   it('the settlement count facets map to DISTINCT datasets (never one mixed set)', () => {

@@ -394,7 +394,7 @@ describe('Reports — DB-backed financial semantics', () => {
     gateway: PaymentGateway,
     paymentAmount: number,
     actualSettlement: number | null,
-    status: 'PENDING_SETTLEMENT' | 'SETTLED' | 'MATCHED' | 'PARTIALLY_MATCHED' = 'SETTLED',
+    status: 'PENDING_SETTLEMENT' | 'SETTLED' | 'MATCHED' | 'PARTIALLY_MATCHED' | 'VARIANCE' | 'UNMATCHED' | 'UNDER_REVIEW' = 'SETTLED',
     // Settlement.paymentDate drives settlementReport's date filter
     // (COALESCE(s.paymentDate, r.paidAt)). Tests that scope settlementReport to a
     // synthetic day must pin it inside that day, else the row is out of range.
@@ -1028,5 +1028,53 @@ describe('Reports — DB-backed financial semantics', () => {
     const refs = reg.rows.map((r: any) => r.transactionReference);
     expect(refs).toContain(part.reference);
     expect(refs).not.toContain(full.reference);
+  });
+
+  // =========================================================================
+  // Task I regressions — the OUTSTANDING_SETTLEMENT drill-down must use the
+  // SAME canonical outstanding predicate as the R1 dashboard count/amount.
+  // =========================================================================
+
+  dbIt('AL. OUTSTANDING_SETTLEMENT drill-down returns exactly the canonical outstanding population', async () => {
+    const day = '2001-07-13';
+    // 1. No Settlement row, positive expected (100 − 0) → outstanding.
+    const { tx: none } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T09:00:00.000Z`) });
+    // 2. PARTIALLY_MATCHED expected 100 / actual 60 → outstanding 40.
+    const { tx: part } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(part.id, PaymentGateway.ALATPAY, 100, 60, 'PARTIALLY_MATCHED');
+    // 3. MATCHED 100/100 → outstanding 0, must NOT appear.
+    const { tx: exact } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    await makeSettlement(exact.id, PaymentGateway.ALATPAY, 100, 100, 'MATCHED');
+    // 4. VARIANCE 100/110 (excess) → outstanding 0. A status-list drill-down would
+    //    have wrongly included this; the canonical predicate must exclude it.
+    const { tx: excess } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T12:00:00.000Z`) });
+    await makeSettlement(excess.id, PaymentGateway.ALATPAY, 100, 110, 'VARIANCE');
+
+    const reg = await paymentRegister({ ...dayCtx(day), settlementOutstanding: true, page: 1, pageSize: 100 });
+    const refs = reg.rows.map((r: any) => r.transactionReference).sort();
+    expect(refs).toEqual([none.reference, part.reference].sort());
+    expect(refs).not.toContain(exact.reference);   // MATCHED 100/100 excluded
+    expect(refs).not.toContain(excess.reference);  // VARIANCE 100/110 excluded
+    expect(reg.total).toBe(2);
+  });
+
+  dbIt('AM. Outstanding dashboard count/amount and the drill-down population share ONE canonical predicate', async () => {
+    const day = '2001-07-15';
+    await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T09:00:00.000Z`) });
+    const { tx: part } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(part.id, PaymentGateway.ALATPAY, 100, 60, 'PARTIALLY_MATCHED');
+    const { tx: exact } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    await makeSettlement(exact.id, PaymentGateway.ALATPAY, 100, 100, 'MATCHED');
+    const { tx: excess } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T12:00:00.000Z`) });
+    await makeSettlement(excess.id, PaymentGateway.ALATPAY, 100, 110, 'VARIANCE');
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    // No-settlement (100) + partial remainder (40) = 140 outstanding across 2 txs.
+    expect(cards.outstandingSettlementCount).toBe(2);
+    expect(cards.outstandingSettlementAmount).toBe(140);
+
+    // The drill-down population MUST equal the card count (same predicate).
+    const reg = await paymentRegister({ ...dayCtx(day), settlementOutstanding: true, page: 1, pageSize: 100 });
+    expect(reg.total).toBe(cards.outstandingSettlementCount);
   });
 });

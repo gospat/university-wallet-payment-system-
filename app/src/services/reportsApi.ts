@@ -23,6 +23,10 @@ export type ReportsBaseFilters = {
   // Backend accepts a single enum OR an array of enums (RECONCILED/UNRECONCILED
   // facets expand to several settlement statuses). Parameterized IN() server-side.
   reconciliationStatus?: string | string[];
+  // Canonical OUTSTANDING SETTLEMENT drill-down flag: filters by the exact
+  // outstanding predicate (positive expected-settlement remainder, or no
+  // authoritative settlement evidence) used by the R1 dashboard cards.
+  settlementOutstanding?: boolean;
   page?: number;
   pageSize?: number;
   q?: string;
@@ -67,9 +71,11 @@ export const DASHBOARD_FACETS: Record<DashboardFacetName, Partial<ReportsBaseFil
   // fully settled transaction.
   FULLY_SETTLED: { reconciliationStatus: ['MATCHED', 'SETTLED'] },
   PARTIALLY_SETTLED: { reconciliationStatus: ['PARTIALLY_MATCHED'] },
-  // Incomplete settlement: outstanding amounts (incl. partially settled remainder)
-  // plus transactions with no complete settlement evidence.
-  OUTSTANDING_SETTLEMENT: { reconciliationStatus: ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW', 'PARTIALLY_MATCHED'] },
+  // Incomplete settlement: EXACTLY the canonical outstanding population —
+  // positive outstanding remainder OR no authoritative settlement evidence.
+  // Implemented as an amount predicate (not a status list), so a zero-outstanding
+  // VARIANCE / MATCHED record is excluded, matching the R1 dashboard card.
+  OUTSTANDING_SETTLEMENT: { settlementOutstanding: true },
 };
 
 const ENDPOINT_BASE = '/reports';
@@ -361,7 +367,9 @@ export function applyFacetToFilters(facet: string, base: any = {}): any {
       f.reconciliationStatus = ['PARTIALLY_MATCHED'];
       break;
     case 'OUTSTANDING_SETTLEMENT':
-      f.reconciliationStatus = ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW', 'PARTIALLY_MATCHED'];
+      // Canonical outstanding predicate (amount-based), NOT a status list — the
+      // card and its drill-down must return the same population.
+      f.settlementOutstanding = true;
       break;
     case 'BY_REFUND':
       // No transaction-status value represents a refund; the register filter
