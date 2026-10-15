@@ -280,12 +280,12 @@ export async function exportReportsAuditTrail(filters: any, format: ReportFormat
 // ----------------- H15 Literal Sort Allowlist -----------------
 export const TXN_ALLOWED_SORTS: Record<string, string[]> = {
   'payment-register': ['createdAt', 'studentName', 'matricNumber', 'provider', 'billName', 'baseAmount', 'totalAmount', 'status', 'receiptNumber'],
-  'daily-collections': ['date', 'txCount', 'studentCount', 'gross', 'net', 'refunds'],
-  'monthly-collections': ['month', 'txCount', 'uniquePayers', 'gross', 'net', 'refunds'],
+  'daily-collections': ['date', 'txCount', 'studentCount', 'bellsCollection', 'totalCharged', 'refunds', 'netBellsCollection'],
+  'monthly-collections': ['month', 'txCount', 'uniquePayers', 'bellsCollection', 'totalCharged', 'refunds', 'netBellsCollection'],
   'revenue-by-bill': ['revenueItem', 'numPayers', 'expectedAmount', 'collected', 'outstanding', 'collectionPct'],
   'bill-performance': ['billName', 'category', 'assigned', 'expectedAmount', 'collected', 'outstanding', 'collectionPct'],
   'outstanding-debtors': ['matricNumber', 'studentName', 'billName', 'paymentStatus', 'dueAmount', 'paidAmount', 'outstanding'],
-  'hierarchical-revenue': ['level', 'nodeName', 'txCount', 'uniquePayers', 'gross', 'net'],
+  'hierarchical-revenue': ['collegeName', 'deptName', 'progName', 'txCount', 'uniquePayers', 'collected'],
   'charges-fee-income': ['period', 'basePayment', 'convFee', 'svcCharge', 'gwFee', 'totalCharged', 'netRevenue'],
   'general-ledger': ['transactionDate', 'entryType', 'account', 'debit', 'credit', 'transactionId'],
   'receipt-register': ['receiptNumber', 'date', 'studentName', 'matricNumber', 'billName', 'baseAmount', 'totalAmount', 'provider'],
@@ -318,7 +318,7 @@ export const FACET_LABELS: Record<FacetName, string> = {
   BY_GATEWAY: 'Gateway Fee Breakdown',
   BY_REFUND: 'Refunded Payments',
   BY_NET: 'Net Revenue View',
-  RECONCILED: 'Settled Transactions (Settlement Matched)',
+  RECONCILED: 'Settled / Partially Settled Transactions',
   UNRECONCILED: 'Pending Settlement Transactions',
 };
 

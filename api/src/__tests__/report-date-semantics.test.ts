@@ -30,6 +30,7 @@ import {
   lagosDayOf,
   lagosDayBounds,
   buildReconciliationStatusFilter,
+  dashboardSummaryCards,
   dailyCollections,
   monthlyCollections,
   comparativeReports,
@@ -168,8 +169,10 @@ describe('Reports — reconciliationStatus filter accepts a single enum OR an ar
 // ---------------------------------------------------------------------------
 describe('Reports — backend/UI/export column contracts agree', () => {
   const UI_COLUMNS: Record<string, string[]> = {
-    daily: ['date', 'txCount', 'studentCount', 'gross', 'convenienceFee', 'serviceCharge', 'gatewayFee', 'refunds', 'net'],
-    gateway: ['provider', 'successCount', 'failCount', 'pendingCount', 'gross', 'gatewayFees', 'expectedSettlement', 'settledCount', 'settlementCoverage', 'actualSettlement', 'settlementVariance'],
+    daily: ['date', 'txCount', 'studentCount', 'bellsCollection', 'convenienceFee', 'serviceCharge', 'gatewayFee', 'totalCharged', 'refunds', 'netBellsCollection'],
+    monthly: ['month', 'txCount', 'uniquePayers', 'bellsCollection', 'charges', 'totalCharged', 'refunds', 'netBellsCollection'],
+    hierarchical: ['collegeName', 'deptName', 'progName', 'txCount', 'uniquePayers', 'collected', 'convenienceFee', 'serviceCharge', 'gatewayFee'],
+    gateway: ['provider', 'successCount', 'failCount', 'pendingCount', 'gross', 'gatewayFees', 'expectedSettlement', 'fullySettledCount', 'partialSettlementCount', 'settlementEvidenceCount', 'settlementCoverage', 'actualSettlement', 'settlementVariance'],
     settlement: ['transactionReference', 'provider', 'paymentDate', 'paymentAmount', 'gatewayFee', 'expectedSettlement', 'settlementDate', 'settlementRef', 'actualSettlement', 'variance'],
     payment_register: ['createdAt', 'studentName', 'matricNumber', 'provider', 'billName', 'baseAmount', 'convenienceFee', 'gatewayFee', 'totalAmount', 'status', 'receiptNumber'],
   };
@@ -392,6 +395,10 @@ describe('Reports — DB-backed financial semantics', () => {
     paymentAmount: number,
     actualSettlement: number | null,
     status: 'PENDING_SETTLEMENT' | 'SETTLED' | 'MATCHED' | 'PARTIALLY_MATCHED' = 'SETTLED',
+    // Settlement.paymentDate drives settlementReport's date filter
+    // (COALESCE(s.paymentDate, r.paidAt)). Tests that scope settlementReport to a
+    // synthetic day must pin it inside that day, else the row is out of range.
+    paymentDate?: Date,
   ) {
     seq += 1;
     const s = await prisma.settlement.create({
@@ -403,7 +410,7 @@ describe('Reports — DB-backed financial semantics', () => {
         gatewayFee: 0,
         expectedSettlement: paymentAmount,
         actualSettlement,
-        paymentDate: new Date(),
+        paymentDate: paymentDate ?? new Date(),
         status,
       },
     });
@@ -682,7 +689,8 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(alat.settlementVariance).toBe(0);
     expect(ps.settlementCoverage).toBe('FULL');
     expect(ps.actualSettlement).toBe(190);
-    expect(ps.settlementVariance).toBe(10);
+    // CANONICAL sign: variance = ACTUAL − EXPECTED = 190 − 200 = −10 (shortfall).
+    expect(ps.settlementVariance).toBe(-10);
   });
 
   dbIt('T-C. R10 with PARTIAL settlement evidence: coverage PARTIAL and no misleading full-period variance', async () => {
@@ -726,5 +734,213 @@ describe('Reports — DB-backed financial semantics', () => {
     // Provider filter: the PAYSTACK row must never subtract the ALATPAY refunds.
     const ps = await paymentGatewayReport({ ...base, provider: PaymentGateway.PAYSTACK });
     expect(ps.find((r: any) => r.provider === 'PAYSTACK')!.refunds).toBe(40);
+  });
+
+  // =========================================================================
+  // Task G follow-up regressions — FINAL REPORTS FOUNDATION CORRECTION.
+  // =========================================================================
+
+  dbIt('V. R1 dashboard summary resolves every documented detail filter (no missing SQL alias) and respects scope', async () => {
+    const day = '2001-06-01';
+    await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    const base = dayCtx(day);
+
+    // Derive valid FK ids from the seeded environment (fail loudly if absent).
+    const sampleFee = await prisma.fee.findFirst({ select: { id: true, categoryId: true, level: true } });
+    if (!sampleFee) throw new Error('DB-backed test requires at least one seeded fee row');
+    const stu = await prisma.user.findUnique({ where: { id: studentId! }, select: { matricNumber: true } });
+
+    // Every alias the shared filter may reference must be joined by the R1
+    // settlement query. Before the fix, u.matricNumber / i.feeId / fe.categoryId
+    // etc. raised "Unknown column" on filtered dashboard requests.
+    const filters: Array<ReportFilterCtx> = [
+      { ...base, provider: PaymentGateway.PAYSTACK },
+      { ...base, studentId: studentId! },
+      { ...base, studentMatric: stu!.matricNumber! },
+      { ...base, feeId: sampleFee.id },
+      { ...base, feeCategoryId: sampleFee.categoryId },
+      { ...base, session: '2001/2002' },
+      { ...base, semester: 'FIRST' },
+      { ...base, collegeId: 999999 },
+      { ...base, departmentId: 999999 },
+      { ...base, programmeId: 999999 },
+      { ...base, level: sampleFee.level ?? 1 },
+    ];
+    for (const f of filters) {
+      const cards = await dashboardSummaryCards(f);
+      expect(cards).toBeTruthy();
+      expect(typeof cards.bellsCollection).toBe('number');
+      expect(typeof cards.totalCharged).toBe('number');
+      expect(typeof cards.netBellsCollection).toBe('number');
+    }
+    // Unfiltered scope must include the fixture.
+    const all = await dashboardSummaryCards(base);
+    expect(all.bellsCollection).toBe(100);
+  });
+
+  dbIt('W. R1 partial settlement never presents the full Receipt.paidAmount as settled', async () => {
+    const day = '2001-06-03';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100000, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.ALATPAY, 100000, 60000, 'PARTIALLY_MATCHED');
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    // Authoritative settled money is the ACTUAL 60,000 — never the 100,000 payment.
+    expect(cards.settlementEvidenceAmount).toBe(60000);
+    expect(cards.settlementEvidenceAmount).not.toBe(100000);
+    expect(cards.fullySettledCount).toBe(0);
+    expect(cards.partialSettlementCount).toBe(1);
+  });
+
+  dbIt('X. R1 settlement rows with NULL actualSettlement leave the settled amount UNKNOWN (null, not 0)', async () => {
+    const day = '2001-06-05';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 5000, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.PAYSTACK, 5000, null, 'PENDING_SETTLEMENT');
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.settlementEvidenceAmount).toBeNull();
+    expect(cards.settlementEvidenceCount).toBe(0);
+    expect(cards.pendingSettlementCount).toBe(1);
+    expect(cards.pendingSettlementAmount).toBe(5000);
+  });
+
+  dbIt('Y. R1 partial settlement money uses only the authoritative actual amount (mixed evidence)', async () => {
+    const day = '2001-06-07';
+    const { tx: a } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100000, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(a.id, PaymentGateway.ALATPAY, 100000, 60000, 'PARTIALLY_MATCHED');
+    // A second successful payment with NO settlement evidence at all.
+    await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 40000, paidAt: new Date(`${day}T11:00:00.000Z`) });
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.settlementEvidenceAmount).toBe(60000);
+    expect(cards.settlementEvidenceCount).toBe(1);
+    expect(cards.partialSettlementCount).toBe(1);
+    // The unevidenced payment remains PENDING — never counted as settled.
+    expect(cards.pendingSettlementCount).toBe(1);
+  });
+
+  dbIt('Z. R10 and R11 use the SAME canonical variance sign (ACTUAL − EXPECTED); shortfall is negative', async () => {
+    const day = '2001-06-09';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.ALATPAY, 100, 90, 'MATCHED', new Date(`${day}T10:00:00.000Z`));
+
+    const gw = (await paymentGatewayReport(dayCtx(day))).find((r: any) => r.provider === 'ALATPAY')!;
+    expect(gw.expectedSettlement).toBe(100);
+    expect(gw.actualSettlement).toBe(90);
+    expect(gw.settlementVariance).toBe(-10); // ACTUAL − EXPECTED
+
+    const st = await settlementReport(dayCtx(day));
+    const row = st.rows.find((r: any) => r.transactionReference === tx.reference)!;
+    expect(row.expectedSettlement).toBe(100);
+    expect(row.actualSettlement).toBe(90);
+    expect(row.variance).toBe(-10); // SAME sign as R10
+    expect(row.variance).toBe(gw.settlementVariance);
+  });
+
+  dbIt('AA. Excess settlement produces a POSITIVE variance under the canonical sign', async () => {
+    const day = '2001-06-11';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.PAYSTACK, 100, 110, 'MATCHED', new Date(`${day}T10:00:00.000Z`));
+
+    const gw = (await paymentGatewayReport(dayCtx(day))).find((r: any) => r.provider === 'PAYSTACK')!;
+    expect(gw.settlementVariance).toBe(10); // ACTUAL − EXPECTED = +10
+
+    const st = await settlementReport(dayCtx(day));
+    const row = st.rows.find((r: any) => r.transactionReference === tx.reference)!;
+    expect(row.variance).toBe(10);
+  });
+
+  dbIt('AB. NONE settlement coverage fails closed (R10 variance null, R11 variance null, R1 evidence amount null)', async () => {
+    const day = '2001-06-13';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    // No Settlement row at all.
+
+    const gw = (await paymentGatewayReport(dayCtx(day))).find((r: any) => r.provider === 'ALATPAY')!;
+    expect(gw.settlementCoverage).toBe('NONE');
+    expect(gw.actualSettlement).toBeNull();
+    expect(gw.settlementVariance).toBeNull();
+
+    const st = await settlementReport(dayCtx(day));
+    const row = st.rows.find((r: any) => r.transactionReference === tx.reference)!;
+    expect(row.actualSettlement).toBeNull();
+    expect(row.variance).toBeNull();
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.settlementEvidenceAmount).toBeNull();
+  });
+
+  dbIt('AC. PARTIAL settlement coverage: complete-period R10 variance is null (never full-expected vs partial-actual)', async () => {
+    const day = '2001-06-15';
+    const { tx: settled } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(settled.id, PaymentGateway.PAYSTACK, 100, 95, 'MATCHED');
+    await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 50, paidAt: new Date(`${day}T11:00:00.000Z`) });
+
+    const gw = (await paymentGatewayReport(dayCtx(day))).find((r: any) => r.provider === 'PAYSTACK')!;
+    expect(gw.successCount).toBe(2);
+    expect(gw.settlementEvidenceCount).toBe(1);
+    expect(gw.settlementCoverage).toBe('PARTIAL');
+    expect(gw.settlementVariance).toBeNull();
+  });
+
+  dbIt('AD. Canonical collection formulas agree across R1, Daily, Monthly and export', async () => {
+    const day = '2001-06-17';
+    // Bells 100, Conv 10, Svc 5, GW 2, Refund 20 → Total Charged 117, Net Bells 80.
+    const { tx } = await makeSuccessTx({
+      gateway: PaymentGateway.ALATPAY,
+      amount: 100,
+      convenienceFee: 10,
+      serviceCharge: 5,
+      gatewayFee: 2,
+      paidAt: new Date(`${day}T10:00:00.000Z`),
+    });
+    await makePaidRefund(tx.id, 20, new Date(`${day}T11:00:00.000Z`));
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.bellsCollection).toBe(100);
+    expect(cards.convenienceFee).toBe(10);
+    expect(cards.serviceCharge).toBe(5);
+    expect(cards.gatewayFees).toBe(2);
+    expect(cards.totalCharged).toBe(117);
+    expect(cards.refunds).toBe(20);
+    expect(cards.netBellsCollection).toBe(80);
+    // The backward-compatible alias must be the canonical net, never charge-adjusted.
+    expect(cards.netCollection).toBe(80);
+
+    const daily = (await dailyCollections(dayCtx(day))).find((r: any) => r.date === day)!;
+    expect(daily.bellsCollection).toBe(100);
+    expect(daily.totalCharged).toBe(117);
+    expect(daily.refunds).toBe(20);
+    expect(daily.netBellsCollection).toBe(80);
+    expect(daily.gross).toBe(100); // alias
+    expect(daily.net).toBe(80);    // alias
+
+    const monthly = (await monthlyCollections(dayCtx(day))).find((r: any) => r.month === day.slice(0, 7))!;
+    expect(monthly.bellsCollection).toBe(100);
+    expect(monthly.totalCharged).toBe(117);
+    expect(monthly.refunds).toBe(20);
+    expect(monthly.netBellsCollection).toBe(80);
+
+    const exported = await fetchReportDataForExport('DAILY_COLLECTIONS', dayCtx(day));
+    const edRow = (exported.rows as any[]).find((r: any) => r.date === day)!;
+    expect(edRow.bellsCollection).toBe(100);
+    expect(edRow.totalCharged).toBe(117);
+    expect(edRow.netBellsCollection).toBe(80);
+  });
+
+  dbIt('AE. R10 counts a PARTIALLY_MATCHED transaction separately from fully settled transactions', async () => {
+    const day = '2001-06-19';
+    const { tx: full } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(full.id, PaymentGateway.ALATPAY, 100, 100, 'SETTLED');
+    const { tx: part } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 200, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    await makeSettlement(part.id, PaymentGateway.ALATPAY, 200, 120, 'PARTIALLY_MATCHED');
+    const { tx: pend } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 50, paidAt: new Date(`${day}T12:00:00.000Z`) });
+    await makeSettlement(pend.id, PaymentGateway.ALATPAY, 50, null, 'PENDING_SETTLEMENT');
+
+    const gw = (await paymentGatewayReport(dayCtx(day))).find((r: any) => r.provider === 'ALATPAY')!;
+    expect(gw.successCount).toBe(3);
+    expect(gw.fullySettledCount).toBe(1);        // only MATCHED/SETTLED
+    expect(gw.partialSettlementCount).toBe(1);   // PARTIALLY_MATCHED counted separately
+    expect(gw.settlementEvidenceCount).toBe(2);  // full + partial carry actualSettlement
+    // A partially settled tx must NEVER be counted as fully settled.
+    expect(gw.fullySettledCount).not.toBe(gw.successCount);
   });
 });

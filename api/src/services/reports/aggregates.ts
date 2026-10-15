@@ -321,43 +321,76 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
   // settlement evidence. A Settlement row being MATCHED/SETTLED is a BANK/GATEWAY
   // settlement fact — it is reported with settlement terminology, never as
   // "reconciled".
+  //
+  // The shared filter `where` may reference u.matricNumber / u.facultyId /
+  // u.departmentId / u.programmeId / i.feeId / i.session / i.semester /
+  // fe.categoryId / fe.level, so this query MUST join every alias the shared
+  // filter can reference. The u/i/fe joins are 1:1 (already-unique keys), so
+  // they never multiply rows.
   const reconConds: Prisma.Sql[] = [where];
   const extraRecon = buildReconciliationStatusFilter(f);
   if (extraRecon) reconConds.push(extraRecon);
   const reconWhere = Prisma.join(reconConds, ' AND ');
   const reconSql = Prisma.sql`
     SELECT
-      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN 1 ELSE 0 END) AS settledCount,
-      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN r.paidAmount ELSE 0 END) AS settledAmt,
+      -- Settlement COUNTS reflect the authoritative Settlement status:
+      -- MATCHED/SETTLED = fully settled; PARTIALLY_MATCHED = partially settled
+      -- (never counted as fully settled); otherwise pending.
+      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED') THEN 1 ELSE 0 END) AS fullySettledCount,
+      SUM(CASE WHEN s.status = 'PARTIALLY_MATCHED' THEN 1 ELSE 0 END) AS partialSettlementCount,
       SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN 1 ELSE 0 END) AS pendingSettlementCount,
-      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN r.paidAmount ELSE 0 END) AS pendingSettlementAmt
+      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN r.paidAmount ELSE 0 END) AS pendingSettlementAmt,
+      -- Settlement MONEY comes ONLY from authoritative Settlement.actualSettlement
+      -- evidence. It is NEVER inferred from Receipt.paidAmount, so a
+      -- PARTIALLY_MATCHED settlement can never present the full payment as settled.
+      SUM(CASE WHEN s.actualSettlement IS NOT NULL THEN 1 ELSE 0 END) AS settlementEvidenceCount,
+      SUM(CASE WHEN s.actualSettlement IS NOT NULL THEN s.actualSettlement ELSE 0 END) AS settlementEvidenceAmt
     FROM transactions t
-      INNER JOIN receipts r ON r.transactionId = t.id
+      INNER JOIN receipts r    ON r.transactionId = t.id
+      INNER JOIN users u       ON u.id = t.userId
+      LEFT  JOIN invoices i    ON i.id = t.invoiceId
+      LEFT  JOIN fees fe       ON fe.id = i.feeId
       LEFT  JOIN settlements s ON s.transactionId = t.id
     WHERE ${reconWhere}
   `;
   const rcon = await prisma.$queryRaw<Array<{
-    settledCount: string|number; settledAmt: string|number;
+    fullySettledCount: string|number; partialSettlementCount: string|number;
     pendingSettlementCount: string|number; pendingSettlementAmt: string|number;
+    settlementEvidenceCount: string|number; settlementEvidenceAmt: string|number;
   }>>(reconSql);
   const reconRow = Array.isArray(rcon) && rcon.length > 0 ? rcon[0] : {} as any;
 
-  const gross = d(base.totalCollected);
-  const net = d(gross - refunds);
+  // Canonical reporting contract (identical meaning across R1/Daily/Monthly).
+  const bellsCollection = d(base.totalCollected);
+  const convenienceFee = d(base.convenienceFee);
+  const serviceCharge = d(base.serviceCharge);
+  const gatewayFees = d(base.gatewayFee);
+  const totalCharged = d(bellsCollection + convenienceFee + serviceCharge + gatewayFees);
+  const netBellsCollection = d(bellsCollection - refunds);
+  // NULL actualSettlement evidence => settled amount is UNKNOWN, never ₦0.
+  const settlementEvidenceCount = Number(reconRow.settlementEvidenceCount ?? 0);
+  const settlementEvidenceAmount = settlementEvidenceCount > 0 ? d(reconRow.settlementEvidenceAmt) : null;
   return {
-    totalCollected: gross,
+    totalCollected: bellsCollection,
+    bellsCollection,
     numSuccessfulPayments: Number(base.txCount ?? 0),
     uniquePayers: Number(base.uniquePayers ?? 0),
     avgPayment: d(base.avgPayment),
     paystackCollected: d(base.paystackCollected),
     alatpayCollected: d(base.alatpayCollected),
-    convenienceFee: d(base.convenienceFee),
-    serviceCharge: d(base.serviceCharge),
-    gatewayFees: d(base.gatewayFee),
+    convenienceFee,
+    serviceCharge,
+    gatewayFees,
+    totalCharged,
     refunds,
-    netCollection: net,
-    settledAmount: d(reconRow.settledAmt),
-    settledCount: Number(reconRow.settledCount ?? 0),
+    netBellsCollection,
+    // Backward-compatible alias — same value, canonical name is netBellsCollection.
+    netCollection: netBellsCollection,
+    // AUTHORITATIVE settlement evidence only (Settlement.actualSettlement).
+    settlementEvidenceAmount,
+    settlementEvidenceCount,
+    fullySettledCount: Number(reconRow.fullySettledCount ?? 0),
+    partialSettlementCount: Number(reconRow.partialSettlementCount ?? 0),
     pendingSettlementAmount: d(reconRow.pendingSettlementAmt),
     pendingSettlementCount: Number(reconRow.pendingSettlementCount ?? 0),
   };
@@ -373,13 +406,13 @@ export async function dailyCollections(f: ReportFilterCtx) {
       agg.day                                              AS date,
       agg.txCount                                          AS txCount,
       agg.studentCount                                     AS studentCount,
-      agg.gross                                            AS gross,
+      agg.gross                                            AS bellsCollection,
       agg.convenienceFee                                   AS convenienceFee,
       agg.serviceCharge                                    AS serviceCharge,
       agg.gatewayFee                                       AS gatewayFee,
-      agg.total                                            AS total,
+      agg.total                                            AS totalCharged,
       COALESCE(ref.refunds,0)                              AS refunds,
-      agg.total - COALESCE(ref.refunds,0)                  AS net
+      agg.gross - COALESCE(ref.refunds,0)                  AS netBellsCollection
     FROM (
       SELECT
         DATE(DATE_ADD(r.paidAt, INTERVAL 1 HOUR))                 AS day,
@@ -406,18 +439,31 @@ export async function dailyCollections(f: ReportFilterCtx) {
     ORDER BY agg.day DESC
   `;
   const rows = await prisma.$queryRaw<any[]>(sql);
-  return (Array.isArray(rows) ? rows : []).map((r: any) => ({
-    date: dateOnly(r.date),
-    txCount: Number(r.txCount ?? 0),
-    studentCount: Number(r.studentCount ?? 0),
-    gross: d(r.gross),
-    convenienceFee: d(r.convenienceFee),
-    serviceCharge: d(r.serviceCharge),
-    gatewayFee: d(r.gatewayFee),
-    refunds: d(r.refunds),
-    net: d(r.net),
-    totalCharges: d(Number(r.total ?? 0) - d(r.gross)),
-  }));
+  return (Array.isArray(rows) ? rows : []).map((r: any) => {
+    const bellsCollection = d(r.bellsCollection);
+    const convenienceFee = d(r.convenienceFee);
+    const serviceCharge = d(r.serviceCharge);
+    const gatewayFee = d(r.gatewayFee);
+    const refunds = d(r.refunds);
+    const totalCharged = d(bellsCollection + convenienceFee + serviceCharge + gatewayFee);
+    const netBellsCollection = d(bellsCollection - refunds);
+    return {
+      date: dateOnly(r.date),
+      txCount: Number(r.txCount ?? 0),
+      studentCount: Number(r.studentCount ?? 0),
+      bellsCollection,
+      convenienceFee,
+      serviceCharge,
+      gatewayFee,
+      totalCharged,
+      refunds,
+      netBellsCollection,
+      // Backward-compatible aliases (identical values, canonical names above).
+      gross: bellsCollection,
+      net: netBellsCollection,
+      totalCharges: d(convenienceFee + serviceCharge + gatewayFee),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -431,13 +477,14 @@ export async function monthlyCollections(f: ReportFilterCtx) {
       agg.monthStart                                         AS monthStart,
       agg.txCount                                            AS txCount,
       agg.uniquePayers                                       AS uniquePayers,
-      agg.gross                                              AS gross,
+      agg.gross                                              AS bellsCollection,
       agg.charges                                            AS charges,
       agg.gatewayFee                                         AS gatewayFee,
       agg.convenienceFee                                     AS convenienceFee,
       agg.serviceCharge                                      AS serviceCharge,
+      agg.gross + agg.charges                                AS totalCharged,
       COALESCE(ref.refunds,0)                                AS refunds,
-      (agg.gross + agg.charges) - COALESCE(ref.refunds,0)    AS net
+      agg.gross - COALESCE(ref.refunds,0)                    AS netBellsCollection
     FROM (
       SELECT
         DATE_FORMAT(DATE_ADD(r.paidAt, INTERVAL 1 HOUR), '%Y-%m')  AS month,
@@ -465,19 +512,33 @@ export async function monthlyCollections(f: ReportFilterCtx) {
     ORDER BY agg.month DESC
   `;
   const rows = await prisma.$queryRaw<any[]>(sql);
-  return (Array.isArray(rows) ? rows : []).map((r: any) => ({
-    month: String(r.month),
-    monthStart: dateOnly(r.monthStart),
-    txCount: Number(r.txCount ?? 0),
-    uniquePayers: Number(r.uniquePayers ?? 0),
-    gross: d(r.gross),
-    charges: d(r.charges),
-    convenienceFee: d(r.convenienceFee),
-    serviceCharge: d(r.serviceCharge),
-    gatewayFee: d(r.gatewayFee),
-    refunds: d(r.refunds),
-    net: d(r.net),
-  }));
+  return (Array.isArray(rows) ? rows : []).map((r: any) => {
+    const bellsCollection = d(r.bellsCollection);
+    const convenienceFee = d(r.convenienceFee);
+    const serviceCharge = d(r.serviceCharge);
+    const gatewayFee = d(r.gatewayFee);
+    const charges = d(convenienceFee + serviceCharge + gatewayFee);
+    const refunds = d(r.refunds);
+    const totalCharged = d(bellsCollection + charges);
+    const netBellsCollection = d(bellsCollection - refunds);
+    return {
+      month: String(r.month),
+      monthStart: dateOnly(r.monthStart),
+      txCount: Number(r.txCount ?? 0),
+      uniquePayers: Number(r.uniquePayers ?? 0),
+      bellsCollection,
+      convenienceFee,
+      serviceCharge,
+      gatewayFee,
+      charges,
+      totalCharged,
+      refunds,
+      netBellsCollection,
+      // Backward-compatible aliases (identical values, canonical names above).
+      gross: bellsCollection,
+      net: netBellsCollection,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,9 +1280,11 @@ export async function paymentGatewayReport(f: ReportFilterCtx) {
       ${correlatedGatewayRefundSql(f)}                             AS refunds,
       ${sumSuccessAmount} - ${sumSuccessGatewayFee}                AS expectedSettlement,
       -- Settlement-derived (BANK/GATEWAY settlement) coverage — NOT payment
-      -- reconciliation. Count of successful txs whose Settlement row shows the
-      -- money was matched/settled. Reported with settlement terminology.
-      COUNT(DISTINCT CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN t.id END) AS settledCount,
+      -- reconciliation. A partially settled transaction is NEVER counted as a
+      -- fully settled transaction: MATCHED/SETTLED are fully settled,
+      -- PARTIALLY_MATCHED is counted separately.
+      COUNT(DISTINCT CASE WHEN s.status IN ('MATCHED','SETTLED') THEN t.id END) AS fullySettledCount,
+      COUNT(DISTINCT CASE WHEN s.status = 'PARTIALLY_MATCHED' THEN t.id END) AS partialSettlementCount,
       -- Authoritative actual-settlement EVIDENCE. A row only counts when the
       -- Settlement record carries a real actualSettlement value; a SUCCESS tx with
       -- NO Settlement row is NOT "₦0 received" — it is UNKNOWN and must fail closed.
@@ -1253,9 +1316,12 @@ export async function paymentGatewayReport(f: ReportFilterCtx) {
     // amount is covered by authoritative settlement evidence; partial coverage is
     // surfaced via settlementCoverage, never as a complete-period variance.
     const actualSettlement = settlementEvidenceCount > 0 ? d(r.settledActualAmount) : null;
+    // CANONICAL settlement variance sign (identical to R11):
+    //   SETTLEMENT VARIANCE = ACTUAL SETTLEMENT − EXPECTED SETTLEMENT
+    //   0 = exact, negative = shortfall, positive = excess.
     const settlementVariance =
       settlementCoverage === 'FULL' && actualSettlement != null
-        ? d(expectedSettlement - actualSettlement)
+        ? d(actualSettlement - expectedSettlement)
         : null;
     return {
       provider: String(r.provider ?? ''),
@@ -1267,7 +1333,8 @@ export async function paymentGatewayReport(f: ReportFilterCtx) {
       gatewayFees: d(r.gatewayFees),
       refunds: d(r.refunds),
       expectedSettlement,
-      settledCount: Number(r.settledCount ?? 0),
+      fullySettledCount: Number(r.fullySettledCount ?? 0),
+      partialSettlementCount: Number(r.partialSettlementCount ?? 0),
       settlementEvidenceCount,
       settlementCoverage,
       actualSettlement,
@@ -1353,6 +1420,8 @@ export async function settlementReport(f: ReportFilterCtx & { sort?: string; ord
   const rows = (Array.isArray(rowsRaw) ? rowsRaw : []).map((r: any) => {
     const expectedSettlement = d(r.expectedSettlement);
     const actualSettlement = r.actualSettlement != null ? d(r.actualSettlement) : null;
+    // CANONICAL settlement variance sign (identical to R10):
+    //   SETTLEMENT VARIANCE = ACTUAL SETTLEMENT − EXPECTED SETTLEMENT
     // Variance is ONLY meaningful when authoritative settlement evidence exists.
     const variance = actualSettlement == null ? null : d(actualSettlement - expectedSettlement);
     return {
