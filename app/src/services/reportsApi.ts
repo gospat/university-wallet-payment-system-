@@ -20,7 +20,9 @@ export type ReportsBaseFilters = {
   feeId?: number;
   studentId?: number;
   paymentStatus?: string;
-  reconciliationStatus?: string;
+  // Backend accepts a single enum OR an array of enums (RECONCILED/UNRECONCILED
+  // facets expand to several settlement statuses). Parameterized IN() server-side.
+  reconciliationStatus?: string | string[];
   page?: number;
   pageSize?: number;
   q?: string;
@@ -49,10 +51,14 @@ export const DASHBOARD_FACETS: Record<DashboardFacetName, Partial<ReportsBaseFil
   BY_CONVENIENCE: {},
   BY_SERVICE: {},
   BY_GATEWAY: {},
-  BY_REFUND: { paymentStatus: 'REFUNDED' },
+  // 'REFUNDED' is NOT a TransactionStatus (PENDING/PROCESSING/SUCCESS/FAILED/
+  // UNDERPAID/OVERPAID/CANCELLED/REVERSED), so it must never be sent as a
+  // transaction-status filter. Refunded transactions are surfaced by the
+  // dedicated Refund Report (R13), not by an impossible register status.
+  BY_REFUND: {},
   BY_NET: {},
-  RECONCILED: { reconciliationStatus: 'RECONCILED' },
-  UNRECONCILED: { reconciliationStatus: 'PENDING_SETTLEMENT' },
+  RECONCILED: { reconciliationStatus: ['MATCHED', 'SETTLED', 'PARTIALLY_MATCHED'] },
+  UNRECONCILED: { reconciliationStatus: ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW'] },
 };
 
 const ENDPOINT_BASE = '/reports';
@@ -332,8 +338,9 @@ export function applyFacetToFilters(facet: string, base: any = {}): any {
       f.reconciliationStatus = ['MATCHED', 'SETTLED', 'PARTIALLY_MATCHED'];
       break;
     case 'BY_REFUND':
-      f.paymentStatus = 'REFUNDED';
-      f.status = 'REFUNDED';
+      // No transaction-status value represents a refund; the register filter
+      // must not carry an impossible 'REFUNDED' status. Refunds are reported
+      // by the dedicated Refund Report (R13).
       break;
     case 'BY_CONVENIENCE':
     case 'BY_SERVICE':
@@ -385,37 +392,56 @@ export const REPORT_LIBRARY: Array<{
   { key: 'settlement-variance',        group: 'Reconciliation', title: 'Settlement Variances',               subtitle: 'Deep-dive variance report: expected vs actual settlement, root causes',       viewPermission: 'REPORTS_VIEW_RECONCILIATION',      pageRoute: '/bursary/reports/view/settlement-variance' },
 ];
 
-// Date preset helpers used by Reports Centre chips
+// Date preset helpers used by Reports Centre chips.
+//
+// Bursary date selections are Africa/Lagos BUSINESS DATES. The reporting API
+// reads the UTC Y-M-D components of the value it receives, so every preset
+// boundary must be a UTC-midnight Date carrying the Lagos calendar day. Using
+// local `setHours(0,0,0,0)` turns 15 Oct (Lagos) into 14 Oct 23:00Z, which the
+// `.toISOString().slice(0,10)` consumers would read back as 14 Oct — an
+// off-by-one that drops the selected business day. Lagos is UTC+1 (no DST).
+const LAGOS_OFFSET_MS = 60 * 60 * 1000;
+function lagosCalendarDay(d: Date): Date {
+  const shifted = new Date(d.getTime() + LAGOS_OFFSET_MS);
+  return new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()));
+}
+function lagosDayAdd(day: Date, days: number): Date {
+  return new Date(day.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
 export function applyDatePreset(preset: 'TODAY'|'YESTERDAY'|'THIS_WEEK'|'THIS_MONTH'|'LAST_MONTH'|'THIS_SESSION'|'CUSTOM', customStart?: Date, customEnd?: Date): { dateFrom: Date|undefined; dateTo: Date|undefined } {
-  const now = new Date();
-  const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
-  const endOfDay = (d: Date) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
-  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  const today = lagosCalendarDay(new Date());
   switch (preset) {
-    case 'TODAY':       return { dateFrom: startOfDay(now), dateTo: endOfDay(now) };
-    case 'YESTERDAY':   return { dateFrom: startOfDay(yesterday), dateTo: endOfDay(yesterday) };
+    case 'TODAY':       return { dateFrom: today, dateTo: today };
+    case 'YESTERDAY': { const y = lagosDayAdd(today, -1); return { dateFrom: y, dateTo: y }; }
     case 'THIS_WEEK': {
-      const s = new Date(now); const d = s.getDay(); const diff = s.getDate() - d + (d === 0 ? -6 : 1); // Mon-start
-      s.setDate(diff); s.setHours(0,0,0,0);
-      const e = new Date(s); e.setDate(e.getDate() + 6); e.setHours(23,59,59,999);
+      // Monday-start week in Lagos. Weekday is read from the UTC date that
+      // carries the Lagos calendar day.
+      const dow = today.getUTCDay(); // 0=Sun..6=Sat
+      const back = dow === 0 ? 6 : dow - 1;
+      const s = lagosDayAdd(today, -back);
+      const e = lagosDayAdd(s, 6);
       return { dateFrom: s, dateTo: e };
     }
     case 'THIS_MONTH': {
-      const s = new Date(now.getFullYear(), now.getMonth(), 1);
-      const e = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-      return { dateFrom: s, dateTo: e };
+      const y = today.getUTCFullYear(); const m = today.getUTCMonth();
+      return { dateFrom: new Date(Date.UTC(y, m, 1)), dateTo: new Date(Date.UTC(y, m + 1, 0)) };
     }
     case 'LAST_MONTH': {
-      const s = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const e = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
-      return { dateFrom: s, dateTo: e };
+      const y = today.getUTCFullYear(); const m = today.getUTCMonth();
+      return { dateFrom: new Date(Date.UTC(y, m - 1, 1)), dateTo: new Date(Date.UTC(y, m, 0)) };
     }
     case 'THIS_SESSION': {
-      // Heuristic: Aug present → current session Aug to Dec; else Jan–Jul → last Aug to Dec, else current year
-      const year = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
-      return { dateFrom: startOfDay(new Date(year, 7, 1)), dateTo: endOfDay(now) };
+      // Academic session starts in August (Lagos). Aug..Dec → current year;
+      // Jan..Jul → previous year.
+      const y = today.getUTCMonth() >= 7 ? today.getUTCFullYear() : today.getUTCFullYear() - 1;
+      return { dateFrom: new Date(Date.UTC(y, 7, 1)), dateTo: today };
     }
-    case 'CUSTOM': return { dateFrom: customStart, dateTo: customEnd };
+    case 'CUSTOM':
+      return {
+        dateFrom: customStart ? lagosCalendarDay(customStart) : undefined,
+        dateTo: customEnd ? lagosCalendarDay(customEnd) : undefined,
+      };
     default: return { dateFrom: undefined, dateTo: undefined };
   }
 }

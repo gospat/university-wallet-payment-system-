@@ -25,6 +25,7 @@ import {
   receiptRegister,
   transactionStatusMix,
   comparativeReports,
+  reportDateRange,
 } from '../reports/aggregates';
 type ReportType = string;
 type ReportExportFormat = 'XLSX' | 'PDF';
@@ -255,8 +256,18 @@ export async function fetchReportDataForExport(
       return { rows, summary: { TotalScheduled: rows.length, ActiveNow: rows.filter((r: any) => r.isActive).length }, columnsKey: 'scheduled' };
     }
     case 'AUDIT_TRAIL': {
+      // Lagos business-day semantics on the export-audit timestamp — the same
+      // date interpretation used by the on-screen R21 view, so screen and
+      // export totals always agree. Lower INCLUSIVE, upper EXCLUSIVE.
+      const { fromInclusive, toExclusive } = reportDateRange(f);
+      const auditWhere: any = {};
+      if (fromInclusive || toExclusive) {
+        auditWhere.createdAt = {};
+        if (fromInclusive) auditWhere.createdAt.gte = fromInclusive;
+        if (toExclusive) auditWhere.createdAt.lt = toExclusive;
+      }
       const rows = await prismaAny.reportExport.findMany({
-        where: { createdAt: { gte: f.dateFrom ?? new Date(0), lte: f.dateTo ?? new Date(Date.now() + 86_400_000) } },
+        where: auditWhere,
         orderBy: { createdAt: 'desc' },
         take: MAX_EXPORT_ROWS,
         select: {

@@ -114,7 +114,7 @@ const DashboardCardsDef: DashboardCardDef[] = [
     facetName: 'GROSS_ALL',
     accessor: (c) => c?.totalCollected,
     isMoney: true,
-    microcopy: 'All successful gross receipts',
+    microcopy: 'Bells collections — non-void successful receipts',
   },
   {
     key: 'numSuccessfulPayments',
@@ -232,7 +232,7 @@ const DashboardCardsDef: DashboardCardDef[] = [
     facetName: 'BY_NET',
     accessor: (c) => c?.netCollection,
     isMoney: true,
-    microcopy: 'Gross − refunds − charges',
+    microcopy: 'Bells collections − refunds − charges',
   },
   {
     key: 'reconciledAmount',

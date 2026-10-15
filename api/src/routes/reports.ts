@@ -10,7 +10,7 @@ import {
   revenueByBill, paymentRegister, studentStatement, billCollectionPerformance,
   outstandingDebtors, hierarchicalRevenue, paymentGatewayReport, settlementReport,
   reconciliationExceptions, refundReport, chargesAndFeeIncome, generalLedger,
-  receiptRegister, transactionStatusMix, comparativeReports,
+  receiptRegister, transactionStatusMix, comparativeReports, reportDateRange,
 } from '../services/reports/aggregates';
 import {
   dispatchReportExport,
@@ -29,6 +29,23 @@ router.use(restrictTo('BURSARY', 'ADMIN'));
 // ============================================================================
 //  SHARED ZOD FILTER SCHEMA — all 14 filter dimensions coerced from query strings
 // ============================================================================
+// Reconciliation status filter accepts a single enum OR an array of enums.
+// Frontend facet filters send arrays (e.g. UNRECONCILED → several DB statuses),
+// while drilldowns send a single value. Both are normalized to a non-empty
+// string[] so the parameterized IN(...) builder in the aggregator is safe.
+const RECON_STATUS_VALUES = ['PENDING_SETTLEMENT','SETTLED','MATCHED','PARTIALLY_MATCHED','VARIANCE','UNMATCHED','UNDER_REVIEW'] as const;
+const ReconciliationStatusSchema = z.preprocess(
+  (v) => {
+    if (v === undefined || v === null || v === '') return undefined;
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+      return v.includes(',') ? v.split(',').map((s) => s.trim()).filter(Boolean) : [v];
+    }
+    return v;
+  },
+  z.array(z.enum(RECON_STATUS_VALUES)).optional(),
+);
+
 const BaseFilterSchema = z.object({
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
@@ -43,7 +60,7 @@ const BaseFilterSchema = z.object({
   feeId: z.coerce.number().int().positive().optional(),
   studentId: z.coerce.number().int().positive().optional(),
   paymentStatus: z.enum(['PENDING','PROCESSING','SUCCESS','FAILED','UNDERPAID','OVERPAID','REVERSED']).optional(),
-  reconciliationStatus: z.enum(['PENDING_SETTLEMENT','SETTLED','MATCHED','PARTIALLY_MATCHED','VARIANCE','UNMATCHED','UNDER_REVIEW']).optional(),
+  reconciliationStatus: ReconciliationStatusSchema,
 });
 
 const PagedSchema = z.object({
@@ -989,10 +1006,14 @@ router.get('/audit-trail',
     const pageSize = Number(req.query.pageSize ?? 50);
     const skip = (page - 1) * pageSize;
     const where: any = {};
-    if (req.query.dateFrom || req.query.dateTo) {
+    // Lagos business-day semantics: selected days are Africa/Lagos BUSINESS
+    // DATES, applied as an inclusive lower / exclusive upper boundary on the
+    // stored UTC instant (never `<= midnight(dateTo)`).
+    const { fromInclusive, toExclusive } = reportDateRange({ dateFrom: req.query.dateFrom, dateTo: req.query.dateTo });
+    if (fromInclusive || toExclusive) {
       where.createdAt = {};
-      if (req.query.dateFrom) where.createdAt.gte = req.query.dateFrom;
-      if (req.query.dateTo) where.createdAt.lte = req.query.dateTo;
+      if (fromInclusive) where.createdAt.gte = fromInclusive;
+      if (toExclusive) where.createdAt.lt = toExclusive;
     }
     const [rows, total] = await Promise.all([
       prismaAny.reportExport.findMany({ skip, take: pageSize, orderBy: { createdAt: 'desc' }, where }),

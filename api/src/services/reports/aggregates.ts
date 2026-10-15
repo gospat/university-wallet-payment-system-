@@ -7,6 +7,7 @@
 
 import { Prisma, TransactionStatus, GeneralLedgerEntryType, PaymentGateway } from '@prisma/client';
 import prisma from '../../config/database';
+import { lagosBusinessDayRange } from '../reconciliation';
 const prismaAny = prisma as any;
 
 // ---- Money helpers ---------------------------------------------------------
@@ -24,6 +25,51 @@ export function d(n: unknown): number {
 export function dateOnly(dIn: Date | string): string {
   const dt = typeof dIn === 'string' ? new Date(dIn) : dIn;
   return dt.toISOString().slice(0, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Bells business-date normalisation for the whole Reports Centre.
+//
+// Bursary date selections represent Africa/Lagos BUSINESS DATES. We reuse the
+// single approved Lagos business-day principle (lagosBusinessDayRange) so that
+// every report/export/drilldown interprets a selected day identically:
+//
+//   selected 15 Oct 2026  =>  >= 2026-10-14T23:00:00Z  (15 Oct 00:00 Lagos)
+//                             <  2026-10-15T23:00:00Z  (16 Oct 00:00 Lagos)
+//
+// Lower boundary is INCLUSIVE, upper boundary is EXCLUSIVE. Never use
+// `<= midnight(dateTo)` — that silently drops almost the whole final Lagos day.
+// ---------------------------------------------------------------------------
+export function reportDateRange(f: { dateFrom?: Date; dateTo?: Date }): { fromInclusive?: Date; toExclusive?: Date } {
+  if (!f.dateFrom && !f.dateTo) return {};
+  if (f.dateFrom && !f.dateTo) {
+    const { from } = lagosBusinessDayRange(f.dateFrom, f.dateFrom);
+    return { fromInclusive: from };
+  }
+  if (!f.dateFrom && f.dateTo) {
+    const { to } = lagosBusinessDayRange(f.dateTo, f.dateTo);
+    return { toExclusive: to };
+  }
+  const { from, to } = lagosBusinessDayRange(f.dateFrom!, f.dateTo!);
+  return { fromInclusive: from, toExclusive: to };
+}
+
+// ---------------------------------------------------------------------------
+// Lagos calendar day helpers for fair-period comparative buckets.
+// ---------------------------------------------------------------------------
+const LAGOS_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The Lagos calendar day that contains the given instant, expressed as a
+ *  midnight-UTC Date carrying that Lagos Y-M-D (safe to feed to dateOnly()). */
+export function lagosDayOf(instant: Date): Date {
+  const shifted = new Date(instant.getTime() + 60 * 60 * 1000); // Lagos = UTC+1
+  return new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()));
+}
+
+/** Lagos business-day [fromInclusive, toExclusive) for a pair of Lagos days. */
+export function lagosDayBounds(fromDay: Date, toDay: Date): { fromInclusive: Date; toExclusive: Date } {
+  const { from, to } = lagosBusinessDayRange(fromDay, toDay);
+  return { fromInclusive: from, toExclusive: to };
 }
 
 // ---- Shared filter context type --------------------------------------------
@@ -44,7 +90,7 @@ export interface ReportFilterCtx {
   feeId?: number;
   provider?: PaymentGateway;
   paymentStatus?: TransactionStatus;
-  reconciliationStatus?: string;
+  reconciliationStatus?: string | string[];
   studentId?: number;
   studentMatric?: string;
   q?: string;
@@ -92,8 +138,11 @@ function buildSuccessReceiptTxCtx(f: ReportFilterCtx): { where: Prisma.Sql; para
   const conds: Prisma.Sql[] = [];
   conds.push(Prisma.sql`t.status IN (${Prisma.raw(Array.from(SUCCESS_STATUSES).map(s => `'${s}'`).join(','))})`);
   conds.push(Prisma.sql`r.isVoided = 0`);
-  if (f.dateFrom) conds.push(Prisma.sql`r.paidAt >= ${f.dateFrom}`);
-  if (f.dateTo)   conds.push(Prisma.sql`r.paidAt <= ${f.dateTo}`);
+  // Authoritative Bells financial collection date = non-void Receipt.paidAt.
+  // Date filter is a Lagos BUSINESS DAY range: >= fromInclusive, < toExclusive.
+  const { fromInclusive, toExclusive } = reportDateRange(f);
+  if (fromInclusive) conds.push(Prisma.sql`r.paidAt >= ${fromInclusive}`);
+  if (toExclusive)   conds.push(Prisma.sql`r.paidAt < ${toExclusive}`);
   if (f.provider) conds.push(Prisma.sql`t.gateway = ${f.provider}`);
   if (f.studentId) conds.push(Prisma.sql`t.userId = ${f.studentId}`);
   if (f.studentMatric) conds.push(Prisma.sql`u.matricNumber = ${f.studentMatric}`);
@@ -119,9 +168,16 @@ function buildSuccessReceiptTxCtx(f: ReportFilterCtx): { where: Prisma.Sql; para
 }
 
 // Helper to build extra reconciliationStatus fragment (caller must LEFT JOIN settlements s ON s.transactionId=t.id)
+// Accepts a single enum value OR an array of enum values (the frontend sends an
+// array for the RECONCILED / UNRECONCILED facets). Each element is emitted as a
+// bound parameter, so the IN(...) list is fully parameterized (no injection).
 export function buildReconciliationStatusFilter(f: ReportFilterCtx): Prisma.Sql | null {
   if (!f.reconciliationStatus) return null;
-  return Prisma.sql`COALESCE(s.status, 'PENDING_SETTLEMENT') = ${f.reconciliationStatus}`;
+  const list = (Array.isArray(f.reconciliationStatus) ? f.reconciliationStatus : [f.reconciliationStatus])
+    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+  if (list.length === 0) return null;
+  const placeholders = Prisma.join(list.map(s => Prisma.sql`${s}`), ',');
+  return Prisma.sql`COALESCE(s.status, 'PENDING_SETTLEMENT') IN (${placeholders})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,10 +216,11 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
   }>;
   const base = Array.isArray(rows) && rows.length > 0 ? rows[0] : {} as any;
 
-  // Refunds COMPLETED only (per spec: Net = grossSuccessCollected − refundedIssued where refund COMPLETED/PAID)
+  // Refunds COMPLETED only (per spec: Net = Bells collected − refunded issued where refund PAID)
+  const { fromInclusive: refundFrom, toExclusive: refundTo } = reportDateRange(f);
   const refundWhere: Prisma.Sql[] = [Prisma.sql`rf.status = 'PAID'`];
-  if (f.dateFrom) refundWhere.push(Prisma.sql`rf.updatedAt >= ${f.dateFrom}`);
-  if (f.dateTo)   refundWhere.push(Prisma.sql`rf.updatedAt <= ${f.dateTo}`);
+  if (refundFrom) refundWhere.push(Prisma.sql`rf.updatedAt >= ${refundFrom}`);
+  if (refundTo)   refundWhere.push(Prisma.sql`rf.updatedAt < ${refundTo}`);
   const refundSql = Prisma.sql`
     SELECT COALESCE(SUM(rf.requestedAmount),0) AS refunded
     FROM refunds rf
@@ -221,9 +278,10 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
 // ---------------------------------------------------------------------------
 export async function dailyCollections(f: ReportFilterCtx) {
   const { where } = buildSuccessReceiptTxCtx(f);
+  const { fromInclusive, toExclusive } = reportDateRange(f);
   const sql = Prisma.sql`
     SELECT
-      agg.day                                              AS day,
+      agg.day                                              AS date,
       agg.txCount                                          AS txCount,
       agg.studentCount                                     AS studentCount,
       agg.gross                                            AS gross,
@@ -235,7 +293,7 @@ export async function dailyCollections(f: ReportFilterCtx) {
       agg.total - COALESCE(ref.refunds,0)                  AS net
     FROM (
       SELECT
-        DATE(r.paidAt)                                            AS day,
+        DATE(DATE_ADD(r.paidAt, INTERVAL 1 HOUR))                 AS day,
         COUNT(DISTINCT t.id)                                      AS txCount,
         COUNT(DISTINCT t.userId)                                  AS studentCount,
         COALESCE(SUM(r.paidAmount),0)                             AS gross,
@@ -249,19 +307,21 @@ export async function dailyCollections(f: ReportFilterCtx) {
         LEFT  JOIN invoices i ON i.id = t.invoiceId
         LEFT  JOIN fees fe    ON fe.id = i.feeId
       WHERE ${where}
-      GROUP BY DATE(r.paidAt)
+      GROUP BY DATE(DATE_ADD(r.paidAt, INTERVAL 1 HOUR))
     ) agg
     LEFT JOIN (
-      SELECT DATE(rf.updatedAt) AS refundDay, COALESCE(SUM(rf.requestedAmount),0) AS refunds
+      SELECT DATE(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR)) AS refundDay, COALESCE(SUM(rf.requestedAmount),0) AS refunds
       FROM refunds rf
       WHERE rf.status = 'PAID'
-      GROUP BY DATE(rf.updatedAt)
+        AND (${fromInclusive ? Prisma.sql`rf.updatedAt >= ${fromInclusive}` : Prisma.sql`1=1`})
+        AND (${toExclusive ? Prisma.sql`rf.updatedAt < ${toExclusive}` : Prisma.sql`1=1`})
+      GROUP BY DATE(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR))
     ) ref ON ref.refundDay = agg.day
     ORDER BY agg.day DESC
   `;
   const rows = await prisma.$queryRaw<any[]>(sql);
   return (Array.isArray(rows) ? rows : []).map((r: any) => ({
-    day: dateOnly(r.day),
+    date: dateOnly(r.date),
     txCount: Number(r.txCount ?? 0),
     studentCount: Number(r.studentCount ?? 0),
     gross: d(r.gross),
@@ -294,8 +354,8 @@ export async function monthlyCollections(f: ReportFilterCtx) {
       (agg.gross + agg.charges) - COALESCE(ref.refunds,0)    AS net
     FROM (
       SELECT
-        DATE_FORMAT(r.paidAt, '%Y-%m')                           AS month,
-        MIN(DATE(r.paidAt))                                      AS monthStart,
+        DATE_FORMAT(DATE_ADD(r.paidAt, INTERVAL 1 HOUR), '%Y-%m')  AS month,
+        MIN(DATE(DATE_ADD(r.paidAt, INTERVAL 1 HOUR)))             AS monthStart,
         COUNT(DISTINCT t.id)                                     AS txCount,
         COUNT(DISTINCT t.userId)                                 AS uniquePayers,
         COALESCE(SUM(r.paidAmount),0)                            AS gross,
@@ -309,13 +369,13 @@ export async function monthlyCollections(f: ReportFilterCtx) {
         LEFT  JOIN invoices i ON i.id = t.invoiceId
         LEFT  JOIN fees fe    ON fe.id = i.feeId
       WHERE ${where}
-      GROUP BY DATE_FORMAT(r.paidAt, '%Y-%m')
+      GROUP BY DATE_FORMAT(DATE_ADD(r.paidAt, INTERVAL 1 HOUR), '%Y-%m')
     ) agg
     LEFT JOIN (
-      SELECT DATE_FORMAT(rf.updatedAt, '%Y-%m') AS refundMonth, COALESCE(SUM(rf.requestedAmount),0) AS refunds
+      SELECT DATE_FORMAT(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR), '%Y-%m') AS refundMonth, COALESCE(SUM(rf.requestedAmount),0) AS refunds
       FROM refunds rf
       WHERE rf.status = 'PAID'
-      GROUP BY DATE_FORMAT(rf.updatedAt, '%Y-%m')
+      GROUP BY DATE_FORMAT(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR), '%Y-%m')
     ) ref ON ref.refundMonth = agg.month
     ORDER BY agg.month DESC
   `;
@@ -341,7 +401,7 @@ export async function monthlyCollections(f: ReportFilterCtx) {
 export async function monthlyPayersRegister(f: ReportFilterCtx & { month?: string }) {
   const { where } = buildSuccessReceiptTxCtx(f);
   const whereList: Prisma.Sql[] = [where];
-  if (f.month) whereList.push(Prisma.sql`DATE_FORMAT(r.paidAt, '%Y-%m') = ${f.month}`);
+  if (f.month) whereList.push(Prisma.sql`DATE_FORMAT(DATE_ADD(r.paidAt, INTERVAL 1 HOUR), '%Y-%m') = ${f.month}`);
   const finalWhere = Prisma.join(whereList, ' AND ');
   const page = Math.max(1, Number(f.page ?? 1));
   const pageSize = Math.min(500, Math.max(1, Number(f.pageSize ?? 50)));
@@ -384,18 +444,18 @@ export async function monthlyPayersRegister(f: ReportFilterCtx & { month?: strin
     prisma.$queryRaw<[{ cnt: string|number }][]>(countSql),
   ]);
   const rows = (Array.isArray(rowsRaw) ? rowsRaw : []).map((r: any) => ({
-    paymentDt: r.paymentDt ? new Date(r.paymentDt).toISOString() : null,
-    student: String(r.student ?? ''),
-    matric: String(r.matric ?? ''),
+    paymentDate: r.paymentDt ? new Date(r.paymentDt).toISOString() : null,
+    studentName: String(r.student ?? ''),
+    matricNumber: String(r.matric ?? ''),
     college: String(r.college ?? ''),
-    dept: String(r.dept ?? ''),
-    prog: String(r.prog ?? ''),
+    department: String(r.dept ?? ''),
+    programme: String(r.prog ?? ''),
     level: r.level ?? null,
     session: String(r.session ?? ''),
     paymentRef: String(r.paymentRef ?? ''),
     gatewayRef: r.gatewayRef ? String(r.gatewayRef) : '',
-    bill: String(r.bill ?? ''),
-    amount: d(r.amount),
+    billName: String(r.bill ?? ''),
+    baseAmount: d(r.amount),
     convFee: d(r.convFee),
     svcFee: d(r.svcFee),
     gwFee: d(r.gwFee),
@@ -415,9 +475,14 @@ export async function monthlyPayersRegister(f: ReportFilterCtx & { month?: strin
 // ---------------------------------------------------------------------------
 export async function revenueByBill(f: ReportFilterCtx) {
   const { where } = buildSuccessReceiptTxCtx(f);
+  const { fromInclusive, toExclusive } = reportDateRange(f);
   const resolvedCategoryId = f.billCategoryId ?? f.feeCategoryId;
   const resolvedBillId = f.billId ?? f.feeId;
   const resolvedLevel = f.levelValue ?? f.level;
+  // DATE BASIS: `expectedAmt` uses INVOICE CREATION date (iv.createdAt, Lagos
+  // business day) because "expected revenue" is measured by the billing event.
+  // `collected` uses the shared successful-receipt context, i.e. Receipt.paidAt
+  // (Lagos business day). Both boundaries are half-open [from, to).
   const sql = Prisma.sql`
     SELECT
       fe.id                                                                AS billId,
@@ -428,8 +493,8 @@ export async function revenueByBill(f: ReportFilterCtx) {
       COALESCE((
         SELECT SUM(iv.amountDue) FROM invoices iv
         WHERE iv.feeId = fe.id
-          AND (${f.dateFrom ? Prisma.sql`iv.createdAt >= ${f.dateFrom}` : Prisma.sql`1=1`})
-          AND (${f.dateTo   ? Prisma.sql`iv.createdAt <= ${f.dateTo}`   : Prisma.sql`1=1`})
+          AND (${fromInclusive ? Prisma.sql`iv.createdAt >= ${fromInclusive}` : Prisma.sql`1=1`})
+          AND (${toExclusive   ? Prisma.sql`iv.createdAt < ${toExclusive}`   : Prisma.sql`1=1`})
           AND (${f.session  ? Prisma.sql`iv.session = ${f.session}`     : Prisma.sql`1=1`})
           AND (${f.semester ? Prisma.sql`iv.semester = ${f.semester}`   : Prisma.sql`1=1`})
       ),0) AS expectedAmt,
@@ -532,9 +597,10 @@ export async function paymentRegister(
     WHERE ${searchWhere}
   `;
   // Refunds sum for same filter range (COMPLETED only)
+  const { fromInclusive: refundFrom, toExclusive: refundTo } = reportDateRange(f);
   const refundWhere: Prisma.Sql[] = [Prisma.sql`rf.status = 'PAID'`];
-  if (f.dateFrom) refundWhere.push(Prisma.sql`rf.updatedAt >= ${f.dateFrom}`);
-  if (f.dateTo)   refundWhere.push(Prisma.sql`rf.updatedAt <= ${f.dateTo}`);
+  if (refundFrom) refundWhere.push(Prisma.sql`rf.updatedAt >= ${refundFrom}`);
+  if (refundTo)   refundWhere.push(Prisma.sql`rf.updatedAt < ${refundTo}`);
   const refundSql = Prisma.sql`SELECT COALESCE(SUM(rf.requestedAmount),0) AS amount FROM refunds rf WHERE ${Prisma.join(refundWhere, ' AND ')}`;
 
   const rowsSql = Prisma.sql`
@@ -570,40 +636,35 @@ export async function paymentRegister(
   const refunds = d(Array.isArray(rfRaw) && rfRaw.length > 0 ? (rfRaw as any)[0]?.amount : 0);
   const gross = d(s0.gross);
   const rows = (Array.isArray(rRaw) ? rRaw : []).map((r: any) => ({
-    txId: Number(r.txId),
-    reference: String(r.reference ?? ''),
-    provider: String(r.provider ?? ''),
-    status: String(r.status ?? ''),
-    type: String(r.type ?? ''),
-    paystackReference: r.paystackReference ?? null,
-    alatpayReference: r.alatpayReference ?? null,
+    transactionId: Number(r.txId),
     createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
-    receiptNumber: String(r.receiptNumber ?? ''),
     paidAt: r.paidAt ? new Date(r.paidAt).toISOString() : null,
+    studentId: r.userId ? Number(r.userId) : null,
+    studentName: [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' '),
+    matricNumber: r.matricNumber ?? null,
+    email: r.email ?? null,
+    college: r.college ?? null,
+    department: r.department ?? null,
+    programme: r.program ?? null,
+    level: r.level ?? null,
+    session: r.session ?? '',
+    semester: r.semester ?? null,
+    invoiceNumber: r.invoiceNumber ?? '',
+    billName: r.feeName ?? '',
+    feeCode: r.feeCode ?? '',
+    category: r.categoryName ?? '',
     baseAmount: d(r.baseAmount),
     convenienceFee: d(r.convenienceFee),
     serviceCharge: d(r.serviceCharge),
     gatewayFee: d(r.gatewayFee),
     totalAmount: d(r.totalAmount),
+    provider: String(r.provider ?? ''),
+    status: String(r.status ?? ''),
+    type: String(r.type ?? ''),
+    transactionReference: String(r.reference ?? ''),
+    gatewayReference: r.paystackReference ?? r.alatpayReference ?? null,
+    receiptNumber: String(r.receiptNumber ?? ''),
     isVoided: !!r.isVoided,
-    student: {
-      id: Number(r.userId),
-      name: [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' '),
-      firstName: r.firstName, lastName: r.lastName, middleName: r.middleName ?? null,
-      matricNumber: r.matricNumber ?? null,
-      email: r.email ?? null,
-      college: r.college ?? null, department: r.department ?? null, program: r.program ?? null, level: r.level ?? null,
-    },
-    invoice: r.invoiceId ? {
-      id: Number(r.invoiceId),
-      invoiceNumber: r.invoiceNumber ?? '',
-      session: r.session ?? '',
-      semester: r.semester ?? null,
-      status: r.invoiceStatus ?? '',
-    } : null,
-    fee: r.feeId ? {
-      id: Number(r.feeId), name: r.feeName ?? '', feeCode: r.feeCode ?? '', categoryName: r.categoryName ?? '',
-    } : null,
   }));
   const total = Number(Array.isArray(cRaw) && cRaw.length > 0 ? (cRaw as any)[0]?.cnt ?? 0 : 0);
   return {
@@ -765,6 +826,7 @@ export async function studentStatement(f: ReportFilterCtx & { matricNumber?: str
 //          Students Unpaid, Amount Collected, Outstanding Amount, Collection %
 // ---------------------------------------------------------------------------
 export async function billCollectionPerformance(f: ReportFilterCtx) {
+  const { fromInclusive, toExclusive } = reportDateRange(f);
   const resolvedCategoryId = f.billCategoryId ?? f.feeCategoryId;
   const resolvedBillId = f.billId ?? f.feeId;
   const resolvedLevel = f.levelValue ?? f.level;
@@ -790,8 +852,11 @@ export async function billCollectionPerformance(f: ReportFilterCtx) {
     WHERE fe.isActive = 1
       AND (${f.session ? Prisma.sql`i.session = ${f.session}` : Prisma.sql`1=1`})
       AND (${f.semester ? Prisma.sql`i.semester = ${f.semester}` : Prisma.sql`1=1`})
-      AND (${f.dateFrom ? Prisma.sql`i.createdAt >= ${f.dateFrom}` : Prisma.sql`1=1`})
-      AND (${f.dateTo   ? Prisma.sql`i.createdAt <= ${f.dateTo}`   : Prisma.sql`1=1`})
+      -- DATE BASIS: invoice creation (i.createdAt) — this report measures assignment
+      -- and collection against invoices, so the filter uses the Lagos business-day
+      -- range of the invoice creation date: >= fromInclusive, < toExclusive.
+      AND (${fromInclusive ? Prisma.sql`i.createdAt >= ${fromInclusive}` : Prisma.sql`1=1`})
+      AND (${toExclusive   ? Prisma.sql`i.createdAt < ${toExclusive}`   : Prisma.sql`1=1`})
       AND (${resolvedCategoryId ? Prisma.sql`fe.categoryId = ${resolvedCategoryId}` : Prisma.sql`1=1`})
       AND (${resolvedBillId ? Prisma.sql`fe.id = ${resolvedBillId}` : Prisma.sql`1=1`})
       AND (${resolvedLevel ? Prisma.sql`fe.level = ${resolvedLevel}` : Prisma.sql`1=1`})
@@ -1011,33 +1076,78 @@ export async function hierarchicalRevenue(f: ReportFilterCtx & { level?: 'colleg
 // R10 — Payment Gateway Report
 // ---------------------------------------------------------------------------
 export async function paymentGatewayReport(f: ReportFilterCtx) {
-  const { where } = buildSuccessReceiptTxCtx(f);
+  // The gateway report must count SUCCESSFUL financial collections AND
+  // FAILED/PENDING/REVERSED attempts INDEPENDENTLY. Failed/pending attempts have
+  // no receipt, so they must never be eliminated by a successful-receipt join.
+  //
+  //   Successful: t.status='SUCCESS' with a non-void Receipt  -> date = Receipt.paidAt
+  //   Attempts:   t.status IN (FAILED,PENDING,REVERSED)        -> date = Transaction.createdAt
+  const { fromInclusive, toExclusive } = reportDateRange(f);
+  const conds: Prisma.Sql[] = [];
+  if (f.provider) conds.push(Prisma.sql`t.gateway = ${f.provider}`);
+  if (f.studentId) conds.push(Prisma.sql`t.userId = ${f.studentId}`);
+  if (f.studentMatric) conds.push(Prisma.sql`u.matricNumber = ${f.studentMatric}`);
+  const resolvedBillId = f.billId ?? f.feeId;
+  const resolvedCategoryId = f.billCategoryId ?? f.feeCategoryId;
+  const resolvedLevel = f.levelValue ?? f.level;
+  if (resolvedBillId) conds.push(Prisma.sql`i.feeId = ${resolvedBillId}`);
+  if (resolvedCategoryId) conds.push(Prisma.sql`fe.categoryId = ${resolvedCategoryId}`);
+  if (f.session) conds.push(Prisma.sql`i.session = ${f.session}`);
+  if (f.semester) conds.push(Prisma.sql`i.semester = ${f.semester}`);
+  if (resolvedLevel) conds.push(Prisma.sql`fe.level = ${resolvedLevel}`);
+  if (f.collegeId) conds.push(Prisma.sql`u.facultyId = ${f.collegeId}`);
+  if (f.departmentId) conds.push(Prisma.sql`u.departmentId = ${f.departmentId}`);
+  if (f.programmeId) conds.push(Prisma.sql`u.programmeId = ${f.programmeId}`);
+
+  // Row-scope predicate: success rows qualify by receipt paidAt; attempts by createdAt.
+  const successScope = Prisma.join([
+    Prisma.sql`t.status = 'SUCCESS'`,
+    Prisma.sql`r.id IS NOT NULL`,
+    Prisma.sql`r.isVoided = 0`,
+    ...(fromInclusive ? [Prisma.sql`r.paidAt >= ${fromInclusive}`] : []),
+    ...(toExclusive ? [Prisma.sql`r.paidAt < ${toExclusive}`] : []),
+  ], ' AND ');
+  const attemptScope = Prisma.join([
+    Prisma.sql`t.status IN ('FAILED','PENDING','REVERSED')`,
+    ...(fromInclusive ? [Prisma.sql`t.createdAt >= ${fromInclusive}`] : []),
+    ...(toExclusive ? [Prisma.sql`t.createdAt < ${toExclusive}`] : []),
+  ], ' AND ');
+  conds.push(Prisma.sql`((${successScope}) OR (${attemptScope}))`);
+  const where = Prisma.join(conds, ' AND ');
+
+  // Successful financial amount + gateway fees are derived ONLY from the
+  // successful non-void receipts. Fees are SUMMED (never one arbitrary row).
+  const successAmount = Prisma.sql`CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 THEN r.paidAmount ELSE 0 END`;
+  const successGatewayFee = Prisma.sql`CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 THEN r.gatewayFee ELSE 0 END`;
+  const sumSuccessAmount = Prisma.sql`COALESCE(SUM(${successAmount}),0)`;
+  const sumSuccessGatewayFee = Prisma.sql`COALESCE(SUM(${successGatewayFee}),0)`;
+
   const sql = Prisma.sql`
     SELECT
       t.gateway                                              AS provider,
-      COUNT(DISTINCT CASE WHEN t.status='SUCCESS' THEN t.id END)    AS successCount,
-      COUNT(DISTINCT CASE WHEN t.status<>'SUCCESS' AND t.status IN ('FAILED','REVERSED') THEN t.id END) AS failCount,
+      COUNT(DISTINCT CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 THEN t.id END) AS successCount,
+      COUNT(DISTINCT CASE WHEN t.status='FAILED'  THEN t.id END)   AS failCount,
       COUNT(DISTINCT CASE WHEN t.status='PENDING' THEN t.id END)   AS pendingCount,
-      COALESCE(SUM(CASE WHEN t.status='SUCCESS' THEN r.paidAmount ELSE 0 END),0)  AS gross,
-      COALESCE(SUM(r.gatewayFee),0)                               AS gwFees,
+      COUNT(DISTINCT CASE WHEN t.status='REVERSED' THEN t.id END)  AS reversedCount,
+      ${sumSuccessAmount}                                          AS gross,
+      ${sumSuccessGatewayFee}                                      AS gatewayFees,
       COALESCE((SELECT SUM(rf.requestedAmount) FROM refunds rf
         INNER JOIN transactions t2 ON t2.id = rf.originalTransactionId
         WHERE t2.gateway = t.gateway AND rf.status='PAID'
-          AND (${f.dateFrom ? Prisma.sql`rf.updatedAt >= ${f.dateFrom}` : Prisma.sql`1=1`})
-          AND (${f.dateTo   ? Prisma.sql`rf.updatedAt <= ${f.dateTo}`   : Prisma.sql`1=1`})
+          AND (${fromInclusive ? Prisma.sql`rf.updatedAt >= ${fromInclusive}` : Prisma.sql`1=1`})
+          AND (${toExclusive   ? Prisma.sql`rf.updatedAt < ${toExclusive}`   : Prisma.sql`1=1`})
       ),0)                                                        AS refunds,
-      COALESCE(SUM(CASE WHEN t.status='SUCCESS' THEN r.paidAmount ELSE 0 END) - r.gatewayFee, 0) AS expectedSettlement,
-      COUNT(DISTINCT CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN t.id END) AS reconciled,
-      COALESCE(
-        SUM(CASE WHEN t.status='SUCCESS' THEN r.paidAmount ELSE 0 END) - r.gatewayFee, 0
-      ) - COALESCE(SUM(s.actualSettlement),0)                     AS variance
+      ${sumSuccessAmount} - ${sumSuccessGatewayFee}                AS expectedSettlement,
+      COUNT(DISTINCT CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN t.id END) AS reconciledCount,
+      (${sumSuccessAmount} - ${sumSuccessGatewayFee})
+        - COALESCE(SUM(CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 THEN s.actualSettlement ELSE 0 END),0) AS variance
     FROM transactions t
-      INNER JOIN receipts r ON r.transactionId = t.id
-      LEFT JOIN settlements s ON s.transactionId = t.id
-      INNER JOIN users u    ON u.id = t.userId
-      LEFT JOIN invoices i  ON i.id = t.invoiceId
-      LEFT JOIN fees fe     ON fe.id = i.feeId
-    WHERE ${Prisma.join([where], ' AND ')}
+      LEFT  JOIN receipts r   ON r.transactionId = t.id
+      LEFT  JOIN settlements s ON s.transactionId = t.id
+      INNER JOIN users u      ON u.id = t.userId
+      LEFT  JOIN invoices i   ON i.id = t.invoiceId
+      LEFT  JOIN fees fe      ON fe.id = i.feeId
+    WHERE ${where}
     GROUP BY t.gateway
     ORDER BY gross DESC
   `;
@@ -1047,11 +1157,12 @@ export async function paymentGatewayReport(f: ReportFilterCtx) {
     successCount: Number(r.successCount ?? 0),
     failCount: Number(r.failCount ?? 0),
     pendingCount: Number(r.pendingCount ?? 0),
+    reversedCount: Number(r.reversedCount ?? 0),
     gross: d(r.gross),
-    gwFees: d(r.gwFees),
+    gatewayFees: d(r.gatewayFees),
     refunds: d(r.refunds),
     expectedSettlement: d(r.expectedSettlement),
-    reconciled: Number(r.reconciled ?? 0),
+    reconciledCount: Number(r.reconciledCount ?? 0),
     variance: d(r.variance),
   }));
 }
@@ -1064,37 +1175,48 @@ export async function settlementReport(f: ReportFilterCtx & { sort?: string; ord
   const page = Math.max(1, Number(f.page ?? 1));
   const pageSize = Math.min(500, Math.max(1, Number(f.pageSize ?? 50)));
   const skip = (page - 1) * pageSize;
-  const { where: baseCtx } = buildSuccessReceiptTxCtx(f);
+  // Settlement asks a different question from payment reconciliation:
+  // "did the expected money actually settle/credit?" A matched Bells payment is
+  // NOT a bank credit. When no Settlement row exists we must NOT invent one:
+  //   actualSettlement = null, settlementDate = null, settlementRef = null,
+  //   status = PENDING_SETTLEMENT, variance = null.
+  // Date basis = the settlement payment date, falling back to Receipt.paidAt,
+  // filtered as a Lagos business-day half-open range [fromInclusive, toExclusive).
+  const { where: baseCtx } = buildSuccessReceiptTxCtx({ ...f, dateFrom: undefined, dateTo: undefined });
   const where: Prisma.Sql[] = [baseCtx];
-  if (f.reconciliationStatus) where.push(Prisma.sql`COALESCE(s.status, 'PENDING_SETTLEMENT') = ${f.reconciliationStatus}`);
-  if (f.dateFrom) where.push(Prisma.sql`COALESCE(s.paymentDate, r.paidAt) >= ${f.dateFrom}`);
-  if (f.dateTo)   where.push(Prisma.sql`COALESCE(s.paymentDate, r.paidAt) <= ${f.dateTo}`);
+  const reconFilter = buildReconciliationStatusFilter(f);
+  if (reconFilter) where.push(reconFilter);
+  const { fromInclusive, toExclusive } = reportDateRange(f);
+  if (fromInclusive) where.push(Prisma.sql`COALESCE(s.paymentDate, r.paidAt) >= ${fromInclusive}`);
+  if (toExclusive)   where.push(Prisma.sql`COALESCE(s.paymentDate, r.paidAt) < ${toExclusive}`);
   const whereSql = Prisma.join(where, ' AND ');
   const allowedSorts: ReadonlySet<string> = new Set(['paymentDate','settlementDate','provider','status','paymentAmount','expectedSettlement','actualSettlement','variance']);
   const sortRaw = allowedSorts.has(f.sort ?? '') ? f.sort! : 'paymentDate';
   const orderRaw = f.order === 'asc' ? 'ASC' : 'DESC';
+  // Sort targets are raw expressions (alias-independent) and gated by the literal
+  // allowlist above, so no user value ever reaches Prisma.raw().
   const sortMap: Record<string,string> = {
-    paymentDate: 's.paymentDate', settlementDate: 's.settlementDate',
-    provider: 't.gateway', status: 'COALESCE(s.status, \'PENDING_SETTLEMENT\')',
+    paymentDate: 'COALESCE(s.paymentDate, r.paidAt)',
+    settlementDate: 's.settlementDate',
+    provider: 't.gateway',
+    status: "COALESCE(s.status, 'PENDING_SETTLEMENT')",
     paymentAmount: 'COALESCE(s.paymentAmount, r.paidAmount)',
     expectedSettlement: 'COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee)',
     actualSettlement: 's.actualSettlement',
-    variance: 'variance',
+    variance: 'COALESCE(s.actualSettlement,0) - COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee)',
   };
   const rowsSql = Prisma.sql`
     SELECT
-      t.reference                                              AS txRef,
+      t.reference                                              AS transactionReference,
       t.gateway                                                AS provider,
-      COALESCE(s.paymentDate, r.paidAt)                        AS paymentDt,
-      COALESCE(s.paymentAmount, r.paidAmount)                  AS paymentAmt,
-      COALESCE(s.gatewayFee, r.gatewayFee)                     AS gwFee,
+      COALESCE(s.paymentDate, r.paidAt)                        AS paymentDate,
+      COALESCE(s.paymentAmount, r.paidAmount)                  AS paymentAmount,
+      COALESCE(s.gatewayFee, r.gatewayFee)                     AS gatewayFee,
       COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee) AS expectedSettlement,
-      s.settlementDate                                         AS settlementDt,
+      s.settlementDate                                         AS settlementDate,
       s.settlementRef                                          AS settlementRef,
       s.bankStatementRef                                       AS bankStatementRef,
       s.actualSettlement                                       AS actualSettlement,
-      COALESCE(s.actualSettlement, 0)
-        - COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee) AS variance,
       COALESCE(s.status, 'PENDING_SETTLEMENT')                 AS reconciliationStatus,
       s.notes,
       CONCAT(u.firstName,' ',u.lastName)                       AS studentName,
@@ -1119,24 +1241,30 @@ export async function settlementReport(f: ReportFilterCtx & { sort?: string; ord
     prisma.$queryRaw<any[]>(rowsSql),
     prisma.$queryRaw<[{cnt:any}][]>(countSql),
   ]);
-  const rows = (Array.isArray(rowsRaw) ? rowsRaw : []).map((r: any) => ({
-    txRef: String(r.txRef ?? ''),
-    provider: String(r.provider ?? ''),
-    paymentDt: r.paymentDt ? new Date(r.paymentDt).toISOString() : null,
-    paymentAmt: d(r.paymentAmt),
-    gwFee: d(r.gwFee),
-    expectedSettlement: d(r.expectedSettlement),
-    settlementDt: r.settlementDt ? new Date(r.settlementDt).toISOString() : null,
-    settlementRef: r.settlementRef ?? null,
-    bankStatementRef: r.bankStatementRef ?? null,
-    actualSettlement: r.actualSettlement != null ? d(r.actualSettlement) : null,
-    variance: d(r.variance),
-    reconciliationStatus: String(r.reconciliationStatus ?? ''),
-    notes: r.notes ?? null,
-    studentName: String(r.studentName ?? ''),
-    matricNumber: r.matricNumber ?? null,
-    receiptNumber: r.receiptNumber ?? null,
-  }));
+  const rows = (Array.isArray(rowsRaw) ? rowsRaw : []).map((r: any) => {
+    const expectedSettlement = d(r.expectedSettlement);
+    const actualSettlement = r.actualSettlement != null ? d(r.actualSettlement) : null;
+    // Variance is ONLY meaningful when authoritative settlement evidence exists.
+    const variance = actualSettlement == null ? null : d(actualSettlement - expectedSettlement);
+    return {
+      transactionReference: String(r.transactionReference ?? ''),
+      provider: String(r.provider ?? ''),
+      paymentDate: r.paymentDate ? new Date(r.paymentDate).toISOString() : null,
+      paymentAmount: d(r.paymentAmount),
+      gatewayFee: d(r.gatewayFee),
+      expectedSettlement,
+      settlementDate: r.settlementDate ? new Date(r.settlementDate).toISOString() : null,
+      settlementRef: r.settlementRef ?? null,
+      bankStatementRef: r.bankStatementRef ?? null,
+      actualSettlement,
+      variance,
+      reconciliationStatus: String(r.reconciliationStatus ?? 'PENDING_SETTLEMENT'),
+      notes: r.notes ?? null,
+      studentName: String(r.studentName ?? ''),
+      matricNumber: r.matricNumber ?? null,
+      receiptNumber: r.receiptNumber ?? null,
+    };
+  });
   const total = Number(Array.isArray(cntRaw) && cntRaw.length > 0 ? (cntRaw as any)[0]?.cnt ?? 0 : 0);
   return { rows, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
 }
@@ -1159,8 +1287,9 @@ export type ExceptionKind =
   | 'CANCELLED_INVOICE_LATE_SUCCESS';
 
 export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: ExceptionKind }) {
-  const dateFrom = f.dateFrom;
-  const dateTo = f.dateTo;
+  // Date basis = each entity's OWN record/attempt date, filtered as a Lagos
+  // business-day half-open range [fromInclusive, toExclusive) — never `<= midnight`.
+  const { fromInclusive: dateFrom, toExclusive: dateTo } = reportDateRange(f);
 
   // (a) successful-tx-without-receipt
   const a = Prisma.sql`
@@ -1170,7 +1299,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     WHERE t.status='SUCCESS'
       AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.transactionId = t.id)
       AND (${dateFrom ? Prisma.sql`t.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`t.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`t.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (b) receipt-without-payment (nonvoid receipt + transaction FAILED/PENDING/etc — not SUCCESS)
@@ -1182,7 +1311,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
       LEFT JOIN transactions t ON t.id = r.transactionId
     WHERE r.isVoided=0 AND (t.status IS NULL OR t.status <> 'SUCCESS')
       AND (${dateFrom ? Prisma.sql`r.paidAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`r.paidAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`r.paidAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (c) duplicate-payment-reference
@@ -1190,7 +1319,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     SELECT reference, COUNT(*) AS c FROM transactions
     WHERE reference IS NOT NULL
       AND (${dateFrom ? Prisma.sql`createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     GROUP BY reference HAVING COUNT(*) > 1 LIMIT 500
   `;
   // (d) duplicate-receipt
@@ -1198,7 +1327,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     SELECT receiptNumber, COUNT(*) AS c FROM receipts
     WHERE receiptNumber IS NOT NULL AND isVoided=0
       AND (${dateFrom ? Prisma.sql`paidAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`paidAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`paidAt < ${dateTo}`   : Prisma.sql`1=1`})
     GROUP BY receiptNumber HAVING COUNT(*) > 1 LIMIT 500
   `;
   // (e) provider-missing-locally: webhook events where no local tx has the paystack/alatpay reference
@@ -1211,7 +1340,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
       AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.alatpayReference = w.transactionReference)
     )
       AND (${dateFrom ? Prisma.sql`w.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`w.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`w.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (f) local-missing-at-provider (local SUCCESS tx not matched at provider — proxied via settlements.status IS NULL + >7 days old)
@@ -1224,7 +1353,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
       AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.transactionId=t.id AND r.isVoided=0) = FALSE
       AND DATEDIFF(CURDATE(), DATE(t.createdAt)) > 7
       AND (${dateFrom ? Prisma.sql`t.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`t.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`t.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (g) settlement-amount-mismatch
@@ -1234,7 +1363,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     FROM settlements s INNER JOIN transactions t ON t.id = s.transactionId
     WHERE s.status='VARIANCE' AND ABS(COALESCE(s.variance,0)) > 0.02
       AND (${dateFrom ? Prisma.sql`s.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`s.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`s.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (h) unexpected-gateway-charge: receipt.gatewayFee deviates from schema provider default percentage
@@ -1248,7 +1377,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     WHERE r.isVoided=0 AND r.paidAmount > 100
       AND (r.gatewayFee / r.paidAmount) NOT BETWEEN 0.005 AND 0.025
       AND (${dateFrom ? Prisma.sql`r.paidAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`r.paidAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`r.paidAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (i) refund-unreconciled
@@ -1262,7 +1391,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
       AND NOT EXISTS (SELECT 1 FROM GeneralLedger gl
           WHERE gl.entryType='REFUND_ISSUED' AND gl.transactionId = t.id)
       AND (${dateFrom ? Prisma.sql`rf.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`rf.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`rf.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (j) payment-awaiting-settlement
@@ -1276,7 +1405,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     WHERE t.status='SUCCESS' AND r.isVoided=0
       AND COALESCE(s.status, 'PENDING_SETTLEMENT') IN ('PENDING_SETTLEMENT','UNDER_REVIEW')
       AND (${dateFrom ? Prisma.sql`t.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`t.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`t.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     LIMIT 500
   `;
   // (k) general-ledger-imbalance: per transactionId, sum(debits) - sum(credits) != 0
@@ -1289,7 +1418,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     FROM GeneralLedger
     WHERE transactionId IS NOT NULL
       AND (${dateFrom ? Prisma.sql`transactionDate >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`transactionDate <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`transactionDate < ${dateTo}`   : Prisma.sql`1=1`})
     GROUP BY transactionId
     HAVING ABS(imbalance) > 0.02
     LIMIT 500
@@ -1313,7 +1442,7 @@ export async function reconciliationExceptions(f: ReportFilterCtx & { kind?: Exc
     FROM AuditLog a
     WHERE a.action='PAYMENT_SUCCESS_ON_CANCELLED_INVOICE'
       AND (${dateFrom ? Prisma.sql`a.createdAt >= ${dateFrom}` : Prisma.sql`1=1`})
-      AND (${dateTo   ? Prisma.sql`a.createdAt <= ${dateTo}`   : Prisma.sql`1=1`})
+      AND (${dateTo   ? Prisma.sql`a.createdAt < ${dateTo}`   : Prisma.sql`1=1`})
     ORDER BY a.createdAt DESC
     LIMIT 500
   `;
@@ -1357,8 +1486,10 @@ export async function refundReport(f: ReportFilterCtx) {
   const resolvedBillId = f.billId ?? f.feeId;
   const resolvedLevel = f.levelValue ?? f.level;
   const where: Prisma.Sql[] = [];
-  if (f.dateFrom) where.push(Prisma.sql`rf.createdAt >= ${f.dateFrom}`);
-  if (f.dateTo)   where.push(Prisma.sql`rf.createdAt <= ${f.dateTo}`);
+  // DATE BASIS: refund creation date (rf.createdAt), Lagos business-day half-open range.
+  const { fromInclusive: refundFrom, toExclusive: refundTo } = reportDateRange(f);
+  if (refundFrom) where.push(Prisma.sql`rf.createdAt >= ${refundFrom}`);
+  if (refundTo)   where.push(Prisma.sql`rf.createdAt < ${refundTo}`);
   if (f.provider) where.push(Prisma.sql`t.gateway = ${f.provider}`);
   if (f.paymentStatus) where.push(Prisma.sql`rf.status = ${f.paymentStatus}`);
   if (f.studentId) where.push(Prisma.sql`u.id = ${f.studentId}`);
@@ -1378,12 +1509,12 @@ export async function refundReport(f: ReportFilterCtx) {
   const whereSql = where.length > 0 ? Prisma.join(where, ' AND ') : Prisma.sql`1=1`;
   const sql = Prisma.sql`
     SELECT
-      rf.id, rf.refundNumber, rf.createdAt AS refundDate, rf.requestedAmount AS refundAmt,
-      rf.status, rf.reason, rf.paidAt, rf.approvedById, rf.paystackRefundReference, rf.notes,
-      CONCAT(ru.firstName,' ',ru.lastName) AS requestedBy,
-      CONCAT(au.firstName,' ',au.lastName) AS approvedBy,
-      t.id AS originalTxId, t.reference AS origTx, t.amount AS origAmt, t.gateway AS provider,
-      u.id AS studentId, CONCAT(u.firstName,' ',u.lastName) AS student, u.matricNumber,
+      rf.id, rf.refundNumber, rf.createdAt AS refundDate, rf.requestedAmount AS refundAmount,
+      rf.status, rf.reason, rf.paidAt, rf.approvedById, rf.paystackRefundReference AS providerRefundRef, rf.notes,
+      CONCAT(ru.firstName,' ',ru.lastName) AS requestedByName,
+      CONCAT(au.firstName,' ',au.lastName) AS approvedByName,
+      t.id AS originalTxId, t.reference AS originalTxRef, t.amount AS originalAmount, t.gateway AS provider,
+      u.id AS studentId, CONCAT(u.firstName,' ',u.lastName) AS studentName, u.matricNumber,
       i.session, i.semester, fe.name AS billName, fc.name AS categoryName
     FROM refunds rf
       LEFT JOIN users ru ON ru.id = rf.requestedById
@@ -1401,16 +1532,16 @@ export async function refundReport(f: ReportFilterCtx) {
     id: Number(r.id),
     refundNumber: String(r.refundNumber ?? ''),
     refundDate: r.refundDate ? new Date(r.refundDate).toISOString() : null,
-    student: String(r.student ?? ''),
+    studentName: String(r.studentName ?? ''),
     matricNumber: r.matricNumber ?? '',
-    origTx: String(r.origTx ?? ''),
-    origAmt: d(r.origAmt),
-    refundAmt: d(r.refundAmt),
+    originalTxRef: String(r.originalTxRef ?? ''),
+    originalAmount: d(r.originalAmount),
+    refundAmount: d(r.refundAmount),
     reason: String(r.reason ?? ''),
-    requestedBy: String(r.requestedBy ?? ''),
-    approvedBy: r.approvedBy ? String(r.approvedBy) : null,
+    requestedByName: String(r.requestedByName ?? ''),
+    approvedByName: r.approvedByName ? String(r.approvedByName) : null,
     provider: String(r.provider ?? ''),
-    refundRef: r.paystackRefundReference ?? null,
+    providerRefundRef: r.providerRefundRef ?? null,
     status: String(r.status ?? ''),
     paidAt: r.paidAt ? new Date(r.paidAt).toISOString() : null,
     session: r.session ?? '',
@@ -1418,17 +1549,16 @@ export async function refundReport(f: ReportFilterCtx) {
     billName: r.billName ?? '',
     categoryName: r.categoryName ?? '',
   }));
-  // Summary buckets
-  const today = new Date(); today.setHours(0,0,0,0);
-  const todayEnd = new Date(today); todayEnd.setHours(23,59,59,999);
-  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  // Summary buckets — "today"/"this month" are Lagos business days, not local server days.
+  const nowLagos = lagosDayOf(new Date());
+  const monthKey = dateOnly(nowLagos).slice(0, 7);
   const summary = {
-    todayCount: data.filter(r => new Date(r.refundDate!) >= today && new Date(r.refundDate!) <= todayEnd).length,
-    monthCount: data.filter(r => new Date(r.refundDate!) >= monthStart).length,
+    todayCount: data.filter(r => r.refundDate != null && lagosDayOf(new Date(r.refundDate)).getTime() === nowLagos.getTime()).length,
+    monthCount: data.filter(r => r.refundDate != null && dateOnly(lagosDayOf(new Date(r.refundDate))).slice(0, 7) === monthKey).length,
     pendingCount: data.filter(r => r.status === 'REQUESTED' || r.status === 'APPROVED').length,
     completeCount: data.filter(r => r.status === 'PAID').length,
     failedCount: data.filter(r => r.status === 'FAILED' || r.status === 'REJECTED').length,
-    totalRefunded: data.filter(r => r.status === 'PAID').reduce((s, r) => s + r.refundAmt, 0),
+    totalRefunded: data.filter(r => r.status === 'PAID').reduce((s, r) => s + r.refundAmount, 0),
   };
   return { rows: data, summary };
 }
@@ -1443,8 +1573,8 @@ export async function chargesAndFeeIncome(f: ReportFilterCtx) {
   const { where } = buildSuccessReceiptTxCtx(f);
   const sql = Prisma.sql`
     SELECT
-      DATE_FORMAT(r.paidAt, '%Y-%m')                     AS period,
-      MIN(DATE(r.paidAt))                                AS periodStart,
+      DATE_FORMAT(DATE_ADD(r.paidAt, INTERVAL 1 HOUR), '%Y-%m') AS period,
+      MIN(DATE(DATE_ADD(r.paidAt, INTERVAL 1 HOUR)))            AS periodStart,
       COALESCE(SUM(r.paidAmount),0)                      AS basePayment,
       COALESCE(SUM(r.convenienceFee),0)                  AS convFee,
       COALESCE(SUM(r.serviceCharge),0)                   AS svcCharge,
@@ -1457,7 +1587,7 @@ export async function chargesAndFeeIncome(f: ReportFilterCtx) {
       INNER JOIN users u    ON u.id = t.userId
       LEFT JOIN invoices i ON i.id = t.invoiceId
     WHERE ${where}
-    GROUP BY DATE_FORMAT(r.paidAt, '%Y-%m')
+    GROUP BY DATE_FORMAT(DATE_ADD(r.paidAt, INTERVAL 1 HOUR), '%Y-%m')
     ORDER BY period DESC
   `;
   const rows = await prisma.$queryRaw<any[]>(sql);
@@ -1494,8 +1624,10 @@ export async function generalLedger(f: ReportFilterCtx & { entryType?: GeneralLe
   const resolvedBillId = f.billId ?? f.feeId;
   const resolvedLevel = f.levelValue ?? f.level;
   const where: Prisma.Sql[] = [];
-  if (f.dateFrom) where.push(Prisma.sql`gl.transactionDate >= ${f.dateFrom}`);
-  if (f.dateTo)   where.push(Prisma.sql`gl.transactionDate <= ${f.dateTo}`);
+  // DATE BASIS: ledger posting date (gl.transactionDate), Lagos business-day half-open range.
+  const { fromInclusive: glFrom, toExclusive: glTo } = reportDateRange(f);
+  if (glFrom) where.push(Prisma.sql`gl.transactionDate >= ${glFrom}`);
+  if (glTo)   where.push(Prisma.sql`gl.transactionDate < ${glTo}`);
   if (f.entryType) where.push(Prisma.sql`gl.entryType = ${f.entryType}`);
   if (f.studentId) where.push(Prisma.sql`gl.userId = ${f.studentId}`);
   if (f.provider) where.push(Prisma.sql`t.gateway = ${f.provider}`);
@@ -1525,7 +1657,8 @@ export async function generalLedger(f: ReportFilterCtx & { entryType?: GeneralLe
       gl.id, gl.transactionDate, gl.entryType, gl.description, gl.amount, gl.currency,
       gl.account, gl.counterpartyAccount,
       gl.transactionId, gl.receiptId, gl.userId, gl.invoiceId, gl.meta, gl.createdAt,
-      t.reference                                             AS txReference,
+      JSON_UNQUOTE(JSON_EXTRACT(gl.meta, '$.side'))            AS glSide,
+      t.reference                                             AS transactionRef,
       t.gateway                                               AS provider,
       r.receiptNumber,
       CONCAT(u.firstName,' ',u.lastName)                       AS counterparty,
@@ -1560,8 +1693,11 @@ export async function generalLedger(f: ReportFilterCtx & { entryType?: GeneralLe
     currency: String(r.currency ?? 'NGN'),
     account: String(r.account ?? ''),
     counterpartyAccount: r.counterpartyAccount ?? null,
+    // Debit/Credit are derived from the authoritative ledger side stored in meta.side.
+    debit: String(r.glSide ?? '').toUpperCase() === 'DEBIT' ? d(r.amount) : 0,
+    credit: String(r.glSide ?? '').toUpperCase() === 'CREDIT' ? d(r.amount) : 0,
     transactionId: r.transactionId ? Number(r.transactionId) : null,
-    txReference: r.txReference ?? null,
+    transactionRef: r.transactionRef ?? null,
     receiptId: r.receiptId ? Number(r.receiptId) : null,
     receiptNumber: r.receiptNumber ?? null,
     userId: r.userId ? Number(r.userId) : null,
@@ -1602,8 +1738,10 @@ export async function receiptRegister(f: ReportFilterCtx & { sort?: string; orde
   const resolvedBillId = f.billId ?? f.feeId;
   const resolvedLevel = f.levelValue ?? f.level;
   const where: Prisma.Sql[] = [];
-  if (f.dateFrom) where.push(Prisma.sql`r.paidAt >= ${f.dateFrom}`);
-  if (f.dateTo)   where.push(Prisma.sql`r.paidAt <= ${f.dateTo}`);
+  // DATE BASIS: receipt issue date (r.paidAt), Lagos business-day half-open range.
+  const { fromInclusive: rcptFrom, toExclusive: rcptTo } = reportDateRange(f);
+  if (rcptFrom) where.push(Prisma.sql`r.paidAt >= ${rcptFrom}`);
+  if (rcptTo)   where.push(Prisma.sql`r.paidAt < ${rcptTo}`);
   if (f.studentId) where.push(Prisma.sql`r.studentId = ${f.studentId}`);
   if (f.studentMatric) where.push(Prisma.sql`u.matricNumber = ${f.studentMatric}`);
   if (resolvedBillId) where.push(Prisma.sql`i.feeId = ${resolvedBillId}`);
@@ -1657,28 +1795,40 @@ export async function receiptRegister(f: ReportFilterCtx & { sort?: string; orde
     prisma.$queryRaw<any[]>(rowsSql),
     prisma.$queryRaw<[{cnt:any}][]>(countSql),
   ]);
-  const rows = (Array.isArray(rowsRaw) ? rowsRaw : []).map((r: any) => ({
-    id: Number(r.id),
-    receiptNumber: String(r.receiptNumber ?? ''),
-    paidAt: r.paidAt ? new Date(r.paidAt).toISOString() : null,
-    student: String(r.student ?? ''),
-    matricNumber: r.matricNumber ?? '',
-    bill: r.bill ?? '',
-    feeCode: r.feeCode ?? '',
-    invoiceNumber: r.invoiceNumber ?? '',
-    base: d(r.paidAmount),
-    convenienceFee: d(r.convenienceFee),
-    serviceCharge: d(r.serviceCharge),
-    gatewayFee: d(r.gatewayFee),
-    total: d(r.totalAmount),
-    txRef: r.txRef ?? '',
-    provider: r.provider ?? '',
-    channel: r.channel ?? null,
-    voided: !!r.voidedFlag,
-    reissued: !!r.duplicateFlag,
-    duplicate: !!r.duplicateFlag,
-    exceptionReceiptNoPayment: !!r.exceptionReceiptNoPayment,
-  }));
+  const rows = (Array.isArray(rowsRaw) ? rowsRaw : []).map((r: any) => {
+    const charges = d(d(r.convenienceFee) + d(r.serviceCharge) + d(r.gatewayFee));
+    return {
+      id: Number(r.id),
+      receiptNumber: String(r.receiptNumber ?? ''),
+      paidAt: r.paidAt ? new Date(r.paidAt).toISOString() : null,
+      // Canonical export/UI contract keys.
+      date: r.paidAt ? dateOnly(new Date(r.paidAt)) : null,
+      studentName: String(r.student ?? ''),
+      matricNumber: r.matricNumber ?? '',
+      billName: r.bill ?? '',
+      baseAmount: d(r.paidAmount),
+      charges,
+      totalAmount: d(r.totalAmount),
+      transactionRef: r.txRef ?? '',
+      provider: r.provider ?? '',
+      voidedFlag: !!r.voidedFlag,
+      duplicateFlag: !!r.duplicateFlag,
+      exceptionReceiptNoPayment: !!r.exceptionReceiptNoPayment,
+      // Retained detail fields (not in the export catalog but used by drilldowns).
+      feeCode: r.feeCode ?? '',
+      invoiceNumber: r.invoiceNumber ?? '',
+      base: d(r.paidAmount),
+      convenienceFee: d(r.convenienceFee),
+      serviceCharge: d(r.serviceCharge),
+      gatewayFee: d(r.gatewayFee),
+      total: d(r.totalAmount),
+      txRef: r.txRef ?? '',
+      channel: r.channel ?? null,
+      voided: !!r.voidedFlag,
+      reissued: !!r.duplicateFlag,
+      duplicate: !!r.duplicateFlag,
+    };
+  });
   const total = Number(Array.isArray(cntRaw) && cntRaw.length > 0 ? (cntRaw as any)[0]?.cnt ?? 0 : 0);
   return { rows, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
 }
@@ -1688,8 +1838,10 @@ export async function receiptRegister(f: ReportFilterCtx & { sort?: string; orde
 // ---------------------------------------------------------------------------
 export async function transactionStatusMix(f: ReportFilterCtx) {
   const where: Prisma.Sql[] = [];
-  if (f.dateFrom) where.push(Prisma.sql`t.createdAt >= ${f.dateFrom}`);
-  if (f.dateTo)   where.push(Prisma.sql`t.createdAt <= ${f.dateTo}`);
+  // DATE BASIS: attempt date (t.createdAt) — R17 mixes successes and attempts.
+  const { fromInclusive: r17From, toExclusive: r17To } = reportDateRange(f);
+  if (r17From) where.push(Prisma.sql`t.createdAt >= ${r17From}`);
+  if (r17To)   where.push(Prisma.sql`t.createdAt < ${r17To}`);
   if (f.provider) where.push(Prisma.sql`t.gateway = ${f.provider}`);
   const whereSql = where.length > 0 ? Prisma.join(where, ' AND ') : Prisma.sql`1=1`;
   const sql = Prisma.sql`
@@ -1721,8 +1873,8 @@ export async function transactionStatusMix(f: ReportFilterCtx) {
   // Refunds from refund table: PAID = REFUNDED, APPROVED/REQUESTED not yet paid = PARTIALLY_REFUNDED
   const refSql = Prisma.sql`
     SELECT status, COUNT(*) AS cnt, COALESCE(SUM(requestedAmount),0) AS amount FROM refunds
-    WHERE (${f.dateFrom ? Prisma.sql`createdAt >= ${f.dateFrom}` : Prisma.sql`1=1`})
-      AND (${f.dateTo   ? Prisma.sql`createdAt <= ${f.dateTo}`   : Prisma.sql`1=1`})
+    WHERE (${r17From ? Prisma.sql`createdAt >= ${r17From}` : Prisma.sql`1=1`})
+      AND (${r17To   ? Prisma.sql`createdAt < ${r17To}`   : Prisma.sql`1=1`})
     GROUP BY status
   `;
   const refRows = await prisma.$queryRaw<any[]>(refSql);
@@ -1734,7 +1886,8 @@ export async function transactionStatusMix(f: ReportFilterCtx) {
       merged['PARTIALLY_REFUNDED'].amount += d(r.amount);
     }
   }
-  const out: Array<{status: string; count: number; amount: number; includedInRevenue: boolean}> = [];
+  const totalCount = canonicalKeys.reduce((s, k) => s + merged[k].count, 0);
+  const out: Array<{status: string; count: number; amount: number; includedInRevenue: boolean; sharePct: number}> = [];
   for (const k of canonicalKeys) {
     const m = merged[k];
     out.push({
@@ -1742,6 +1895,7 @@ export async function transactionStatusMix(f: ReportFilterCtx) {
       count: m.count,
       amount: d(m.amount),
       includedInRevenue: k === 'SUCCESSFUL',
+      sharePct: totalCount > 0 ? Number(((m.count / totalCount) * 100).toFixed(2)) : 0,
     });
   }
   return out;
@@ -1756,19 +1910,29 @@ export async function transactionStatusMix(f: ReportFilterCtx) {
 // ---------------------------------------------------------------------------
 export async function comparativeReports(range: 'D' | 'M' | 'S', f: ReportFilterCtx) {
   const now = new Date();
+  // All comparative buckets are computed as Lagos BUSINESS-DAY ranges so they line
+  // up exactly with the on-screen reports (which also filter by Lagos business day).
+  const dayAdd = (day: Date, n: number) => new Date(day.getTime() + n * LAGOS_DAY_MS);
   let aFrom: Date, aTo: Date, bFrom: Date, bTo: Date, labelA: string, labelB: string;
+  const todayLagos = lagosDayOf(now);
   if (range === 'D') {
-    aFrom = new Date(now); aFrom.setHours(0,0,0,0); aTo = new Date(aFrom); aTo.setHours(23,59,59,999);
-    bFrom = new Date(aFrom); bFrom.setDate(bFrom.getDate() - 1); bTo = new Date(bFrom); bTo.setHours(23,59,59,999);
+    const yestLagos = dayAdd(todayLagos, -1);
+    const aB = lagosDayBounds(todayLagos, todayLagos);
+    const bB = lagosDayBounds(yestLagos, yestLagos);
+    aFrom = aB.fromInclusive; aTo = aB.toExclusive;
+    bFrom = bB.fromInclusive; bTo = bB.toExclusive;
     labelA = 'Today'; labelB = 'Yesterday';
   } else if (range === 'M') {
-    const today = now.getDate();
-    aFrom = new Date(now.getFullYear(), now.getMonth(), 1);
-    aTo   = new Date(now.getFullYear(), now.getMonth(), today, 23, 59, 59, 999);
-    bFrom = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const lastMonthDayCount = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+    const y = todayLagos.getUTCFullYear(); const m = todayLagos.getUTCMonth(); const today = todayLagos.getUTCDate();
+    const firstThis = new Date(Date.UTC(y, m, 1));
+    const aB = lagosDayBounds(firstThis, todayLagos);
+    aFrom = aB.fromInclusive; aTo = aB.toExclusive;
+    const lastMonthDayCount = new Date(Date.UTC(y, m, 0)).getUTCDate();
     const safeLastMonthDay = Math.min(today, lastMonthDayCount);
-    bTo   = new Date(now.getFullYear(), now.getMonth() - 1, safeLastMonthDay, 23,59,59,999);
+    const firstLast = new Date(Date.UTC(y, m - 1, 1));
+    const lastDayLast = new Date(Date.UTC(y, m - 1, safeLastMonthDay));
+    const bB = lagosDayBounds(firstLast, lastDayLast);
+    bFrom = bB.fromInclusive; bTo = bB.toExclusive;
     labelA = `This Month (${today} equiv days)`;
     labelB = `Last Month (${safeLastMonthDay} equiv days)`;
   } else {
@@ -1777,17 +1941,20 @@ export async function comparativeReports(range: 'D' | 'M' | 'S', f: ReportFilter
     const activeSesh = await prisma.academicSession.findFirst({
       where: session ? { name: session } : { isActive: true },
     });
-    const aSeshStart = activeSesh?.startDate ?? new Date();
-    const daysIntoSession = Math.max(1, Math.floor((now.getTime() - aSeshStart.getTime()) / (1000*60*60*24)) + 1);
+    const aSeshStartDay = lagosDayOf(activeSesh?.startDate ?? now);
+    const daysIntoSession = Math.max(1, Math.floor((todayLagos.getTime() - aSeshStartDay.getTime()) / LAGOS_DAY_MS) + 1);
     const prevYear = activeSesh?.name ? String(activeSesh.name).replace(/\d{4}/, y => String(Number(y) - 1)) : '';
     const prevSesh = prevYear ? await prisma.academicSession.findFirst({ where: { name: prevYear } }) : null;
-    const bSeshStart = prevSesh?.startDate ?? new Date(aSeshStart);
-    if (!prevSesh) bSeshStart.setFullYear(bSeshStart.getFullYear() - 1);
-    aFrom = aSeshStart;
-    aTo = new Date(aSeshStart); aTo.setDate(aTo.getDate() + daysIntoSession - 1);
-    if (aTo > now) aTo = new Date(now);
-    bFrom = bSeshStart;
-    bTo = new Date(bSeshStart); bTo.setDate(bTo.getDate() + daysIntoSession - 1);
+    const aEndDayRaw = dayAdd(aSeshStartDay, daysIntoSession - 1);
+    const aEndDay = aEndDayRaw.getTime() > todayLagos.getTime() ? todayLagos : aEndDayRaw;
+    const aB = lagosDayBounds(aSeshStartDay, aEndDay);
+    aFrom = aB.fromInclusive; aTo = aB.toExclusive;
+    const bSeshStartDay = prevSesh?.startDate
+      ? lagosDayOf(prevSesh.startDate)
+      : new Date(Date.UTC(aSeshStartDay.getUTCFullYear() - 1, aSeshStartDay.getUTCMonth(), aSeshStartDay.getUTCDate()));
+    const bEndDay = dayAdd(bSeshStartDay, daysIntoSession - 1);
+    const bB = lagosDayBounds(bSeshStartDay, bEndDay);
+    bFrom = bB.fromInclusive; bTo = bB.toExclusive;
     labelA = activeSesh?.name ?? 'This Session';
     labelB = prevSesh?.name ?? 'Previous Session';
   }
@@ -1801,7 +1968,7 @@ export async function comparativeReports(range: 'D' | 'M' | 'S', f: ReportFilter
       Prisma.sql`t.status='SUCCESS'`,
       Prisma.sql`r.isVoided=0`,
       Prisma.sql`r.paidAt >= ${from}`,
-      Prisma.sql`r.paidAt <= ${to}`,
+      Prisma.sql`r.paidAt < ${to}`,
     ];
     if (f.provider) conds.push(Prisma.sql`t.gateway = ${f.provider}`);
     if (f.studentId) conds.push(Prisma.sql`t.userId = ${f.studentId}`);
