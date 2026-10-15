@@ -354,11 +354,20 @@ export async function fetchAlatpayTxById(params: {
     ];
     let lastErr: any = null;
     let lastStatus: number | null = null;
-    // A definitive HTTP 404 from any authoritative transaction endpoint proves
-    // the transaction does not exist at the provider. Empty/malformed 2xx,
-    // timeout, 5xx, 401, 403 are AMBIGUOUS and must NOT be treated as
-    // notFound — they become UNABLE_TO_VERIFY.
-    let saw404 = false;
+    // FAIL-CLOSED definitive NOT FOUND:
+    //
+    // Both candidate endpoints (/alatpaytransaction/... and /transaction/...)
+    // are used by the payment verify() flow as sequential fallbacks. Neither
+    // endpoint alone is sufficient to prove financial absence.
+    //
+    // notFound = true ONLY when EVERY candidate endpoint returned a
+    // definitive HTTP 404. If ANY candidate returns an ambiguous response
+    // (5xx, timeout, 401, 403, empty/malformed 2xx), we CANNOT prove the
+    // transaction is absent — the result must be UNABLE_TO_VERIFY, never
+    // MISSING_GATEWAY.
+    //
+    // A valid transaction from ANY candidate wins immediately (FOUND).
+    let allDefinitive404 = true;
     for (const url of candidates) {
       try {
         const r = await axios.get(url, {
@@ -377,22 +386,26 @@ export async function fetchAlatpayTxById(params: {
         // This is AMBIGUOUS — do NOT treat as definitive not-found.
         // Continue to the next candidate endpoint; a later candidate may
         // return a valid transaction.
-        continue;
+        allDefinitive404 = false;
       } catch (err: any) {
         lastErr = err;
         lastStatus = err?.response?.status ?? null;
-        if (lastStatus === 404) {
-          saw404 = true;
+        if (lastStatus !== 404) {
+          // 5xx, timeout, 401, 403, network error → AMBIGUOUS.
+          allDefinitive404 = false;
         }
-        // Continue to next candidate for timeout/5xx/401/403/etc.
+        // HTTP 404 → definitive absence for THIS candidate. Continue to
+        // check remaining candidates so a valid transaction from another
+        // endpoint can still win.
       }
     }
     // After all candidates:
     //   - valid transaction found → already returned above
-    //   - any candidate returned HTTP 404 → definitive absence → notFound
-    //   - otherwise (timeout, 5xx, 401, 403, empty 2xx, malformed 2xx)
-    //     → cannot prove absence → UNABLE_TO_VERIFY, never MISSING_GATEWAY
-    const notFound = saw404;
+    //   - ALL candidates returned HTTP 404 → definitive absence → notFound
+    //   - otherwise (any candidate returned timeout/5xx/401/403/empty 2xx/
+    //     malformed 2xx) → cannot prove absence → UNABLE_TO_VERIFY,
+    //     never MISSING_GATEWAY
+    const notFound = allDefinitive404;
     if (!notFound && process.env.NODE_ENV !== 'test') {
       console.warn(
         `[recon:alatpay] individual lookup failed for ${providerId}:`,

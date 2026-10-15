@@ -1749,4 +1749,228 @@ describe('Reconciliation Engine Corrections', () => {
     expect(result.notFound).toBe(false);
     expect((result.row as any).Id).toBe(uuid);
   });
+
+  // =================================================================
+  // ISSUE: ALATPAY MIXED-ENDPOINT RESPONSES MUST NOT PRODUCE
+  // FALSE MISSING_GATEWAY
+  //
+  // notFound = true ONLY when ALL candidate endpoints return a
+  // definitive HTTP 404. Any ambiguous response (5xx, timeout,
+  // 401, 403, empty/malformed 2xx) from ANY candidate forces
+  // notFound = false → UNABLE_TO_VERIFY, never MISSING_GATEWAY.
+  // A valid transaction from any candidate wins (FOUND).
+  // =================================================================
+
+  function axiosError(status: number | null, message = 'error', code?: string) {
+    const err: any = new Error(message);
+    if (status != null) {
+      err.response = { status, data: { message } };
+    } else {
+      err.response = undefined;
+    }
+    if (code) err.code = code;
+    return err;
+  }
+
+  it('S52: 500 -> 404 => UNABLE_TO_VERIFY (notFound=false)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000001';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(500, 'Internal Server Error');
+      throw axiosError(404, 'Not Found');
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S53: timeout -> 404 => UNABLE_TO_VERIFY (notFound=false)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000002';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(null, 'timeout of 15000ms exceeded', 'ECONNABORTED');
+      throw axiosError(404, 'Not Found');
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S54: empty 200 -> 404 => UNABLE_TO_VERIFY (notFound=false)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000003';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) return { data: {}, status: 200 } as any;
+      throw axiosError(404, 'Not Found');
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S55: malformed 200 -> 404 => UNABLE_TO_VERIFY (notFound=false)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000004';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) return { data: { unexpected: 'shape', noId: true }, status: 200 } as any;
+      throw axiosError(404, 'Not Found');
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S56: 401 -> 404 => UNABLE_TO_VERIFY (notFound=false)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000005';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(401, 'Unauthorized');
+      throw axiosError(404, 'Not Found');
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S57: 403 -> 404 => UNABLE_TO_VERIFY (notFound=false)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000006';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(403, 'Forbidden');
+      throw axiosError(404, 'Not Found');
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S58: 404 -> valid transaction => FOUND (valid transaction wins)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000007';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(404, 'Not Found');
+      return { data: { data: { Id: uuid, Amount: 50000, Status: 'SUCCESS' } }, status: 200 } as any;
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).not.toBeNull();
+    expect(result.notFound).toBe(false);
+    expect((result.row as any).Id).toBe(uuid);
+  });
+
+  it('S59: empty 200 -> valid transaction => FOUND (valid transaction wins)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000008';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) return { data: {}, status: 200 } as any;
+      return { data: { data: { Id: uuid, Amount: 50000, Status: 'SUCCESS' } }, status: 200 } as any;
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).not.toBeNull();
+    expect(result.notFound).toBe(false);
+    expect((result.row as any).Id).toBe(uuid);
+  });
+
+  it('S60: 500 -> valid transaction => FOUND (valid transaction wins)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000009';
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(500, 'Internal Server Error');
+      return { data: { data: { Id: uuid, Amount: 50000, Status: 'SUCCESS' } }, status: 200 } as any;
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).not.toBeNull();
+    expect(result.notFound).toBe(false);
+    expect((result.row as any).Id).toBe(uuid);
+  });
+
+  it('S61: all candidates return 404 => notFound=true (eligible for MISSING_GATEWAY)', async () => {
+    const uuid = '90000000-0000-0000-0000-000000000010';
+    axiosSpy = jest.spyOn(axios, 'get').mockRejectedValue(axiosError(404, 'Not Found'));
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(true);
+  });
+
+  it('S62: integration — all-404 with full list coverage => MISSING_GATEWAY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const uuid = '90000000-0000-0000-0000-000000000011';
+    await createTx({
+      reference: 'PAY-ALAT-ALL404',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    // fetchAlatpayTxById is NOT spied — the real implementation runs with
+    // axios mocked to return 404 from both candidate endpoints.
+    axiosSpy = jest.spyOn(axios, 'get').mockRejectedValue(axiosError(404, 'Not Found'));
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-ALL404');
+    expect(item).toBeDefined();
+    expect(item?.classification).toBe('MISSING_GATEWAY');
+  });
+
+  it('S63: integration — ambiguous provider evidence (500->404) can NEVER produce MISSING_GATEWAY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const uuid = '90000000-0000-0000-0000-000000000012';
+    await createTx({
+      reference: 'PAY-ALAT-AMBIG',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    let call = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async () => {
+      call += 1;
+      if (call === 1) throw axiosError(500, 'Internal Server Error');
+      throw axiosError(404, 'Not Found');
+    });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-AMBIG');
+    expect(item).toBeDefined();
+    expect(item?.classification).not.toBe('MISSING_GATEWAY');
+    expect(item?.classification).toBe('UNABLE_TO_VERIFY');
+  });
 });
