@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { randomUUID } from 'crypto';
 import prisma from '../config/database';
 import {
   Prisma,
@@ -1972,5 +1973,483 @@ describe('Reconciliation Engine Corrections', () => {
     expect(item).toBeDefined();
     expect(item?.classification).not.toBe('MISSING_GATEWAY');
     expect(item?.classification).toBe('UNABLE_TO_VERIFY');
+  });
+
+  // =================================================================
+  // ALATPAY AMOUNT SEMANTICS
+  //
+  // ALATPay charges its own fee ON TOP of the Bells amount. The provider
+  // GROSS charge therefore includes the provider fee. Reconciliation must
+  // compare the provider EFFECTIVE amount (gross - fee) against the Bells
+  // amount, NEVER the gross.
+  //
+  //   Bells amount    = authoritative internal amount
+  //   Provider gross  = total reported by ALATPay
+  //   Provider fee    = explicitly-returned ALATPay fee (FeeAmount/feeAmount)
+  //   Prov. effective = gross - fee
+  //   Variance        = providerEffective - bellsAmount
+  //
+  // A missing/invalid provider fee is NEVER assumed to be zero:
+  //   CASE A: gross == bells (missing fee)  -> MATCHED
+  //   CASE B: gross != bells + numeric fee  -> compare effective
+  //   CASE C: gross != bells + no usable fee -> UNABLE_TO_VERIFY
+  // =================================================================
+
+  function alatFeeRow(opts: {
+    uuid: string;
+    gross?: number | string | null;
+    fee?: number | string | null;
+    includeFee?: boolean;
+    status?: string;
+  }) {
+    const row: any = {
+      Id: opts.uuid,
+      Status: opts.status ?? 'SUCCESS',
+      CreatedAt: TX_DATE.toISOString(),
+      UpdatedAt: TX_DATE.toISOString(),
+    };
+    if (opts.gross !== undefined && opts.gross !== null) row.Amount = opts.gross;
+    if (opts.includeFee) row.FeeAmount = opts.fee;
+    return row;
+  }
+
+  /**
+   * Runs a full ALATPay reconciliation for a single internal SUCCESS record
+   * with the given provider gross/fee evidence and returns the resulting item.
+   */
+  async function runAlatpayAmountScenario(opts: {
+    bells: number;
+    gross?: number | string | null;
+    fee?: number | string | null;
+    includeFee?: boolean;
+  }) {
+    const uuid = randomUUID();
+    const reference = `PAY-ALAT-SEM-${uuid.slice(0, 8)}`;
+    const tx = await createTx({
+      reference,
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: opts.bells,
+      amount: opts.bells,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-SEM-${Date.now()}-${uuid.slice(0, 6)}`,
+        verificationToken: `vt-sem-${Date.now()}-${uuid.slice(0, 6)}`,
+        transactionId: tx.id,
+        studentId: testStudentId!,
+        paidAmount: opts.bells,
+        paymentChannel: 'card',
+        paidAt: TX_DATE,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: opts.bells,
+      },
+    });
+    createdReceiptIds.push(r.id);
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [alatFeeRow({ uuid, ...opts })], available: true });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: null, available: false, notFound: false });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === reference);
+    expect(item).toBeDefined();
+    return item!;
+  }
+
+  // ---- Scenario 1 (TX48 / TX47 / TX46 / TX70 shape): gross 450, fee 350 ----
+  it('AS1: Bells 100, ALATPay gross 450, fee 350 => effective 100, MATCHED, variance 0', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, fee: 350, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.bellsAmount).toBe(100);
+    expect(item.providerGross).toBe(450);
+    expect(item.providerFee).toBe(350);
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
+
+  // ---- Scenario 2 (TX42 shape): gross 150.75, fee 0.75 => effective 150 ----
+  it('AS2: Bells 150, ALATPay gross 150.75, fee 0.75 => effective 150, MATCHED, variance 0', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 150, gross: 150.75, fee: 0.75, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerGross).toBe(150.75);
+    expect(item.providerFee).toBe(0.75);
+    expect(item.providerEffective).toBe(150);
+    expect(item.variance).toBe(0);
+  });
+
+  // ---- Scenario 3 (TX46 shape): gross 500, fee 350 => effective 150 ----
+  it('AS3: Bells 150, ALATPay gross 500, fee 350 => effective 150, MATCHED, variance 0', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 150, gross: 500, fee: 350, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerEffective).toBe(150);
+    expect(item.variance).toBe(0);
+  });
+
+  // ---- CASE A (TX30 shape): gross == bells, fee missing => MATCHED ----
+  it('AS4: Bells 100, ALATPay gross 100, fee missing => MATCHED (no assumed fee)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, includeFee: false });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerGross).toBe(100);
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
+
+  // ---- CASE C: gross != bells, fee missing => UNABLE_TO_VERIFY (NOT AMOUNT_MISMATCH) ----
+  it('AS5: Bells 100, ALATPay gross 450, fee missing => UNABLE_TO_VERIFY (never AMOUNT_MISMATCH)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, includeFee: false });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.classification).not.toBe('AMOUNT_MISMATCH');
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBeNull();
+    expect(item.variance).toBeNull();
+  });
+
+  // ---- Invalid fee: malformed (non-numeric) => fail closed ----
+  it('AS6: Bells 100, ALATPay gross 450, fee malformed => UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, fee: 'not-a-number', includeFee: true });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.classification).not.toBe('AMOUNT_MISMATCH');
+    expect(item.providerFee).toBeNull();
+    expect(item.providerEffective).toBeNull();
+  });
+
+  // ---- Invalid fee: negative => fail closed ----
+  it('AS7: Bells 100, ALATPay gross 450, fee negative => UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, fee: -5, includeFee: true });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.classification).not.toBe('AMOUNT_MISMATCH');
+    expect(item.providerFee).toBeNull();
+  });
+
+  // ---- Invalid fee: greater than gross => fail closed ----
+  it('AS8: Bells 100, ALATPay gross 450, fee > gross => UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, fee: 900, includeFee: true });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.providerFee).toBeNull();
+  });
+
+  // ---- Explicit zero fee is a valid, numeric fee ----
+  it('AS9: Bells 100, ALATPay gross 100, explicit fee 0 => MATCHED', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, fee: 0, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+    expect(item.providerFee).toBe(0);
+    expect(item.providerEffective).toBe(100);
+    expect(item.variance).toBe(0);
+  });
+
+  // ---- Genuine discrepancy: effective != bells => AMOUNT_MISMATCH ----
+  it('AS10: Bells 100, ALATPay gross 460, fee 350 => effective 110, AMOUNT_MISMATCH, variance +10', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 460, fee: 350, includeFee: true });
+    expect(item.classification).toBe('AMOUNT_MISMATCH');
+    expect(item.providerEffective).toBe(110);
+    expect(item.variance).toBe(10);
+  });
+
+  // ---- Missing provider gross (unavailable) => fail closed ----
+  it('AS11: Bells 100, ALATPay gross missing => UNABLE_TO_VERIFY (never MATCHED/MISMATCH)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, includeFee: false });
+    expect(item.classification).toBe('UNABLE_TO_VERIFY');
+    expect(item.providerGross).toBeNull();
+    expect(item.providerEffective).toBeNull();
+  });
+
+  // ---- feeAmount (lowercase) variant is normalized identically ----
+  it('AS12: lowercase feeAmount variant normalizes exactly like FeeAmount', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const uuid = randomUUID();
+    const reference = `PAY-ALAT-SEM-${uuid.slice(0, 8)}`;
+    const tx = await createTx({
+      reference,
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 100,
+      amount: 100,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-SEM-LC-${Date.now()}-${uuid.slice(0, 6)}`,
+        verificationToken: `vt-sem-lc-${Date.now()}-${uuid.slice(0, 6)}`,
+        transactionId: tx.id,
+        studentId: testStudentId!,
+        paidAmount: 100,
+        paymentChannel: 'card',
+        paidAt: TX_DATE,
+        qrCodeData: 'x',
+        convenienceFee: 0, serviceCharge: 0, gatewayFee: 0, totalAmount: 100,
+      },
+    });
+    createdReceiptIds.push(r.id);
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({
+        rows: [{
+          Id: uuid,
+          Status: 'SUCCESS',
+          CreatedAt: TX_DATE.toISOString(),
+          UpdatedAt: TX_DATE.toISOString(),
+          Amount: 450,
+          feeAmount: 350,
+        }],
+        available: true,
+      });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: null, available: false, notFound: false });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === reference);
+    expect(item).toBeDefined();
+    expect(item!.classification).toBe('MATCHED');
+    expect(item!.providerFee).toBe(350);
+    expect(item!.providerEffective).toBe(100);
+    expect(item!.variance).toBe(0);
+  });
+
+  // ---- Paystack semantics preserved (gross == effective; no fee model) ----
+  it('AS13: Paystack amount semantics unchanged (gross compared against Bells; no fee subtraction)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-PS-SEM-MATCH',
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref('PS-SEM-MATCH'),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 100,
+      amount: 100,
+    });
+    const t = await prisma.transaction.findFirst({ where: { reference: 'PAY-PS-SEM-MATCH' } });
+    if (t) {
+      const r = await prisma.receipt.create({
+        data: {
+          receiptNumber: `RCT-PS-SEM-${Date.now()}`,
+          verificationToken: `vt-ps-sem-${Date.now()}`,
+          transactionId: t.id,
+          studentId: testStudentId!,
+          paidAmount: 100,
+          paymentChannel: 'card',
+          paidAt: TX_DATE,
+          qrCodeData: 'x',
+          convenienceFee: 0, serviceCharge: 0, gatewayFee: 0, totalAmount: 100,
+        },
+      });
+      createdReceiptIds.push(r.id);
+    }
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [paystackRow('PS-SEM-MATCH', 100)], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-PS-SEM-MATCH');
+    expect(item).toBeDefined();
+    expect(item!.classification).toBe('MATCHED');
+    // Paystack exposes no provider-fee model here: fee is N/A, effective == gross.
+    expect(item!.providerFee).toBeNull();
+    expect(item!.providerGross).toBe(100);
+    expect(item!.providerEffective).toBe(100);
+    expect(item!.variance).toBe(0);
+  });
+
+  it('AS14: Paystack genuine discrepancy is still AMOUNT_MISMATCH (no ALATPay fee rule applied)', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-PS-SEM-MISMATCH',
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref('PS-SEM-MM'),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 100,
+      amount: 100,
+    });
+    const t = await prisma.transaction.findFirst({ where: { reference: 'PAY-PS-SEM-MISMATCH' } });
+    if (t) {
+      const r = await prisma.receipt.create({
+        data: {
+          receiptNumber: `RCT-PS-SEM2-${Date.now()}`,
+          verificationToken: `vt-ps-sem2-${Date.now()}`,
+          transactionId: t.id,
+          studentId: testStudentId!,
+          paidAmount: 100,
+          paymentChannel: 'card',
+          paidAt: TX_DATE,
+          qrCodeData: 'x',
+          convenienceFee: 0, serviceCharge: 0, gatewayFee: 0, totalAmount: 100,
+        },
+      });
+      createdReceiptIds.push(r.id);
+    }
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [paystackRow('PS-SEM-MM', 110)], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-PS-SEM-MISMATCH');
+    expect(item).toBeDefined();
+    expect(item!.classification).toBe('AMOUNT_MISMATCH');
+  });
+
+  // ---- FAILED / PENDING separation preserved, with no manufactured provider values ----
+  it('AS15: FAILED attempt stays FAILED_ATTEMPT and exposes no provider financial values', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-ALAT-SEM-FAILED',
+      gateway: PaymentGateway.ALATPAY,
+      status: TransactionStatus.FAILED,
+      expectedAmount: 100,
+      amount: 100,
+    });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items, summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-SEM-FAILED');
+    expect(item).toBeDefined();
+    expect(item!.classification).toBe('FAILED_ATTEMPT');
+    expect(item!.providerGross).toBeNull();
+    expect(item!.providerFee).toBeNull();
+    expect(item!.providerEffective).toBeNull();
+    expect(item!.variance).toBeNull();
+    expect(summary.failedAttempts).toBeGreaterThanOrEqual(1);
+    expect(summary.amountMismatch).toBe(0);
+  });
+
+  it('AS16: PENDING attempt stays PENDING_ATTEMPT and exposes no provider financial values', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    await createTx({
+      reference: 'PAY-ALAT-SEM-PENDING',
+      gateway: PaymentGateway.ALATPAY,
+      status: TransactionStatus.PENDING,
+      expectedAmount: 100,
+      amount: 100,
+    });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items, summary } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-SEM-PENDING');
+    expect(item).toBeDefined();
+    expect(item!.classification).toBe('PENDING_ATTEMPT');
+    expect(item!.providerGross).toBeNull();
+    expect(item!.providerEffective).toBeNull();
+    expect(item!.variance).toBeNull();
+    expect(summary.pendingAttempts).toBeGreaterThanOrEqual(1);
+    expect(summary.amountMismatch).toBe(0);
+  });
+
+  // ---- CSV export uses the same backend-calculated financial amounts ----
+  it('AS17: CSV export emits the same Bells/Gross/Fee/Effective/Variance figures as the screen', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 450, fee: 350, includeFee: true });
+    expect(item.classification).toBe('MATCHED');
+
+    const exportRes = await ReconciliationService.exportReport({
+      format: 'csv',
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+    const csv = String(exportRes.payload).replace(/^\uFEFF/, '');
+
+    expect(csv).toContain('Bells Amount (NGN)');
+    expect(csv).toContain('Provider Gross (NGN)');
+    expect(csv).toContain('Provider Fee (NGN)');
+    expect(csv).toContain('Provider Effective (NGN)');
+    expect(csv).toContain('Variance (NGN)');
+
+    const lines = csv.split(/\r?\n/);
+    const headerLine = lines.find((l) => l.startsWith('Date,'))!;
+    expect(headerLine).toBeTruthy();
+    const headers = headerLine.split(',');
+    const cBells = headers.indexOf('Bells Amount (NGN)');
+    const cGross = headers.indexOf('Provider Gross (NGN)');
+    const cFee = headers.indexOf('Provider Fee (NGN)');
+    const cEff = headers.indexOf('Provider Effective (NGN)');
+    const cVar = headers.indexOf('Variance (NGN)');
+    expect(cBells).toBeGreaterThanOrEqual(0);
+    expect(cGross).toBeGreaterThanOrEqual(0);
+    expect(cFee).toBeGreaterThanOrEqual(0);
+    expect(cEff).toBeGreaterThanOrEqual(0);
+    expect(cVar).toBeGreaterThanOrEqual(0);
+
+    const row = lines.find((l) => l.includes(item.paymentReference!))!.split(',');
+    expect(row[cBells]).toBe('100.00');
+    expect(row[cGross]).toBe('450.00');
+    expect(row[cFee]).toBe('350.00');
+    expect(row[cEff]).toBe('100.00');
+    expect(row[cVar]).toBe('0.00');
+  });
+
+  it('AS18: CSV export leaves provider fee blank (not 0.00) when the fee is genuinely unavailable', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const item = await runAlatpayAmountScenario({ bells: 100, gross: 100, includeFee: false });
+    expect(item.classification).toBe('MATCHED');
+
+    const exportRes = await ReconciliationService.exportReport({
+      format: 'csv',
+      dateFrom: DATE_FROM,
+      dateTo: DATE_TO,
+      gateway: PaymentGateway.ALATPAY,
+    });
+    const csv = String(exportRes.payload).replace(/^\uFEFF/, '');
+    const lines = csv.split(/\r?\n/);
+    const headers = lines.find((l) => l.startsWith('Date,'))!.split(',');
+    const cFee = headers.indexOf('Provider Fee (NGN)');
+    const row = lines.find((l) => l.includes(item.paymentReference!))!.split(',');
+    expect(row[cFee]).toBe('');
   });
 });

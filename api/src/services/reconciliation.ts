@@ -102,8 +102,19 @@ export type ReconciliationItem = {
   gatewayReference: string | null;
   paymentReference: string | null;
   classification: Classification;
+  // Legacy generic amounts (expected == Bells amount, actual == provider gross).
   expectedAmount: number;
   actualAmount: number;
+  // Explicit, unambiguous monetary semantics.
+  // Bells amount = authoritative internal amount; providerGross = total amount
+  // reported by the gateway; providerFee = provider fee (null when not
+  // explicitly returned); providerEffective = gross - fee (what belongs to
+  // Bells); variance = providerEffective - bellsAmount.
+  bellsAmount: number | null;
+  providerGross: number | null;
+  providerFee: number | null;
+  providerEffective: number | null;
+  variance: number | null;
   studentName?: string | null;
   studentId?: number | null;
   chargeSource?: 'DIRECT_BILL' | 'CATALOGUE';
@@ -452,12 +463,78 @@ function gatewayTxRef(row: GatewayTxRow): string {
   return String(row.Id ?? row.id ?? row.transactionId ?? row.reference ?? row.orderId ?? '').trim();
 }
 
-function gatewayTxAmountMinor(row: GatewayTxRow): number {
+/**
+ * Normalize the monetary amounts reported by a gateway row into integer minor
+ * units (kobo) and distinguish:
+ *
+ *   gross     - the total amount charged/reported by the provider
+ *   fee       - the provider fee, ONLY when explicitly returned by the provider
+ *   effective - the amount that actually belongs to Bells (gross - fee)
+ *
+ * Paystack reports `amount` already in kobo (minor units) and exposes no
+ * provider-fee model here, so gross and effective are identical.
+ *
+ * ALATPay reports `Amount` in NGN (major units). When a provider fee is
+ * explicitly returned (FeeAmount / feeAmount) the effective amount is
+ * gross - fee. A missing or structurally invalid fee is NEVER assumed to be
+ * zero:
+ *   - if the reported gross already equals the Bells amount there is no
+ *     monetary discrepancy to explain, so effective == gross;
+ *   - otherwise effective stays null, and the caller classifies the record as
+ *     UNABLE_TO_VERIFY (never a guessed AMOUNT_MISMATCH).
+ *
+ * Invalid fee data (NaN, non-numeric, negative, greater than gross) fails
+ * closed and is treated exactly like a missing fee.
+ */
+function providerAmountsMinor(
+  row: GatewayTxRow,
+  bellsKobo: number | null,
+): {
+  grossKobo: number | null;
+  feeKobo: number | null;
+  effectiveKobo: number | null;
+  feeAvailable: boolean;
+} {
   if (row.gateway === PaymentGateway.PAYSTACK) {
-    return Number(row.amount ?? 0);
+    const g = Number(row.amount ?? NaN);
+    const grossKobo = Number.isFinite(g) ? g : null;
+    // Paystack: no separate provider-fee model in this list response.
+    return { grossKobo, feeKobo: null, effectiveKobo: grossKobo, feeAvailable: false };
   }
-  const amt = Number(row.Amount ?? row.amount ?? 0);
-  return kobo.fromNaira(money(amt));
+
+  // ALATPay - Amount is NGN (major units), NOT kobo.
+  const alat = row as AlatpayTxRow;
+  const rawGross = alat.Amount ?? alat.amount;
+  const grossNum = rawGross === undefined || rawGross === null ? NaN : Number(rawGross);
+  const grossValid = Number.isFinite(grossNum) && grossNum >= 0;
+  const grossKobo = grossValid ? kobo.fromNaira(money(grossNum)) : null;
+
+  const rawFee = alat.FeeAmount ?? alat.feeAmount;
+  const feePresent = rawFee !== undefined && rawFee !== null;
+  const feeNum = feePresent ? Number(rawFee) : NaN;
+  const feeUsable =
+    feePresent &&
+    grossValid &&
+    Number.isFinite(feeNum) &&
+    feeNum >= 0 &&
+    kobo.fromNaira(money(feeNum)) <= (grossKobo ?? 0);
+  const feeKobo = feeUsable ? kobo.fromNaira(money(feeNum)) : null;
+
+  let effectiveKobo: number | null = null;
+  if (grossKobo !== null && feeKobo !== null) {
+    effectiveKobo = grossKobo - feeKobo;
+  } else if (
+    grossKobo !== null &&
+    bellsKobo !== null &&
+    Math.abs(grossKobo - bellsKobo) <= AMOUNT_TOLERANCE_KOBO
+  ) {
+    // CASE A: no usable provider fee, but the reported gross already equals the
+    // Bells amount, so there is no monetary discrepancy to explain.
+    effectiveKobo = grossKobo;
+  }
+  // CASE C (gross != bells and no usable fee): effectiveKobo stays null.
+
+  return { grossKobo, feeKobo, effectiveKobo, feeAvailable: feeUsable };
 }
 
 function gatewayTxStatusSuccess(row: GatewayTxRow): boolean {
@@ -929,31 +1006,50 @@ export class ReconciliationService {
         flags.add('MISSING_INTERNAL');
       }
 
-      // Amount comparison using integer minor units (kobo) to avoid float errors.
-      // Compare provider GROSS amount against internal expectedAmount.
-      let expectedKobo = 0;
-      let actualKobo = 0;
-
+      // ---- Monetary comparison (successful payments only) ----
+      // Integer minor units (kobo) avoid floating-point errors.
+      //
+      //   Bells amount   : authoritative internal amount Bells intended to collect
+      //   Provider gross : total amount reported by the gateway
+      //   Provider fee   : provider fee, ONLY when explicitly returned
+      //   Provider eff.  : gross - fee (what actually belongs to Bells)
+      //   Variance       : providerEffective - bellsAmount
+      //
+      // For ALATPay the provider charges its own fee ON TOP of the Bells amount,
+      // so comparing the gross charge directly against the Bells amount is
+      // financially incorrect. We compare the provider EFFECTIVE amount instead.
+      let bellsKobo: number | null = null;
       if (repInternal) {
-        const expectedNaira = money(repInternal.expectedAmount ?? repInternal.amount ?? 0);
-        expectedKobo = kobo.fromNaira(expectedNaira);
-      }
-      if (repGateway) {
-        actualKobo = gatewayTxAmountMinor(repGateway);
-      }
-      if (!repInternal && repGateway) {
-        expectedKobo = actualKobo;
-      }
-      if (!repGateway && repInternal) {
-        actualKobo = expectedKobo;
+        bellsKobo = kobo.fromNaira(money(repInternal.expectedAmount ?? repInternal.amount ?? 0));
       }
 
-      if (hasInternalSuccess && hasGatewaySuccess) {
-        const delta = Math.abs(expectedKobo - actualKobo);
-        if (delta > AMOUNT_TOLERANCE_KOBO) {
+      let providerAmounts: {
+        grossKobo: number | null;
+        feeKobo: number | null;
+        effectiveKobo: number | null;
+        feeAvailable: boolean;
+      } = { grossKobo: null, feeKobo: null, effectiveKobo: null, feeAvailable: false };
+      if (repGateway) {
+        providerAmounts = providerAmountsMinor(repGateway, bellsKobo);
+      }
+
+      if (hasInternalSuccess && hasGatewaySuccess && bellsKobo !== null) {
+        const effectiveKobo = providerAmounts.effectiveKobo;
+        if (effectiveKobo === null) {
+          // Provider gross is unavailable, or (ALATPay) the gross differs from
+          // the Bells amount and no usable provider fee was returned. We do not
+          // have sufficient like-for-like evidence for a financial comparison,
+          // so fail closed — never assume the fee is zero.
+          flags.add('UNABLE_TO_VERIFY');
+        } else if (Math.abs(bellsKobo - effectiveKobo) > AMOUNT_TOLERANCE_KOBO) {
           flags.add('AMOUNT_MISMATCH');
         }
       }
+
+      // Legacy generic amounts retained for backward compatibility.
+      // expectedAmount == Bells amount; actualAmount == provider gross.
+      const expectedKobo = bellsKobo ?? providerAmounts.grossKobo ?? 0;
+      const actualKobo = providerAmounts.grossKobo ?? expectedKobo;
 
       if (internalReversed || gatewayReversed) {
         flags.add('REVERSED_TXN');
@@ -1009,6 +1105,28 @@ export class ReconciliationService {
         verificationMethod = 'PROVIDER_UNAVAILABLE';
       }
 
+      // Display semantics — the SAME backend-calculated figures used by the
+      // CSV export, so screen and export can never diverge. Provider financial
+      // values are only exposed for a genuine gateway SUCCESS; failed/pending
+      // attempts never manufacture provider values that were not verified.
+      const bellsAmount = bellsKobo !== null ? money(kobo.toNaira(bellsKobo)) : null;
+      const providerGross =
+        hasGatewaySuccess && providerAmounts.grossKobo !== null
+          ? money(kobo.toNaira(providerAmounts.grossKobo))
+          : null;
+      const providerFee =
+        hasGatewaySuccess && providerAmounts.feeAvailable && providerAmounts.feeKobo !== null
+          ? money(kobo.toNaira(providerAmounts.feeKobo))
+          : null;
+      const providerEffective =
+        hasGatewaySuccess && providerAmounts.effectiveKobo !== null
+          ? money(kobo.toNaira(providerAmounts.effectiveKobo))
+          : null;
+      const variance =
+        bellsAmount !== null && providerEffective !== null
+          ? money(providerEffective - bellsAmount)
+          : null;
+
       items.push({
         date: dateStr,
         gateway: g,
@@ -1017,6 +1135,11 @@ export class ReconciliationService {
         classification,
         expectedAmount: money(kobo.toNaira(expectedKobo)),
         actualAmount: money(kobo.toNaira(actualKobo)),
+        bellsAmount,
+        providerGross,
+        providerFee,
+        providerEffective,
+        variance,
         studentName,
         studentId,
         chargeSource: repInternal ? (repInternal as any).chargeSource ?? 'CATALOGUE' : undefined,
@@ -1122,8 +1245,10 @@ export class ReconciliationService {
       'Provider Available',
       'Charge Source',
       'Assignment #',
-      'Expected Amount (NGN)',
-      'Actual Amount (NGN)',
+      'Bells Amount (NGN)',
+      'Provider Gross (NGN)',
+      'Provider Fee (NGN)',
+      'Provider Effective (NGN)',
       'Variance (NGN)',
       'Student Name',
       'Student ID',
@@ -1140,9 +1265,11 @@ export class ReconciliationService {
       it.providerAvailable === true ? 'YES' : it.providerAvailable === false ? 'NO' : '',
       it.chargeSource ?? '',
       it.assignmentId ?? '',
-      it.expectedAmount.toFixed(2),
-      it.actualAmount.toFixed(2),
-      (it.actualAmount - it.expectedAmount).toFixed(2),
+      it.bellsAmount == null ? '' : it.bellsAmount.toFixed(2),
+      it.providerGross == null ? '' : it.providerGross.toFixed(2),
+      it.providerFee == null ? '' : it.providerFee.toFixed(2),
+      it.providerEffective == null ? '' : it.providerEffective.toFixed(2),
+      it.variance == null ? '' : it.variance.toFixed(2),
       it.studentName ?? '',
       it.studentId ?? '',
     ]);

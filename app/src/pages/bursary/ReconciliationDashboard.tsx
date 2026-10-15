@@ -459,8 +459,10 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                     <th className="px-3 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Internal Ref</th>
                     <th className="px-3 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Student</th>
                     <th className="px-3 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Charge Source</th>
-                    <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Expected</th>
-                    <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Actual</th>
+                    <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Bells Amount</th>
+                    <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Provider Gross</th>
+                    <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Provider Fee</th>
+                    <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Provider Effective</th>
                     <th className="px-3 py-3 text-right text-xs font-semibold text-slate-600 uppercase tracking-wider">Variance</th>
                     <th className="px-3 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">Classification</th>
                   </tr>
@@ -468,7 +470,7 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                 <tbody className="divide-y divide-slate-100 bg-white">
                   {loading && (
                     <tr>
-                      <td colSpan={10} className="px-3 py-12 text-center text-slate-500">
+                      <td colSpan={12} className="px-3 py-12 text-center text-slate-500">
                         <Loader2 className="w-5 h-5 animate-spin inline mr-2 align-text-bottom" />
                         Loading reconciliation records…
                       </td>
@@ -476,7 +478,7 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                   )}
                   {!loading && emptyState && (
                     <tr>
-                      <td colSpan={10} className="px-3 py-12 text-center text-slate-500">
+                      <td colSpan={12} className="px-3 py-12 text-center text-slate-500">
                         <FileText className="w-8 h-8 mx-auto mb-2 text-slate-300" />
                         No reconciliation records found for the selected period.
                       </td>
@@ -484,9 +486,11 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                   )}
                   {!loading && !emptyState && items.map((it, idx) => {
                     const badge = classificationBadge(it.classification);
-                    const variance = (it.actualAmount ?? 0) - (it.expectedAmount ?? 0);
+                    // Variance and provider figures are calculated by the backend
+                    // (single authoritative source shared with the CSV export).
+                    const variance = it.variance;
                     const varianceCls =
-                      variance === 0 ? 'text-slate-600' : variance < 0 ? 'text-rose-600' : 'text-emerald-600';
+                      variance == null ? 'text-slate-400' : variance === 0 ? 'text-slate-600' : variance < 0 ? 'text-rose-600' : 'text-emerald-600';
                     return (
                       <tr key={`${it.gatewayReference ?? ''}-${it.paymentReference ?? ''}-${idx}`} className="hover:bg-slate-50">
                         <td className="px-3 py-2.5 whitespace-nowrap text-slate-700">{fmtDate(it.date)}</td>
@@ -512,10 +516,14 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
                         <td className="px-3 py-2.5 whitespace-nowrap text-xs text-slate-600">
                           {it.chargeSource === 'DIRECT_BILL' ? 'Direct Bill' : it.chargeSource === 'CATALOGUE' ? 'Catalogue' : '—'}
                         </td>
-                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-slate-700">{fmtNgn(it.expectedAmount)}</td>
-                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-slate-700">{fmtNgn(it.actualAmount)}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-slate-700">{fmtNgn(it.bellsAmount)}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-slate-700">{fmtNgn(it.providerGross)}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-slate-700">
+                          {it.providerFee == null ? 'unavailable' : fmtNgn(it.providerFee)}
+                        </td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-slate-700">{fmtNgn(it.providerEffective)}</td>
                         <td className={`px-3 py-2.5 whitespace-nowrap text-right font-medium ${varianceCls}`}>
-                          {variance === 0 ? '0.00' : (variance > 0 ? '+' : '') + fmtNgn(variance)}
+                          {variance == null ? '—' : variance === 0 ? '0.00' : (variance > 0 ? '+' : '') + fmtNgn(variance)}
                         </td>
                         <td className="px-3 py-2.5 whitespace-nowrap">
                           <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border ${badge.cls}`}>

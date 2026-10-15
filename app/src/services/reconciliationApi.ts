@@ -47,8 +47,15 @@ export type ReconciliationItem = {
   providerReference?: string | null;
   paymentReference: string | null;
   classification: Classification;
+  // Legacy generic amounts (expected == Bells amount, actual == provider gross).
   expectedAmount: number;
   actualAmount: number;
+  // Explicit, unambiguous monetary semantics (backend-authoritative).
+  bellsAmount: number | null;
+  providerGross: number | null;
+  providerFee: number | null;
+  providerEffective: number | null;
+  variance: number | null;
   studentName?: string | null;
   studentId?: number | null;
   chargeSource?: 'DIRECT_BILL' | 'CATALOGUE';

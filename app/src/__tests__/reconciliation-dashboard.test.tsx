@@ -124,6 +124,11 @@ const baseItems = [
     classification: 'MATCHED',
     expectedAmount: 50000,
     actualAmount: 50000,
+    bellsAmount: 100,
+    providerGross: 100,
+    providerFee: null,
+    providerEffective: 100,
+    variance: 0,
     studentName: 'John Doe',
     studentId: 10,
     chargeSource: 'CATALOGUE',
@@ -137,6 +142,11 @@ const baseItems = [
     classification: 'AMOUNT_MISMATCH',
     expectedAmount: 30000,
     actualAmount: 29500,
+    bellsAmount: 100,
+    providerGross: 460,
+    providerFee: 350,
+    providerEffective: 110,
+    variance: 10,
     studentName: 'Jane Smith',
     studentId: 11,
     chargeSource: 'DIRECT_BILL',
@@ -537,5 +547,26 @@ describe('Reconciliation Dashboard', () => {
     // A new signal was created and the first one was aborted — no overlapping chains.
     expect(pendingSignals.length).toBe(2);
     expect(firstSignal.aborted).toBe(true);
+  });
+
+  it('20. renders explicit Bells/Gross/Fee/Effective/Variance columns from the backend figures', async () => {
+    render();
+    await flush();
+    const text = container.textContent || '';
+    // The ambiguous EXPECTED/ACTUAL labels are replaced with explicit semantics.
+    expect(text).toContain('Bells Amount');
+    expect(text).toContain('Provider Gross');
+    expect(text).toContain('Provider Fee');
+    expect(text).toContain('Provider Effective');
+    expect(text).toContain('Variance');
+    // Paystack row (MATCHED, no provider-fee model): fee is genuinely
+    // unavailable, so it must render as "unavailable" — never a false ₦0.00.
+    expect(text).toContain('unavailable');
+    // Paystack row figures: Bells/Gross/Effective all 100.00.
+    expect(text).toContain('100.00');
+    // ALATPay row figures: gross 460.00, fee 350.00, effective 110.00.
+    expect(text).toContain('460.00');
+    expect(text).toContain('350.00');
+    expect(text).toContain('110.00');
   });
 });
