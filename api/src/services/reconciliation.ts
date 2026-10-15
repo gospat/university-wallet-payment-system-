@@ -4,7 +4,7 @@ import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { generatePaymentReference, generateReceiptReference, generateVerificationToken, kobo } from '../utils/paystack';
 import { nextYearlyCounter, yearFromSession } from '../utils/yearlyCounter';
-import { getActiveAlatpaySecretKey, getAlatpayBaseUrl, normalizeAlatStatus } from '../utils/alatpay';
+import { getActiveAlatpaySecretKey, getAlatpayBaseUrl, normalizeAlatStatus, isAlatpayUuid } from '../utils/alatpay';
 import Papa from 'papaparse';
 
 export type Classification =
@@ -14,7 +14,18 @@ export type Classification =
   | 'MISSING_GATEWAY'
   | 'DUPLICATE_REFERENCE'
   | 'REVERSED_TXN'
-  | 'MISSING_RECEIPT';
+  | 'MISSING_RECEIPT'
+  | 'PENDING_ATTEMPT'
+  | 'FAILED_ATTEMPT'
+  | 'UNABLE_TO_VERIFY';
+
+export type GatewayAvailability = 'AVAILABLE' | 'PARTIALLY_AVAILABLE' | 'UNAVAILABLE';
+
+export type VerificationMethod =
+  | 'GATEWAY_LIST'
+  | 'GATEWAY_INDIVIDUAL_LOOKUP'
+  | 'NOT_VERIFIED'
+  | 'PROVIDER_UNAVAILABLE';
 
 export type PaystackTxRow = {
   reference: string;
@@ -71,6 +82,14 @@ export type ReconciliationSummary = {
   duplicateReference: number;
   reversedTxn: number;
   missingReceipt: number;
+  pendingAttempts: number;
+  failedAttempts: number;
+  unableToVerify: number;
+  providerAvailability: {
+    paystack: GatewayAvailability;
+    alatpay: GatewayAvailability;
+  };
+  incompleteCoverage: boolean;
 };
 
 export type ReconciliationItem = {
@@ -85,6 +104,9 @@ export type ReconciliationItem = {
   studentId?: number | null;
   chargeSource?: 'DIRECT_BILL' | 'CATALOGUE';
   assignmentId?: number | null;
+  verificationMethod: VerificationMethod;
+  providerReference?: string | null;
+  providerAvailable?: boolean;
   rawInternal?: any;
   rawGateway?: any;
 };
@@ -101,64 +123,88 @@ const CLASSIFICATION_PRIORITY: Classification[] = [
   'AMOUNT_MISMATCH',
   'MISSING_INTERNAL',
   'MISSING_GATEWAY',
+  'UNABLE_TO_VERIFY',
+  'PENDING_ATTEMPT',
+  'FAILED_ATTEMPT',
   'MATCHED',
 ];
 
-const AMOUNT_TOLERANCE_NAIRA = 0.5;
+const AMOUNT_TOLERANCE_KOBO = 50; // 0.50 NGN in minor units
 const JSON_DB_NULL = Prisma.JsonNull;
 
 export async function fetchPaystackTxListRange(params: {
   from: Date;
   to: Date;
-}): Promise<PaystackTxRow[]> {
+}): Promise<{ rows: PaystackTxRow[]; available: boolean }> {
   const secret = process.env.PAYSTACK_SECRET_KEY;
   if (!secret) {
-    return [];
+    return { rows: [], available: false };
   }
-  const fromTs = Math.floor(params.from.getTime() / 1000);
-  const toTs = Math.floor(params.to.getTime() / 1000);
+  const fromIso = params.from.toISOString();
+  const toIso = params.to.toISOString();
+  const fromMs = params.from.getTime();
+  const toMs = params.to.getTime();
   let page = 1;
   const perPage = 100;
   const all: PaystackTxRow[] = [];
+  let available = true;
   while (true) {
     try {
-      const url = `https://api.paystack.co/transaction?from=${fromTs}&to=${toTs}&page=${page}&perPage=${perPage}&status=success`;
+      const url = `https://api.paystack.co/transaction?from=${encodeURIComponent(
+        fromIso,
+      )}&to=${encodeURIComponent(toIso)}&page=${page}&perPage=${perPage}&status=success`;
       const res = await axios.get(url, {
         headers: { Authorization: `Bearer ${secret}` },
         timeout: 15000,
       });
       const data = res?.data?.data ?? [];
       if (!Array.isArray(data) || data.length === 0) break;
-      for (const row of data) all.push(row as PaystackTxRow);
+      for (const row of data) {
+        // Ensure the record actually falls within the requested date range,
+        // using paid_at (the documented transaction settlement timestamp).
+        const tsStr = row.paid_at ?? row.transaction_date ?? row.created_at;
+        if (tsStr) {
+          const t = new Date(tsStr).getTime();
+          if (Number.isFinite(t) && (t < fromMs || t > toMs)) continue;
+        }
+        all.push(row as PaystackTxRow);
+      }
       if (data.length < perPage) break;
       page += 1;
     } catch (err: any) {
+      available = false;
       throw new AppError(
         `Paystack list fetch failed: ${err?.response?.data?.message || err?.message || 'unknown'}`,
         502,
       );
     }
   }
-  return all;
+  return { rows: all, available };
 }
 
 export async function fetchAlatpayTxListRange(params: {
   from: Date;
   to: Date;
-}): Promise<AlatpayTxRow[]> {
+}): Promise<{ rows: AlatpayTxRow[]; available: boolean }> {
   try {
     const secret = getActiveAlatpaySecretKey();
     const baseUrl = getAlatpayBaseUrl();
-    const fromTs = Math.floor(params.from.getTime() / 1000);
-    const toTs = Math.floor(params.to.getTime() / 1000);
+    const fromIso = params.from.toISOString();
+    const toIso = params.to.toISOString();
     const all: AlatpayTxRow[] = [];
     let page = 1;
     const perPage = 100;
+    let available = true;
+    let lastStatus: number | null = null;
     while (true) {
       try {
         const candidates = [
-          `${baseUrl}/alatpaytransaction/api/v1/transactions?from=${fromTs}&to=${toTs}&page=${page}&pageSize=${perPage}`,
-          `${baseUrl}/transaction/api/v1/transactions?from=${fromTs}&to=${toTs}&page=${page}&pageSize=${perPage}`,
+          `${baseUrl}/alatpaytransaction/api/v1/transactions?from=${encodeURIComponent(
+            fromIso,
+          )}&to=${encodeURIComponent(toIso)}&page=${page}&pageSize=${perPage}`,
+          `${baseUrl}/transaction/api/v1/transactions?from=${encodeURIComponent(
+            fromIso,
+          )}&to=${encodeURIComponent(toIso)}&page=${page}&pageSize=${perPage}`,
         ];
         let payload: any = null;
         let lastErr: any = null;
@@ -176,13 +222,23 @@ export async function fetchAlatpayTxListRange(params: {
             if (Array.isArray(payload) && payload.length > 0) break;
             if (Array.isArray(payload?.items)) { payload = payload.items; break; }
             if (Array.isArray(payload?.Items)) { payload = payload.Items; break; }
-          } catch (err) {
+          } catch (err: any) {
             lastErr = err;
+            lastStatus = err?.response?.status ?? null;
           }
         }
         if (!Array.isArray(payload) || payload.length === 0) {
-          if (lastErr && page === 1 && process.env.NODE_ENV !== 'test') {
-            console.warn('[recon:alatpay] list endpoint unavailable — skipping ALAT Pay pull:', lastErr?.response?.status, lastErr?.message);
+          if (lastErr && page === 1) {
+            // Provider API returned an error (404/401/403/500/timeout) — this is
+            // NOT a successful empty result. Mark unavailable so internal
+            // transactions are NOT classified as MISSING_GATEWAY.
+            available = false;
+            if (process.env.NODE_ENV !== 'test') {
+              console.warn(
+                `[recon:alatpay] list endpoint unavailable (status=${lastStatus}) — ALATPay list reconciliation disabled:`,
+                lastErr?.message,
+              );
+            }
           }
           break;
         }
@@ -190,6 +246,7 @@ export async function fetchAlatpayTxListRange(params: {
         if (payload.length < perPage) break;
         page += 1;
       } catch (err: any) {
+        available = false;
         if (process.env.NODE_ENV === 'test') break;
         throw new AppError(
           `ALAT Pay list fetch failed: ${err?.response?.data?.message || err?.message || 'unknown'}`,
@@ -197,21 +254,86 @@ export async function fetchAlatpayTxListRange(params: {
         );
       }
     }
-    return all;
+    return { rows: all, available };
   } catch (err: any) {
-    if (process.env.NODE_ENV === 'test') return [];
+    if (process.env.NODE_ENV === 'test') return { rows: [], available: false };
     if (err instanceof AppError) throw err;
     console.warn('[recon:alatpay] config unavailable — skipping ALAT Pay pull:', err?.message);
-    return [];
+    return { rows: [], available: false };
+  }
+}
+
+/**
+ * READ-ONLY individual ALATPay transaction lookup.
+ * Uses the same GET /transactions/{uuid} endpoint as the payment verification
+ * flow, but NEVER writes financial state. Used by reconciliation to
+ * independently compare provider transaction identifier, status, and gross
+ * amount against internal records.
+ *
+ * Matching identifier preference:
+ *   1. alatpayFinalTransactionId (the provider UUID stored after webhook)
+ *   2. alatpayReference (only when it is a validated provider UUID)
+ *
+ * Returns null when no valid provider identifier is available or the lookup
+ * fails. Callers must treat null as PROVIDER_UNAVAILABLE and NOT classify the
+ * internal transaction as MISSING_GATEWAY or MATCHED.
+ */
+export async function fetchAlatpayTxById(params: {
+  providerId: string;
+}): Promise<{ row: AlatpayTxRow | null; available: boolean }> {
+  const providerId = String(params.providerId ?? '').trim();
+  if (!providerId) return { row: null, available: false };
+  try {
+    const secret = getActiveAlatpaySecretKey();
+    const baseUrl = getAlatpayBaseUrl();
+    const safeRef = encodeURIComponent(providerId);
+    const candidates = [
+      `${baseUrl}/alatpaytransaction/api/v1/transactions/${safeRef}`,
+      `${baseUrl}/transaction/api/v1/transactions/${safeRef}`,
+    ];
+    let lastErr: any = null;
+    for (const url of candidates) {
+      try {
+        const r = await axios.get(url, {
+          headers: {
+            'Ocp-Apim-Subscription-Key': secret,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          timeout: 15000,
+        });
+        const payload = r?.data?.data ?? r?.data?.Value?.Data ?? r?.data;
+        if (payload && (payload.Id || payload.id || payload.transactionId)) {
+          return { row: payload as AlatpayTxRow, available: true };
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr && process.env.NODE_ENV !== 'test') {
+      console.warn(
+        `[recon:alatpay] individual lookup failed for ${providerId}:`,
+        lastErr?.response?.status,
+        lastErr?.message,
+      );
+    }
+    return { row: null, available: false };
+  } catch (err: any) {
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(`[recon:alatpay] individual lookup unavailable for ${providerId}:`, err?.message);
+    }
+    return { row: null, available: false };
   }
 }
 
 export const _reconciliationInternals: {
   fetchPaystackTxListRange: typeof fetchPaystackTxListRange;
   fetchAlatpayTxListRange: typeof fetchAlatpayTxListRange;
+  fetchAlatpayTxById: typeof fetchAlatpayTxById;
 } = {
   fetchPaystackTxListRange,
   fetchAlatpayTxListRange,
+  fetchAlatpayTxById,
 };
 
 function money(n: any): number {
@@ -348,7 +470,14 @@ export class ReconciliationService {
       if (g === PaymentGateway.PAYSTACK) {
         ref = tx.paystackReference || tx.reference;
       } else if (g === PaymentGateway.ALATPAY) {
-        ref = tx.alatpayReference || tx.paystackReference || tx.reference;
+        // Prefer the final transaction UUID stored after webhook, then the
+        // alatpayReference only when it is a validated provider UUID.
+        ref =
+          (tx as any).alatpayFinalTransactionId ||
+          (isAlatpayUuid((tx as any).alatpayReference) ? (tx as any).alatpayReference : null) ||
+          tx.alatpayReference ||
+          tx.paystackReference ||
+          tx.reference;
       } else {
         ref = tx.reference;
       }
@@ -365,29 +494,60 @@ export class ReconciliationService {
       : [PaymentGateway.ALATPAY, PaymentGateway.PAYSTACK];
 
     const gatewayRows: GatewayTxRow[] = [];
+    let paystackAvailable = false;
+    let alatpayAvailable = false;
+    const alatpayVerifiedRefs = new Set<string>();
 
     for (const g of gatewaysToPull) {
       if (g === PaymentGateway.PAYSTACK) {
         try {
-          const rows = await _reconciliationInternals.fetchPaystackTxListRange({
+          const { rows, available } = await _reconciliationInternals.fetchPaystackTxListRange({
             from: dateFrom,
             to: dateTo,
           });
+          paystackAvailable = available;
           for (const r of rows) gatewayRows.push({ gateway: g, ...r });
         } catch (e: any) {
+          paystackAvailable = false;
           if (process.env.NODE_ENV === 'test') {
             // ignore
           } else {
-            throw e;
+            console.warn('[recon:paystack] Paystack list pull failed:', e?.message);
           }
         }
       } else if (g === PaymentGateway.ALATPAY) {
         try {
-          const rows = await _reconciliationInternals.fetchAlatpayTxListRange({
+          const { rows, available } = await _reconciliationInternals.fetchAlatpayTxListRange({
             from: dateFrom,
             to: dateTo,
           });
+          alatpayAvailable = available;
           for (const r of rows) gatewayRows.push({ gateway: g, ...r });
+          if (!available) {
+            // List endpoint unavailable. Fall back to READ-ONLY individual
+            // transaction lookup for each internal ALATPay transaction that
+            // has a valid provider UUID. This does NOT write financial state.
+            const alatpayInternal = internalTxs.filter(
+              (t) => (t.gateway ?? PaymentGateway.ALATPAY) === PaymentGateway.ALATPAY,
+            );
+            for (const tx of alatpayInternal) {
+              const providerId =
+                (tx as any).alatpayFinalTransactionId ||
+                (isAlatpayUuid((tx as any).alatpayReference) ? (tx as any).alatpayReference : null);
+              if (!providerId) continue;
+              try {
+                const { row, available: lookupAvailable } =
+                  await _reconciliationInternals.fetchAlatpayTxById({ providerId });
+                if (lookupAvailable && row) {
+                  alatpayAvailable = true; // at least individual lookup works
+                  gatewayRows.push({ gateway: g, ...row });
+                  alatpayVerifiedRefs.add(providerId);
+                }
+              } catch {
+                // individual lookup failure — leave alatpayAvailable as-is
+              }
+            }
+          }
         } catch (e: any) {
           if (process.env.NODE_ENV === 'test') {
             // ignore
@@ -410,12 +570,35 @@ export class ReconciliationService {
       byRef.set(ref, arr);
     }
 
+    // Build the set of all keys. For ALATPay we also need to index internal
+    // transactions by their provider UUID (alatpayFinalTransactionId or
+    // alatpayReference) so individual-lookup results can match.
     const allKeys = new Set<string>();
-    for (const g of Array.from(new Set([...internalByKey.keys(), ...gatewayByKey.keys()]))) {
-      const byInt = internalByKey.get(g);
-      const byG = gatewayByKey.get(g);
-      if (byInt) for (const k of byInt.keys()) allKeys.add(`${g}:${k}`);
-      if (byG) for (const k of byG.keys()) allKeys.add(`${g}:${k}`);
+
+    // Add internal keys
+    for (const tx of internalTxs) {
+      const g = tx.gateway ?? PaymentGateway.ALATPAY;
+      if (gateway !== undefined && g !== gateway) continue;
+      let ref: string | null = null;
+      if (g === PaymentGateway.PAYSTACK) {
+        ref = tx.paystackReference || tx.reference;
+      } else if (g === PaymentGateway.ALATPAY) {
+        ref =
+          (tx as any).alatpayFinalTransactionId ||
+          (isAlatpayUuid((tx as any).alatpayReference) ? (tx as any).alatpayReference : null) ||
+          tx.alatpayReference ||
+          tx.paystackReference ||
+          tx.reference;
+      } else {
+        ref = tx.reference;
+      }
+      if (ref) allKeys.add(`${g}:${ref}`);
+    }
+
+    // Add gateway keys
+    for (const g of gatewayByKey.keys()) {
+      const byG = gatewayByKey.get(g)!;
+      for (const k of byG.keys()) allKeys.add(`${g}:${k}`);
     }
 
     const items: ReconciliationItem[] = [];
@@ -425,15 +608,34 @@ export class ReconciliationService {
       const g = key.slice(0, colon) as PaymentGateway;
       const ref = key.slice(colon + 1);
 
-      const internalRows = internalByKey.get(g)?.get(ref) || [];
+      const internalRows = (internalByKey.get(g)?.get(ref) || []).filter((t) => {
+        const gw = t.gateway ?? PaymentGateway.ALATPAY;
+        if (g === PaymentGateway.ALATPAY) {
+          const tRef =
+            (t as any).alatpayFinalTransactionId ||
+            (isAlatpayUuid((t as any).alatpayReference) ? (t as any).alatpayReference : null) ||
+            t.alatpayReference ||
+            t.paystackReference ||
+            t.reference;
+          return tRef === ref;
+        }
+        const tRef = g === PaymentGateway.PAYSTACK ? t.paystackReference || t.reference : t.reference;
+        return tRef === ref;
+      });
       const gwRowsArr = gatewayByKey.get(g)?.get(ref) || [];
 
       const flags = new Set<Classification>();
 
       const internalSuccess = internalRows.filter((t) => t.status === TransactionStatus.SUCCESS);
       const internalReversed = internalRows.some((t) => t.status === TransactionStatus.REVERSED);
+      const internalFailed = internalRows.filter((t) => t.status === TransactionStatus.FAILED);
+      const internalPending = internalRows.filter((t) => t.status === TransactionStatus.PENDING);
       const gatewaySuccess = gwRowsArr.filter(gatewayTxStatusSuccess);
       const gatewayReversed = gwRowsArr.some(gatewayTxReversed);
+
+      // Provider availability for this specific gateway
+      const providerAvailable =
+        g === PaymentGateway.PAYSTACK ? paystackAvailable : alatpayAvailable;
 
       if (internalRows.length >= 2 || gwRowsArr.length >= 2) {
         flags.add('DUPLICATE_REFERENCE');
@@ -445,36 +647,55 @@ export class ReconciliationService {
       const anyInternal = internalRows.length > 0;
       const anyGateway = gwRowsArr.length > 0;
 
+      // FAILED and PENDING attempts do NOT become MISSING_GATEWAY.
+      // They are reported separately.
+      if (internalFailed.length > 0 && !hasInternalSuccess) {
+        flags.add('FAILED_ATTEMPT');
+      }
+      if (internalPending.length > 0 && !hasInternalSuccess) {
+        flags.add('PENDING_ATTEMPT');
+      }
+
+      // MISSING_GATEWAY only when provider is available and there is a genuine
+      // successful internal record with no corresponding gateway record.
+      if (anyInternal && !anyGateway && hasInternalSuccess && providerAvailable) {
+        flags.add('MISSING_GATEWAY');
+      }
+      // If provider is unavailable and we have an internal success with no
+      // gateway match, classify as UNABLE_TO_VERIFY (not MISSING_GATEWAY).
+      if (anyInternal && !anyGateway && hasInternalSuccess && !providerAvailable) {
+        flags.add('UNABLE_TO_VERIFY');
+      }
+
       if (anyGateway && !anyInternal) {
         flags.add('MISSING_INTERNAL');
       }
-      if (anyInternal && !anyGateway) {
-        flags.add('MISSING_GATEWAY');
-      }
 
-      const repInternal = internalRows[0];
-      const repGateway = gwRowsArr[0];
+      const repInternal = internalSuccess[0] || internalRows[0];
+      const repGateway = gatewaySuccess[0] || gwRowsArr[0];
 
-      let expectedAmount = 0;
-      let actualAmount = 0;
+      // Amount comparison using integer minor units (kobo) to avoid float errors.
+      // Compare provider GROSS amount against internal expectedAmount.
+      let expectedKobo = 0;
+      let actualKobo = 0;
 
       if (repInternal) {
-        expectedAmount = money(repInternal.expectedAmount ?? repInternal.amount ?? 0);
+        const expectedNaira = money(repInternal.expectedAmount ?? repInternal.amount ?? 0);
+        expectedKobo = kobo.fromNaira(expectedNaira);
       }
       if (repGateway) {
-        const gwKobo = gatewayTxAmountMinor(repGateway);
-        actualAmount = money(kobo.toNaira(gwKobo));
+        actualKobo = gatewayTxAmountMinor(repGateway);
       }
       if (!repInternal && repGateway) {
-        expectedAmount = actualAmount;
+        expectedKobo = actualKobo;
       }
       if (!repGateway && repInternal) {
-        actualAmount = expectedAmount;
+        actualKobo = expectedKobo;
       }
 
       if (hasInternalSuccess && hasGatewaySuccess) {
-        const delta = Math.abs(expectedAmount - actualAmount);
-        if (delta > AMOUNT_TOLERANCE_NAIRA) {
+        const delta = Math.abs(expectedKobo - actualKobo);
+        if (delta > AMOUNT_TOLERANCE_KOBO) {
           flags.add('AMOUNT_MISMATCH');
         }
       }
@@ -514,26 +735,54 @@ export class ReconciliationService {
         if (email) studentName = email;
       }
 
+      // Determine verification method and provider reference
+      let verificationMethod: VerificationMethod = 'NOT_VERIFIED';
+      if (hasGatewaySuccess) {
+        if (g === PaymentGateway.ALATPAY && alatpayVerifiedRefs.has(ref)) {
+          verificationMethod = 'GATEWAY_INDIVIDUAL_LOOKUP';
+        } else {
+          verificationMethod = 'GATEWAY_LIST';
+        }
+      } else if (classification === 'UNABLE_TO_VERIFY') {
+        verificationMethod = 'PROVIDER_UNAVAILABLE';
+      }
+
       items.push({
         date: dateStr,
         gateway: g,
         gatewayReference: ref,
         paymentReference: repInternal ? repInternal.reference : null,
         classification,
-        expectedAmount,
-        actualAmount,
+        expectedAmount: money(kobo.toNaira(expectedKobo)),
+        actualAmount: money(kobo.toNaira(actualKobo)),
         studentName,
         studentId,
         chargeSource: repInternal ? (repInternal as any).chargeSource ?? 'CATALOGUE' : undefined,
         assignmentId: repInternal ? (repInternal as any).assignmentId ?? null : undefined,
+        verificationMethod,
+        providerReference: repGateway ? gatewayTxRef(repGateway) : null,
+        providerAvailable,
         rawInternal: repInternal ? { ...repInternal, user: undefined, invoice: undefined, receipts: undefined } : undefined,
         rawGateway: repGateway ?? undefined,
       });
     }
 
+    type NumericSummaryKey =
+      | 'matched'
+      | 'amountMismatch'
+      | 'missingInternal'
+      | 'missingGateway'
+      | 'duplicateReference'
+      | 'reversedTxn'
+      | 'missingReceipt'
+      | 'pendingAttempts'
+      | 'failedAttempts'
+      | 'unableToVerify';
+
     const summary: ReconciliationSummary = items.reduce(
       (acc, it) => {
-        acc[mapKey(it.classification)] += 1;
+        const key = mapKey(it.classification) as NumericSummaryKey;
+        acc[key] += 1;
         return acc;
       },
       {
@@ -546,6 +795,14 @@ export class ReconciliationService {
         duplicateReference: 0,
         reversedTxn: 0,
         missingReceipt: 0,
+        pendingAttempts: 0,
+        failedAttempts: 0,
+        unableToVerify: 0,
+        providerAvailability: {
+          paystack: paystackAvailable ? 'AVAILABLE' : 'UNAVAILABLE',
+          alatpay: alatpayAvailable ? 'AVAILABLE' : 'UNAVAILABLE',
+        },
+        incompleteCoverage: !paystackAvailable || !alatpayAvailable,
       } as ReconciliationSummary,
     );
 
@@ -580,12 +837,16 @@ export class ReconciliationService {
       'Date',
       'Gateway',
       'Gateway Reference',
+      'Provider Reference',
       'Payment Reference',
       'Classification',
+      'Verification Method',
+      'Provider Available',
       'Charge Source',
       'Assignment #',
       'Expected Amount (NGN)',
       'Actual Amount (NGN)',
+      'Variance (NGN)',
       'Student Name',
       'Student ID',
     ];
@@ -594,19 +855,23 @@ export class ReconciliationService {
       it.date ?? '',
       it.gateway,
       it.gatewayReference ?? '',
+      it.providerReference ?? '',
       it.paymentReference ?? '',
       it.classification,
+      it.verificationMethod,
+      it.providerAvailable === true ? 'YES' : it.providerAvailable === false ? 'NO' : '',
       it.chargeSource ?? '',
       it.assignmentId ?? '',
       it.expectedAmount.toFixed(2),
       it.actualAmount.toFixed(2),
+      (it.actualAmount - it.expectedAmount).toFixed(2),
       it.studentName ?? '',
       it.studentId ?? '',
     ]);
 
     let csvRows: any[][] = [header, ...rows];
     csvRows.push([]);
-    csvRows.push(['', '', '', '', '', '', '', 'Category Subtotals']);
+    csvRows.push(['', '', '', '', '', 'Category Subtotals']);
 
     const classOrder: Array<[string, keyof ReconciliationSummary]> = [
       ['Matched', 'matched'],
@@ -616,9 +881,35 @@ export class ReconciliationService {
       ['Duplicate Reference', 'duplicateReference'],
       ['Reversed Transaction', 'reversedTxn'],
       ['Missing Receipt', 'missingReceipt'],
+      ['Pending Attempts', 'pendingAttempts'],
+      ['Failed Attempts', 'failedAttempts'],
+      ['Unable To Verify', 'unableToVerify'],
     ];
     for (const [label, key] of classOrder) {
-      csvRows.push(['', '', '', '', '', label, String(summary[key]), '', '', '', '']);
+      csvRows.push(['', '', '', '', '', label, String(summary[key])]);
+    }
+    csvRows.push([]);
+    csvRows.push(['', '', '', '', '', 'Provider Availability']);
+    csvRows.push(['', '', '', '', '', 'Paystack', summary.providerAvailability.paystack]);
+    csvRows.push(['', '', '', '', '', 'ALATPay', summary.providerAvailability.alatpay]);
+    csvRows.push([
+      '',
+      '',
+      '',
+      '',
+      '',
+      'Incomplete Coverage',
+      summary.incompleteCoverage ? 'YES' : 'NO',
+    ]);
+    if (summary.incompleteCoverage) {
+      csvRows.push([
+        '',
+        '',
+        '',
+        '',
+        '',
+        'WARNING: Some gateway data is unavailable — reconciliation totals are incomplete.',
+      ]);
     }
     csvRows.push([]);
     csvRows.push([
@@ -632,9 +923,8 @@ export class ReconciliationService {
       '',
       'System Records',
       String(summary.systemRecords),
-      '',
     ]);
-    csvRows.push(['', '', '', '', '', '', '', '', 'Gateway Records', String(summary.gatewayRecords), '']);
+    csvRows.push(['', '', '', '', '', '', '', '', 'Gateway Records', String(summary.gatewayRecords)]);
 
     const csv = Papa.unparse(csvRows, { delimiter: ',' });
     const filename = `recon-${ts(params.dateFrom)}-${ts(params.dateTo)}.csv`;
@@ -937,6 +1227,12 @@ function mapKey(c: Classification): keyof ReconciliationSummary {
       return 'reversedTxn';
     case 'MISSING_RECEIPT':
       return 'missingReceipt';
+    case 'PENDING_ATTEMPT':
+      return 'pendingAttempts';
+    case 'FAILED_ATTEMPT':
+      return 'failedAttempts';
+    case 'UNABLE_TO_VERIFY':
+      return 'unableToVerify';
   }
 }
 

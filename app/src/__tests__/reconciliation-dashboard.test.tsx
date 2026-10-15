@@ -41,8 +41,8 @@ vi.mock('../components/PortalShell', () => ({
 vi.mock('lucide-react', () => {
   const icons = [
     'RefreshCw', 'Download', 'Filter', 'ChevronLeft', 'ChevronRight', 'Loader2',
-    'AlertTriangle', 'CheckCircle2', 'XCircle', 'Database', 'Building2', 'CreditCard',
-    'Link2Off', 'Copy', 'RotateCcw', 'FileQuestion', 'FileText',
+    'AlertTriangle', 'CheckCircle2', 'XCircle', 'Clock', 'HelpCircle', 'Database',
+    'Building2', 'CreditCard', 'Link2Off', 'Copy', 'RotateCcw', 'FileQuestion', 'FileText',
   ];
   const out: any = {};
   icons.forEach((n) => { out[n] = () => null; });
@@ -105,6 +105,14 @@ const baseSummary = {
   duplicateReference: 1,
   reversedTxn: 2,
   missingReceipt: 3,
+  pendingAttempts: 1,
+  failedAttempts: 1,
+  unableToVerify: 0,
+  providerAvailability: {
+    paystack: 'AVAILABLE',
+    alatpay: 'AVAILABLE',
+  },
+  incompleteCoverage: false,
 };
 
 const baseItems = [
@@ -180,7 +188,7 @@ describe('Reconciliation Dashboard', () => {
     expect(new Date(firstCall.dateFrom).getTime()).toBeLessThanOrEqual(new Date(firstCall.dateTo).getTime());
   });
 
-  it('3. summary uses current API response shape (9 cards)', async () => {
+  it('3. summary uses current API response shape (12 cards)', async () => {
     render();
     await flush();
     const text = container.textContent || '';
@@ -190,9 +198,12 @@ describe('Reconciliation Dashboard', () => {
     expect(text).toContain('Amount Mismatch');
     expect(text).toContain('Missing Internal');
     expect(text).toContain('Missing Gateway');
-    expect(text).toContain('Duplicate References');
+    expect(text).toContain('Duplicate Refs');
     expect(text).toContain('Reversed');
     expect(text).toContain('Missing Receipt');
+    expect(text).toContain('Pending Attempts');
+    expect(text).toContain('Failed Attempts');
+    expect(text).toContain('Unable to Verify');
     expect(text).toContain('100');
     expect(text).toContain('90');
   });
@@ -432,6 +443,11 @@ describe('Reconciliation Dashboard', () => {
       duplicateReference: 0,
       reversedTxn: 0,
       missingReceipt: 0,
+      pendingAttempts: 0,
+      failedAttempts: 0,
+      unableToVerify: 0,
+      providerAvailability: { paystack: 'AVAILABLE', alatpay: 'AVAILABLE' },
+      incompleteCoverage: false,
     };
     itemsMock.mockResolvedValue({
       items: baseItems,

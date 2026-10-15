@@ -59,6 +59,9 @@ const ItemsQuery = z.object({
       'DUPLICATE_REFERENCE',
       'REVERSED_TXN',
       'MISSING_RECEIPT',
+      'PENDING_ATTEMPT',
+      'FAILED_ATTEMPT',
+      'UNABLE_TO_VERIFY',
     ])
     .optional(),
   feeId: z.union([z.coerce.number().int().positive(), z.null()]).optional(),

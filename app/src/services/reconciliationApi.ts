@@ -7,7 +7,12 @@ export type Classification =
   | 'MISSING_GATEWAY'
   | 'DUPLICATE_REFERENCE'
   | 'REVERSED_TXN'
-  | 'MISSING_RECEIPT';
+  | 'MISSING_RECEIPT'
+  | 'PENDING_ATTEMPT'
+  | 'FAILED_ATTEMPT'
+  | 'UNABLE_TO_VERIFY';
+
+export type GatewayAvailability = 'AVAILABLE' | 'PARTIALLY_AVAILABLE' | 'UNAVAILABLE';
 
 export type ChargeSource = 'ALL' | 'CATALOGUE' | 'DIRECT_BILL';
 
@@ -21,12 +26,21 @@ export type ReconciliationSummary = {
   duplicateReference: number;
   reversedTxn: number;
   missingReceipt: number;
+  pendingAttempts: number;
+  failedAttempts: number;
+  unableToVerify: number;
+  providerAvailability: {
+    paystack: GatewayAvailability;
+    alatpay: GatewayAvailability;
+  };
+  incompleteCoverage: boolean;
 };
 
 export type ReconciliationItem = {
   date?: string;
   gateway: 'PAYSTACK' | 'ALATPAY';
   gatewayReference: string | null;
+  providerReference?: string | null;
   paymentReference: string | null;
   classification: Classification;
   expectedAmount: number;
@@ -35,6 +49,8 @@ export type ReconciliationItem = {
   studentId?: number | null;
   chargeSource?: 'DIRECT_BILL' | 'CATALOGUE';
   assignmentId?: number | null;
+  verificationMethod?: string;
+  providerAvailable?: boolean;
 };
 
 export type ReconciliationPagination = {

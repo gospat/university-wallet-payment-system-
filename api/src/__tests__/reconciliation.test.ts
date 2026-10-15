@@ -216,7 +216,7 @@ describe('AC-D1 Reconciliation Bucket Counts (10-payment fixture)', () => {
 
     fetchSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
-      .mockResolvedValue(buildPaystackFixtures() as any);
+      .mockResolvedValue({ rows: buildPaystackFixtures(), available: true } as any);
 
     const result = await ReconciliationService.runCompare({
       dateFrom: DATE_FROM,
@@ -337,7 +337,7 @@ describe('AC-D1 Reconciliation Bucket Counts (10-payment fixture)', () => {
     await seedInternalFixtures(testStudentId!, testAdminId!);
     fetchSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
-      .mockResolvedValue(buildPaystackFixtures() as any);
+      .mockResolvedValue({ rows: buildPaystackFixtures(), available: true } as any);
 
     const exp = await ReconciliationService.exportReport({
       format: 'csv',

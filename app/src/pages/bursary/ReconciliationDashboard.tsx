@@ -15,7 +15,7 @@ import {
 import {
   RefreshCw, Download, Filter as FilterIcon,
   ChevronLeft, ChevronRight, Loader2, AlertTriangle,
-  CheckCircle2, XCircle,
+  CheckCircle2, XCircle, Clock, HelpCircle,
   Database, Building2, CreditCard, Link2Off, Copy, RotateCcw, FileQuestion, FileText,
 } from 'lucide-react';
 
@@ -31,6 +31,9 @@ const CLASSIFICATION_LABELS: Record<Classification, string> = {
   DUPLICATE_REFERENCE: 'Duplicate Reference',
   REVERSED_TXN: 'Reversed Transaction',
   MISSING_RECEIPT: 'Missing Receipt',
+  PENDING_ATTEMPT: 'Pending Attempt',
+  FAILED_ATTEMPT: 'Failed Attempt',
+  UNABLE_TO_VERIFY: 'Unable to Verify',
 };
 
 const CLASSIFICATION_OPTIONS: Classification[] = [
@@ -41,6 +44,9 @@ const CLASSIFICATION_OPTIONS: Classification[] = [
   'DUPLICATE_REFERENCE',
   'REVERSED_TXN',
   'MISSING_RECEIPT',
+  'PENDING_ATTEMPT',
+  'FAILED_ATTEMPT',
+  'UNABLE_TO_VERIFY',
 ];
 
 function classificationBadge(c: Classification): { cls: string; icon: React.ElementType } {
@@ -59,6 +65,12 @@ function classificationBadge(c: Classification): { cls: string; icon: React.Elem
       return { cls: 'bg-slate-100 text-slate-700 border-slate-300', icon: RotateCcw };
     case 'MISSING_RECEIPT':
       return { cls: 'bg-sky-50 text-sky-700 border-sky-200', icon: FileQuestion };
+    case 'PENDING_ATTEMPT':
+      return { cls: 'bg-blue-50 text-blue-700 border-blue-200', icon: Clock };
+    case 'FAILED_ATTEMPT':
+      return { cls: 'bg-red-50 text-red-700 border-red-200', icon: XCircle };
+    case 'UNABLE_TO_VERIFY':
+      return { cls: 'bg-gray-100 text-gray-700 border-gray-300', icon: HelpCircle };
     default:
       return { cls: 'bg-gray-50 text-gray-700 border-gray-200', icon: AlertTriangle };
   }
@@ -211,9 +223,12 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
         { label: 'Amount Mismatch', value: summary.amountMismatch, icon: AlertTriangle, cls: 'text-amber-600' },
         { label: 'Missing Internal', value: summary.missingInternal, icon: Link2Off, cls: 'text-rose-600' },
         { label: 'Missing Gateway', value: summary.missingGateway, icon: Database, cls: 'text-orange-600' },
-        { label: 'Duplicate References', value: summary.duplicateReference, icon: Copy, cls: 'text-purple-600' },
-        { label: 'Reversed', value: summary.reversedTxn, icon: RotateCcw, cls: 'text-slate-500' },
         { label: 'Missing Receipt', value: summary.missingReceipt, icon: FileQuestion, cls: 'text-sky-600' },
+        { label: 'Reversed', value: summary.reversedTxn, icon: RotateCcw, cls: 'text-slate-500' },
+        { label: 'Duplicate Refs', value: summary.duplicateReference, icon: Copy, cls: 'text-purple-600' },
+        { label: 'Pending Attempts', value: summary.pendingAttempts, icon: Clock, cls: 'text-blue-600' },
+        { label: 'Failed Attempts', value: summary.failedAttempts, icon: XCircle, cls: 'text-red-600' },
+        { label: 'Unable to Verify', value: summary.unableToVerify, icon: HelpCircle, cls: 'text-gray-600' },
       ]
     : [];
 
@@ -370,9 +385,39 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
           </div>
         )}
 
+        {/* Provider availability warning */}
+        {canView && summary && summary.incompleteCoverage && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-amber-800">
+                  Incomplete gateway coverage — reconciliation totals are not fully reconciled
+                </p>
+                <ul className="mt-1 text-xs text-amber-700 space-y-0.5">
+                  {summary.providerAvailability.paystack !== 'AVAILABLE' && (
+                    <li>
+                      Paystack transaction listing is{' '}
+                      {summary.providerAvailability.paystack.toLowerCase()}. Some Paystack payments
+                      could not be independently reconciled.
+                    </li>
+                  )}
+                  {summary.providerAvailability.alatpay !== 'AVAILABLE' && (
+                    <li>
+                      ALATPay transaction listing is{' '}
+                      {summary.providerAvailability.alatpay.toLowerCase()}. Some ALATPay payments
+                      could not be independently reconciled.
+                    </li>
+                  )}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Summary cards */}
         {canView && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-9 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
             {summaryCards.map((card) => (
               <div key={card.label} className="bg-white rounded-lg border border-slate-200 shadow-sm p-3">
                 <div className="flex items-center justify-between">
