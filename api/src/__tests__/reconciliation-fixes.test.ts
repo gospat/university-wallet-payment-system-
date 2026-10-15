@@ -1,5 +1,14 @@
+import axios from 'axios';
 import prisma from '../config/database';
-import { Prisma, TransactionStatus, TransactionType, Role, PaymentGateway } from '@prisma/client';
+import {
+  Prisma,
+  TransactionStatus,
+  TransactionType,
+  Role,
+  PaymentGateway,
+  InvoiceStatus,
+  AssignmentTargetType,
+} from '@prisma/client';
 import * as ReconModule from '../services/reconciliation';
 import { ReconciliationService } from '../services/reconciliation';
 import { kobo } from '../utils/paystack';
@@ -18,11 +27,15 @@ describe('Reconciliation Engine Corrections', () => {
   let testStudentId: number | null = null;
   let createdTxIds: number[] = [];
   let createdReceiptIds: number[] = [];
+  let createdInvoiceIds: number[] = [];
+  let createdAssignmentIds: number[] = [];
+  let createdFeeIds: number[] = [];
   let dbAvailable = false;
 
   let psSpy: jest.SpyInstance<any> | null = null;
   let alatSpy: jest.SpyInstance<any> | null = null;
   let alatByIdSpy: jest.SpyInstance<any> | null = null;
+  let axiosSpy: jest.SpyInstance<any> | null = null;
 
   beforeAll(async () => {
     try {
@@ -60,9 +73,22 @@ describe('Reconciliation Engine Corrections', () => {
       await prisma.transaction.deleteMany({ where: { id: { in: createdTxIds } } });
       createdTxIds = [];
     }
+    if (createdInvoiceIds.length > 0) {
+      await prisma.invoice.deleteMany({ where: { id: { in: createdInvoiceIds } } });
+      createdInvoiceIds = [];
+    }
+    if (createdAssignmentIds.length > 0) {
+      await prisma.feeAssignment.deleteMany({ where: { id: { in: createdAssignmentIds } } });
+      createdAssignmentIds = [];
+    }
+    if (createdFeeIds.length > 0) {
+      await prisma.fee.deleteMany({ where: { id: { in: createdFeeIds } } });
+      createdFeeIds = [];
+    }
     if (psSpy) { psSpy.mockRestore(); psSpy = null; }
     if (alatSpy) { alatSpy.mockRestore(); alatSpy = null; }
     if (alatByIdSpy) { alatByIdSpy.mockRestore(); alatByIdSpy = null; }
+    if (axiosSpy) { axiosSpy.mockRestore(); axiosSpy = null; }
   });
 
   async function createTx(data: any) {
@@ -1323,5 +1349,404 @@ describe('Reconciliation Engine Corrections', () => {
     const item = items.find((i) => i.paymentReference === 'PAY-ALAT-NOTFOUND');
     expect(item).toBeDefined();
     expect(item?.classification).toBe('MISSING_GATEWAY');
+  });
+
+  // =================================================================
+  // ISSUE 1: HISTORICAL DIRECT BILL IDENTIFICATION
+  // A settled Direct Bill (isActive=false, settledAt set) must remain
+  // DIRECT_BILL forever. An unrelated later catalogue purchase for the
+  // same student+fee must remain CATALOGUE.
+  // =================================================================
+
+  async function setupFeeWithAssignment(opts: {
+    feeCode: string;
+    assignmentType?: AssignmentTargetType;
+    isActive?: boolean;
+    settledAt?: Date | null;
+    assignedAt?: Date;
+    withAssignment?: boolean;
+  }) {
+    const fee = await prisma.fee.create({
+      data: {
+        feeCode: opts.feeCode,
+        name: `Recon Fix ${opts.feeCode}`,
+        category: {
+          connectOrCreate: {
+            where: { code: 'RECON_FIX_CAT' },
+            create: { code: 'RECON_FIX_CAT', name: 'Recon Fix Category' },
+          },
+        },
+        amount: new Prisma.Decimal(50000),
+        academicSession: '2024/2025',
+        createdBy: { connect: { id: testStudentId! } },
+      },
+    });
+    createdFeeIds.push(fee.id);
+
+    let assignmentId: number | null = null;
+    if (opts.withAssignment !== false) {
+      const asg = await prisma.feeAssignment.create({
+        data: {
+          feeId: fee.id,
+          assignmentType: opts.assignmentType ?? AssignmentTargetType.STUDENT,
+          targetStudentId: testStudentId!,
+          assignedById: testStudentId!,
+          assignedAt: opts.assignedAt ?? new Date('2025-06-01T00:00:00.000Z'),
+          isActive: opts.isActive ?? true,
+          settledAt: opts.settledAt ?? null,
+        },
+      });
+      createdAssignmentIds.push(asg.id);
+      assignmentId = asg.id;
+    }
+
+    const inv = await prisma.invoice.create({
+      data: {
+        invoiceNumber: `INV-${opts.feeCode}`,
+        studentId: testStudentId!,
+        feeId: fee.id,
+        amountDue: new Prisma.Decimal(50000),
+        amountPaid: new Prisma.Decimal(50000),
+        status: InvoiceStatus.PAID,
+        session: '2024/2025',
+        createdAt: TX_DATE,
+      },
+    });
+    createdInvoiceIds.push(inv.id);
+
+    return { fee, assignmentId, invoice: inv };
+  }
+
+  it('S38: active unpaid direct bill -> DIRECT_BILL', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const code = `DB-ACTIVE-${Date.now()}`;
+    const { invoice } = await setupFeeWithAssignment({
+      feeCode: code,
+      isActive: true,
+      settledAt: null,
+    });
+    await createTx({
+      reference: `PAY-DB-ACTIVE-${code}`,
+      gateway: PaymentGateway.PAYSTACK,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      invoiceId: invoice.id,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === `PAY-DB-ACTIVE-${code}`);
+    expect(item).toBeDefined();
+    expect(item?.chargeSource).toBe('DIRECT_BILL');
+  });
+
+  it('S39: paid/settled direct bill (isActive=false, settledAt set) -> DIRECT_BILL', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const code = `DB-SETTLED-${Date.now()}`;
+    const { invoice } = await setupFeeWithAssignment({
+      feeCode: code,
+      isActive: false,
+      settledAt: new Date('2025-06-20T00:00:00.000Z'),
+    });
+    await createTx({
+      reference: `PAY-DB-SETTLED-${code}`,
+      gateway: PaymentGateway.PAYSTACK,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      invoiceId: invoice.id,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === `PAY-DB-SETTLED-${code}`);
+    expect(item).toBeDefined();
+    expect(item?.chargeSource).toBe('DIRECT_BILL');
+  });
+
+  it('S40: genuine catalogue payment (no assignment) -> CATALOGUE', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const code = `CAT-GENUINE-${Date.now()}`;
+    const { invoice } = await setupFeeWithAssignment({
+      feeCode: code,
+      withAssignment: false,
+    });
+    await createTx({
+      reference: `PAY-CAT-GENUINE-${code}`,
+      gateway: PaymentGateway.PAYSTACK,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      invoiceId: invoice.id,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === `PAY-CAT-GENUINE-${code}`);
+    expect(item).toBeDefined();
+    expect(item?.chargeSource).toBe('CATALOGUE');
+  });
+
+  it('S41: historical settled assignment must NOT convert an unrelated later catalogue tx to DIRECT_BILL', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const code = `CAT-LATER-${Date.now()}`;
+    // Assignment was created and settled LONG BEFORE the invoice was created.
+    // invoice.createdAt (2025-06-15) > settledAt (2025-02-01), so this is a
+    // genuine later catalogue purchase, NOT the old direct bill.
+    const { invoice } = await setupFeeWithAssignment({
+      feeCode: code,
+      isActive: false,
+      assignedAt: new Date('2025-01-01T00:00:00.000Z'),
+      settledAt: new Date('2025-02-01T00:00:00.000Z'),
+    });
+    await createTx({
+      reference: `PAY-CAT-LATER-${code}`,
+      gateway: PaymentGateway.PAYSTACK,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      invoiceId: invoice.id,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === `PAY-CAT-LATER-${code}`);
+    expect(item).toBeDefined();
+    expect(item?.chargeSource).toBe('CATALOGUE');
+  });
+
+  it('S42: Direct Bill filter returns the settled Direct Bill payment', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const code = `DB-FILTER-${Date.now()}`;
+    const { invoice } = await setupFeeWithAssignment({
+      feeCode: code,
+      isActive: false,
+      settledAt: new Date('2025-06-20T00:00:00.000Z'),
+    });
+    await createTx({
+      reference: `PAY-DB-FILTER-${code}`,
+      gateway: PaymentGateway.PAYSTACK,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      invoiceId: invoice.id,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+      chargeSource: 'DIRECT_BILL',
+    });
+    const item = items.find((i) => i.paymentReference === `PAY-DB-FILTER-${code}`);
+    expect(item).toBeDefined();
+    expect(item?.chargeSource).toBe('DIRECT_BILL');
+  });
+
+  it('S43: Catalogue filter does NOT return the settled Direct Bill payment', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const code = `CAT-EXCLUDE-${Date.now()}`;
+    const { invoice } = await setupFeeWithAssignment({
+      feeCode: code,
+      isActive: false,
+      settledAt: new Date('2025-06-20T00:00:00.000Z'),
+    });
+    await createTx({
+      reference: `PAY-CAT-EXCLUDE-${code}`,
+      gateway: PaymentGateway.PAYSTACK,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      invoiceId: invoice.id,
+    });
+
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.PAYSTACK,
+      chargeSource: 'CATALOGUE',
+    });
+    const item = items.find((i) => i.paymentReference === `PAY-CAT-EXCLUDE-${code}`);
+    expect(item).toBeUndefined();
+  });
+
+  // =================================================================
+  // ISSUE 2: PAYSTACK EXCLUSIVE UPPER BOUNDARY
+  // For 15/10/2026 Lagos business day:
+  //   2026-10-15T22:59:59.999Z -> included
+  //   2026-10-15T23:00:00.000Z -> excluded
+  // =================================================================
+
+  it('S44: Paystack list filter uses exclusive upper boundary (>= toMs excluded)', async () => {
+    // Lagos 2026-10-15 00:00 -> 2026-10-14T23:00:00Z (from, inclusive)
+    // Lagos 2026-10-16 00:00 -> 2026-10-15T23:00:00Z (to, exclusive)
+    const from = new Date('2026-10-14T23:00:00.000Z');
+    const to = new Date('2026-10-15T23:00:00.000Z');
+
+    const includedTs = '2026-10-15T22:59:59.999Z';
+    const excludedTs = '2026-10-15T23:00:00.000Z';
+
+    axiosSpy = jest.spyOn(axios, 'get').mockResolvedValue({
+      data: {
+        data: [
+          { reference: 'PS-INCLUDED', amount: 100000, status: 'success', paid_at: includedTs },
+          { reference: 'PS-EXCLUDED', amount: 100000, status: 'success', paid_at: excludedTs },
+        ],
+      },
+      status: 200,
+    } as any);
+
+    const { rows } = await ReconModule._reconciliationInternals.fetchPaystackTxListRange({ from, to });
+    const refs = rows.map((r: any) => r.reference);
+    expect(refs).toContain('PS-INCLUDED');
+    expect(refs).not.toContain('PS-EXCLUDED');
+  });
+
+  // =================================================================
+  // ISSUE 3: ALATPAY EMPTY/MALFORMED 2XX MUST NOT MEAN NOT FOUND
+  // Only definitive HTTP 404 sets notFound=true. Everything else
+  // (timeout, 5xx, 401, 403, empty 2xx, malformed 2xx) is ambiguous
+  // and becomes UNABLE_TO_VERIFY. The second candidate endpoint must
+  // be checked even if the first returns an ambiguous response.
+  // =================================================================
+
+  it('S45: ALATPay valid individual response -> MATCHED (row returned, notFound=false)', async () => {
+    const uuid = '11111111-1111-1111-1111-111111111111';
+    axiosSpy = jest.spyOn(axios, 'get').mockResolvedValue({
+      data: { data: { Id: uuid, Amount: 50000, Status: 'SUCCESS' } },
+      status: 200,
+    } as any);
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).not.toBeNull();
+    expect(result.available).toBe(true);
+    expect(result.notFound).toBe(false);
+    expect((result.row as any).Id).toBe(uuid);
+  });
+
+  it('S46: ALATPay definitive HTTP 404 -> notFound=true (eligible for MISSING_GATEWAY)', async () => {
+    const uuid = '22222222-2222-2222-2222-222222222222';
+    const err: any = new Error('Not Found');
+    err.response = { status: 404, data: { message: 'Not Found' } };
+    axiosSpy = jest.spyOn(axios, 'get').mockRejectedValue(err);
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(true);
+    expect(result.available).toBe(false);
+  });
+
+  it('S47: ALATPay HTTP 500 -> notFound=false (UNABLE_TO_VERIFY, never MISSING_GATEWAY)', async () => {
+    const uuid = '44444444-4444-4444-4444-444444444444';
+    const err: any = new Error('Internal Server Error');
+    err.response = { status: 500, data: { message: 'Internal Server Error' } };
+    axiosSpy = jest.spyOn(axios, 'get').mockRejectedValue(err);
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S48: ALATPay timeout -> notFound=false (UNABLE_TO_VERIFY)', async () => {
+    const uuid = '55555555-5555-5555-5555-555555555555';
+    const err: any = new Error('timeout of 15000ms exceeded');
+    err.code = 'ECONNABORTED';
+    err.response = undefined;
+    axiosSpy = jest.spyOn(axios, 'get').mockRejectedValue(err);
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S49: ALATPay empty 2xx response -> notFound=false (UNABLE_TO_VERIFY)', async () => {
+    const uuid = '66666666-6666-6666-6666-666666666666';
+    axiosSpy = jest.spyOn(axios, 'get').mockResolvedValue({
+      data: {},
+      status: 200,
+    } as any);
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S50: ALATPay malformed 2xx response -> notFound=false (UNABLE_TO_VERIFY)', async () => {
+    const uuid = '77777777-7777-7777-7777-777777777777';
+    axiosSpy = jest.spyOn(axios, 'get').mockResolvedValue({
+      data: { unexpected: 'shape', noId: true },
+      status: 200,
+    } as any);
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(result.row).toBeNull();
+    expect(result.notFound).toBe(false);
+  });
+
+  it('S51: ALATPay first candidate ambiguous (empty 2xx) but second returns valid transaction -> MATCHED', async () => {
+    const uuid = '88888888-8888-8888-8888-888888888888';
+    let callCount = 0;
+    axiosSpy = jest.spyOn(axios, 'get').mockImplementation(async (url: string) => {
+      callCount += 1;
+      if (callCount === 1) {
+        // First candidate endpoint returns empty 2xx — ambiguous.
+        return { data: {}, status: 200 } as any;
+      }
+      // Second candidate endpoint returns the valid transaction.
+      return {
+        data: { data: { Id: uuid, Amount: 50000, Status: 'SUCCESS' } },
+        status: 200,
+      } as any;
+    });
+
+    const result = await ReconModule._reconciliationInternals.fetchAlatpayTxById({ providerId: uuid });
+    expect(callCount).toBe(2);
+    expect(result.row).not.toBeNull();
+    expect(result.available).toBe(true);
+    expect(result.notFound).toBe(false);
+    expect((result.row as any).Id).toBe(uuid);
   });
 });

@@ -221,10 +221,12 @@ export async function fetchPaystackTxListRange(params: {
       for (const row of data) {
         // Ensure the record actually falls within the requested date range,
         // using paid_at (the documented transaction settlement timestamp).
+        // EXCLUSIVE upper boundary: t >= toMs is excluded, matching the
+        // internal DB range (gte/lt) and in-memory financial-date filter.
         const tsStr = row.paid_at ?? row.transaction_date ?? row.created_at;
         if (tsStr) {
           const t = new Date(tsStr).getTime();
-          if (Number.isFinite(t) && (t < fromMs || t > toMs)) continue;
+          if (Number.isFinite(t) && (t < fromMs || t >= toMs)) continue;
         }
         all.push(row as PaystackTxRow);
       }
@@ -352,6 +354,11 @@ export async function fetchAlatpayTxById(params: {
     ];
     let lastErr: any = null;
     let lastStatus: number | null = null;
+    // A definitive HTTP 404 from any authoritative transaction endpoint proves
+    // the transaction does not exist at the provider. Empty/malformed 2xx,
+    // timeout, 5xx, 401, 403 are AMBIGUOUS and must NOT be treated as
+    // notFound — they become UNABLE_TO_VERIFY.
+    let saw404 = false;
     for (const url of candidates) {
       try {
         const r = await axios.get(url, {
@@ -366,16 +373,26 @@ export async function fetchAlatpayTxById(params: {
         if (payload && (payload.Id || payload.id || payload.transactionId)) {
           return { row: payload as AlatpayTxRow, available: true, notFound: false };
         }
-        // 2xx response but no transaction body — treat as definitive not-found.
-        return { row: null, available: true, notFound: true };
+        // 2xx response but no recognised transaction body.
+        // This is AMBIGUOUS — do NOT treat as definitive not-found.
+        // Continue to the next candidate endpoint; a later candidate may
+        // return a valid transaction.
+        continue;
       } catch (err: any) {
         lastErr = err;
         lastStatus = err?.response?.status ?? null;
+        if (lastStatus === 404) {
+          saw404 = true;
+        }
+        // Continue to next candidate for timeout/5xx/401/403/etc.
       }
     }
-    // Distinguish definitive not-found (404) from transport/availability errors.
-    // Only an HTTP 404 proves the transaction does not exist at the provider.
-    const notFound = lastStatus === 404;
+    // After all candidates:
+    //   - valid transaction found → already returned above
+    //   - any candidate returned HTTP 404 → definitive absence → notFound
+    //   - otherwise (timeout, 5xx, 401, 403, empty 2xx, malformed 2xx)
+    //     → cannot prove absence → UNABLE_TO_VERIFY, never MISSING_GATEWAY
+    const notFound = saw404;
     if (!notFound && process.env.NODE_ENV !== 'test') {
       console.warn(
         `[recon:alatpay] individual lookup failed for ${providerId}:`,
@@ -504,35 +521,78 @@ export class ReconciliationService {
       where: internalWhere,
       include: {
         user: { select: { id: true, firstName: true, lastName: true, matricNumber: true } },
-        invoice: { select: { id: true, feeId: true } },
+        invoice: { select: { id: true, feeId: true, studentId: true, createdAt: true } },
         receipts: { select: { id: true, transactionId: true, paidAt: true, isVoided: true } },
       },
       orderBy: { createdAt: 'asc' },
     });
 
-    // Determine chargeSource for each internal transaction and apply filter
+    // Determine chargeSource for each internal transaction and apply filter.
+    //
+    // HISTORICAL DIRECT BILL IDENTIFICATION:
+    // A settled Direct Bill has FeeAssignment.isActive=false and settledAt set.
+    // We must NOT rely solely on isActive=true, or paid direct bills would be
+    // misclassified as CATALOGUE.
+    //
+    // There is no direct FK from Invoice to FeeAssignment. We use the strongest
+    // historical evidence available: an assignment for the same (student, fee)
+    // whose active period CONTAINS the invoice creation time:
+    //   assignedAt <= invoice.createdAt
+    //   AND (isActive = true OR settledAt >= invoice.createdAt)
+    //
+    // This ensures:
+    //   - active unpaid direct bill  -> DIRECT_BILL
+    //   - paid/settled direct bill   -> DIRECT_BILL (invoice created before settledAt)
+    //   - genuine catalogue payment  -> CATALOGUE (no assignment, or assignment
+    //                                     already settled before invoice.createdAt)
+    //   - later catalogue purchase for same student+fee after a settled direct
+    //     bill -> CATALOGUE (invoice.createdAt > settledAt)
     type InternalTx = (typeof internalTxsRaw)[number] & { chargeSource?: 'DIRECT_BILL' | 'CATALOGUE'; assignmentId?: number | null };
     const internalTxsAll: InternalTx[] = internalTxsRaw as InternalTx[];
     const invoiceFeeIds = Array.from(new Set(internalTxsAll.map((t) => t.invoice?.feeId).filter((n) => n != null) as number[]));
-    const directByFeeByStudent = new Map<string, number>(); // "studentId:feeId" -> assignmentId
+    type AsgRow = { id: number; targetStudentId: number | null; feeId: number; assignedAt: Date; settledAt: Date | null; isActive: boolean };
+    const asgsByKey = new Map<string, AsgRow[]>();
     if (invoiceFeeIds.length > 0) {
       const asgs = await prisma.feeAssignment.findMany({
         where: {
           assignmentType: 'STUDENT' as any,
-          isActive: true,
           feeId: { in: invoiceFeeIds },
         },
-        select: { id: true, targetStudentId: true, feeId: true },
+        select: { id: true, targetStudentId: true, feeId: true, assignedAt: true, settledAt: true, isActive: true },
       });
-      for (const a of asgs) {
-        if (a.targetStudentId && a.feeId) directByFeeByStudent.set(`${a.targetStudentId}:${a.feeId}`, a.id);
+      for (const a of asgs as AsgRow[]) {
+        if (!a.targetStudentId || !a.feeId) continue;
+        const key = `${a.targetStudentId}:${a.feeId}`;
+        const arr = asgsByKey.get(key);
+        if (arr) arr.push(a);
+        else asgsByKey.set(key, [a]);
       }
     }
     for (const tx of internalTxsAll) {
-      const key = `${tx.userId}:${tx.invoice?.feeId}`;
-      const asgId = directByFeeByStudent.get(key) ?? null;
-      (tx as any).chargeSource = asgId != null ? 'DIRECT_BILL' : 'CATALOGUE';
-      (tx as any).assignmentId = asgId;
+      const feeId = tx.invoice?.feeId;
+      const invoiceCreatedAt = tx.invoice?.createdAt;
+      // The assignment targets the invoice's student (the billed student),
+      // which may differ from tx.userId if a third party pays.
+      const studentId = tx.invoice?.studentId ?? tx.userId;
+      if (feeId == null || !invoiceCreatedAt) {
+        (tx as any).chargeSource = 'CATALOGUE';
+        (tx as any).assignmentId = null;
+        continue;
+      }
+      const key = `${studentId}:${feeId}`;
+      const candidates = asgsByKey.get(key) ?? [];
+      const invCreatedMs = new Date(invoiceCreatedAt).getTime();
+      const match = candidates.find((a) => {
+        const assignedMs = new Date(a.assignedAt).getTime();
+        if (invCreatedMs < assignedMs) return false;
+        if (a.isActive) return true;
+        if (a.settledAt) {
+          return invCreatedMs <= new Date(a.settledAt).getTime();
+        }
+        return false;
+      });
+      (tx as any).chargeSource = match ? 'DIRECT_BILL' : 'CATALOGUE';
+      (tx as any).assignmentId = match?.id ?? null;
     }
 
     let internalTxs: InternalTx[];
