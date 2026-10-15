@@ -41,7 +41,10 @@ export type DashboardFacetName =
   | 'BY_REFUND'
   | 'BY_NET'
   | 'RECONCILED'
-  | 'UNRECONCILED';
+  | 'UNRECONCILED'
+  | 'FULLY_SETTLED'
+  | 'PARTIALLY_SETTLED'
+  | 'OUTSTANDING_SETTLEMENT';
 
 export const DASHBOARD_FACETS: Record<DashboardFacetName, Partial<ReportsBaseFilters> & { status?: string }> = {
   GROSS_ALL: {},
@@ -57,8 +60,16 @@ export const DASHBOARD_FACETS: Record<DashboardFacetName, Partial<ReportsBaseFil
   // dedicated Refund Report (R13), not by an impossible register status.
   BY_REFUND: {},
   BY_NET: {},
+  // Authoritative settlement-evidence view (fully + partially settled).
   RECONCILED: { reconciliationStatus: ['MATCHED', 'SETTLED', 'PARTIALLY_MATCHED'] },
   UNRECONCILED: { reconciliationStatus: ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW'] },
+  // Distinct drill-down semantics — a partially settled transaction is NEVER a
+  // fully settled transaction.
+  FULLY_SETTLED: { reconciliationStatus: ['MATCHED', 'SETTLED'] },
+  PARTIALLY_SETTLED: { reconciliationStatus: ['PARTIALLY_MATCHED'] },
+  // Incomplete settlement: outstanding amounts (incl. partially settled remainder)
+  // plus transactions with no complete settlement evidence.
+  OUTSTANDING_SETTLEMENT: { reconciliationStatus: ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW', 'PARTIALLY_MATCHED'] },
 };
 
 const ENDPOINT_BASE = '/reports';
@@ -306,7 +317,8 @@ export type FacetName =
   | 'BY_PAYSTACK' | 'BY_ALATPAY'
   | 'BY_CONVENIENCE' | 'BY_SERVICE' | 'BY_GATEWAY'
   | 'BY_REFUND' | 'BY_NET'
-  | 'RECONCILED' | 'UNRECONCILED';
+  | 'RECONCILED' | 'UNRECONCILED'
+  | 'FULLY_SETTLED' | 'PARTIALLY_SETTLED' | 'OUTSTANDING_SETTLEMENT';
 
 export const FACET_LABELS: Record<FacetName, string> = {
   GROSS_ALL: 'All Successful Transactions',
@@ -320,6 +332,9 @@ export const FACET_LABELS: Record<FacetName, string> = {
   BY_NET: 'Net Revenue View',
   RECONCILED: 'Settled / Partially Settled Transactions',
   UNRECONCILED: 'Pending Settlement Transactions',
+  FULLY_SETTLED: 'Fully Settled Transactions (Matched / Settled)',
+  PARTIALLY_SETTLED: 'Partially Settled Transactions',
+  OUTSTANDING_SETTLEMENT: 'Outstanding Settlement Transactions',
 };
 
 export function applyFacetToFilters(facet: string, base: any = {}): any {
@@ -336,6 +351,17 @@ export function applyFacetToFilters(facet: string, base: any = {}): any {
       break;
     case 'RECONCILED':
       f.reconciliationStatus = ['MATCHED', 'SETTLED', 'PARTIALLY_MATCHED'];
+      break;
+    // Distinct settlement drill-downs. FULLY_SETTLED must NEVER include
+    // PARTIALLY_MATCHED; PARTIALLY_SETTLED must NEVER include MATCHED/SETTLED.
+    case 'FULLY_SETTLED':
+      f.reconciliationStatus = ['MATCHED', 'SETTLED'];
+      break;
+    case 'PARTIALLY_SETTLED':
+      f.reconciliationStatus = ['PARTIALLY_MATCHED'];
+      break;
+    case 'OUTSTANDING_SETTLEMENT':
+      f.reconciliationStatus = ['PENDING_SETTLEMENT', 'VARIANCE', 'UNMATCHED', 'UNDER_REVIEW', 'PARTIALLY_MATCHED'];
       break;
     case 'BY_REFUND':
       // No transaction-status value represents a refund; the register filter

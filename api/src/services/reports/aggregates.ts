@@ -331,15 +331,29 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
   const extraRecon = buildReconciliationStatusFilter(f);
   if (extraRecon) reconConds.push(extraRecon);
   const reconWhere = Prisma.join(reconConds, ' AND ');
+  // Canonical per-transaction expected settlement:
+  //   expectedSettlement = COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee)
+  // Canonical outstanding settlement (amount still expected but NOT yet
+  // authoritatively evidenced by a real Settlement.actualSettlement):
+  //   outstanding = GREATEST(expectedSettlement - COALESCE(s.actualSettlement, 0), 0)
+  // A partial settlement contributes only its REMAINING outstanding amount, and
+  // Receipt.paidAmount is NEVER used as the amount awaiting settlement.
   const reconSql = Prisma.sql`
     SELECT
       -- Settlement COUNTS reflect the authoritative Settlement status:
       -- MATCHED/SETTLED = fully settled; PARTIALLY_MATCHED = partially settled
-      -- (never counted as fully settled); otherwise pending.
+      -- (never counted as fully settled).
       SUM(CASE WHEN s.status IN ('MATCHED','SETTLED') THEN 1 ELSE 0 END) AS fullySettledCount,
       SUM(CASE WHEN s.status = 'PARTIALLY_MATCHED' THEN 1 ELSE 0 END) AS partialSettlementCount,
-      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN 1 ELSE 0 END) AS pendingSettlementCount,
-      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN r.paidAmount ELSE 0 END) AS pendingSettlementAmt,
+      -- Outstanding settlement COUNT: a positive outstanding amount OR no
+      -- authoritative settlement evidence at all.
+      SUM(CASE
+            WHEN GREATEST(COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee) - COALESCE(s.actualSettlement,0), 0) > 0
+              OR s.actualSettlement IS NULL
+            THEN 1 ELSE 0 END) AS outstandingSettlementCount,
+      -- Outstanding settlement AMOUNT — expected settlement minus authoritative
+      -- actual evidence, floored at 0 (never a negative outstanding).
+      SUM(GREATEST(COALESCE(s.expectedSettlement, r.paidAmount - r.gatewayFee) - COALESCE(s.actualSettlement,0), 0)) AS outstandingSettlementAmt,
       -- Settlement MONEY comes ONLY from authoritative Settlement.actualSettlement
       -- evidence. It is NEVER inferred from Receipt.paidAmount, so a
       -- PARTIALLY_MATCHED settlement can never present the full payment as settled.
@@ -355,7 +369,7 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
   `;
   const rcon = await prisma.$queryRaw<Array<{
     fullySettledCount: string|number; partialSettlementCount: string|number;
-    pendingSettlementCount: string|number; pendingSettlementAmt: string|number;
+    outstandingSettlementCount: string|number; outstandingSettlementAmt: string|number;
     settlementEvidenceCount: string|number; settlementEvidenceAmt: string|number;
   }>>(reconSql);
   const reconRow = Array.isArray(rcon) && rcon.length > 0 ? rcon[0] : {} as any;
@@ -370,6 +384,10 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
   // NULL actualSettlement evidence => settled amount is UNKNOWN, never ₦0.
   const settlementEvidenceCount = Number(reconRow.settlementEvidenceCount ?? 0);
   const settlementEvidenceAmount = settlementEvidenceCount > 0 ? d(reconRow.settlementEvidenceAmt) : null;
+  // OUTSTANDING SETTLEMENT — expected settlement still awaiting authoritative
+  // settlement evidence (a partial settlement contributes only its remainder).
+  const outstandingSettlementAmount = d(reconRow.outstandingSettlementAmt);
+  const outstandingSettlementCount = Number(reconRow.outstandingSettlementCount ?? 0);
   return {
     totalCollected: bellsCollection,
     bellsCollection,
@@ -391,8 +409,12 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
     settlementEvidenceCount,
     fullySettledCount: Number(reconRow.fullySettledCount ?? 0),
     partialSettlementCount: Number(reconRow.partialSettlementCount ?? 0),
-    pendingSettlementAmount: d(reconRow.pendingSettlementAmt),
-    pendingSettlementCount: Number(reconRow.pendingSettlementCount ?? 0),
+    // Canonical outstanding-settlement contract.
+    outstandingSettlementAmount,
+    outstandingSettlementCount,
+    // Backward-compatible aliases (identical values, canonical names above).
+    pendingSettlementAmount: outstandingSettlementAmount,
+    pendingSettlementCount: outstandingSettlementCount,
   };
 }
 
@@ -709,12 +731,22 @@ export async function paymentRegister(
   const pageSize = Math.min(500, Math.max(1, Number(f.pageSize ?? 50)));
   const skip = (page - 1) * pageSize;
 
+  // Settlement-status (drill-down facet) filter — READ-ONLY. The dashboard
+  // Fully Settled / Partially Settled / Outstanding cards drill into this
+  // register with a reconciliationStatus facet, so it must be honoured (it was
+  // previously ignored). Shares the exact binding used by dashboardSummaryCards
+  // and settlementReport via buildReconciliationStatusFilter(). The settlements
+  // join is 1:1 (Settlement.transactionId is @unique), so it never multiplies
+  // register rows or the summary sums.
+  const reconFilter = buildReconciliationStatusFilter(f);
+  const baseWhere = reconFilter ? Prisma.join([where, reconFilter], ' AND ') : where;
+
   // Search filter (R5 spec: matric / studentName / receiptNo / txRef / gatewayRef)
-  let searchWhere = where;
+  let searchWhere = baseWhere;
   if (f.q && String(f.q).trim().length > 0) {
     const q = `%${String(f.q).trim()}%`;
     searchWhere = Prisma.join([
-      where,
+      baseWhere,
       Prisma.sql`(
         u.matricNumber LIKE ${q} OR
         CONCAT(u.firstName, ' ', u.lastName) LIKE ${q} OR
@@ -740,6 +772,7 @@ export async function paymentRegister(
       INNER JOIN users u    ON u.id = t.userId
       LEFT  JOIN invoices i ON i.id = t.invoiceId
       LEFT  JOIN fees fe    ON fe.id = i.feeId
+      LEFT  JOIN settlements s ON s.transactionId = t.id
     WHERE ${searchWhere}
   `;
   // Refunds sum for the SAME filter scope as the register rows (COMPLETED only).
@@ -764,13 +797,15 @@ export async function paymentRegister(
       LEFT  JOIN invoices i ON i.id = t.invoiceId
       LEFT  JOIN fees fe    ON fe.id = i.feeId
       LEFT  JOIN fee_categories fc ON fc.id = fe.categoryId
+      LEFT  JOIN settlements s ON s.transactionId = t.id
     WHERE ${searchWhere}
     ORDER BY ${Prisma.raw(sortField)} ${Prisma.raw(order.toUpperCase())}
     LIMIT ${pageSize} OFFSET ${skip}
   `;
   const countSql = Prisma.sql`SELECT COUNT(DISTINCT t.id) AS cnt
     FROM transactions t INNER JOIN receipts r ON r.transactionId = t.id INNER JOIN users u ON u.id = t.userId
-    LEFT JOIN invoices i ON i.id = t.invoiceId LEFT JOIN fees fe ON fe.id = i.feeId WHERE ${searchWhere}`;
+      LEFT JOIN invoices i ON i.id = t.invoiceId LEFT JOIN fees fe ON fe.id = i.feeId
+      LEFT JOIN settlements s ON s.transactionId = t.id WHERE ${searchWhere}`;
 
   const [sRaw, rRaw, cRaw, rfRaw] = await Promise.all([
     prisma.$queryRaw<Array<{txCount:any;uniquePayers:any;gross:any;convFee:any;svcFee:any;gwFee:any;total:any}>>(summarySql),

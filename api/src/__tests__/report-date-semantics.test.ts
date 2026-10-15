@@ -799,8 +799,11 @@ describe('Reports — DB-backed financial semantics', () => {
     const cards = await dashboardSummaryCards(dayCtx(day));
     expect(cards.settlementEvidenceAmount).toBeNull();
     expect(cards.settlementEvidenceCount).toBe(0);
-    expect(cards.pendingSettlementCount).toBe(1);
-    expect(cards.pendingSettlementAmount).toBe(5000);
+    // Outstanding settlement = expected (COALESCE(expectedSettlement, paid − fee)).
+    expect(cards.outstandingSettlementCount).toBe(1);
+    expect(cards.outstandingSettlementAmount).toBe(5000);
+    // Backward-compatible aliases mirror the canonical outstanding fields.
+    expect(cards.pendingSettlementAmount).toBe(cards.outstandingSettlementAmount);
   });
 
   dbIt('Y. R1 partial settlement money uses only the authoritative actual amount (mixed evidence)', async () => {
@@ -814,8 +817,12 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(cards.settlementEvidenceAmount).toBe(60000);
     expect(cards.settlementEvidenceCount).toBe(1);
     expect(cards.partialSettlementCount).toBe(1);
-    // The unevidenced payment remains PENDING — never counted as settled.
-    expect(cards.pendingSettlementCount).toBe(1);
+    // Outstanding = partial remainder (100000 − 60000 = 40000) PLUS the
+    // unevidenced payment's expected settlement (40000) across 2 transactions.
+    expect(cards.outstandingSettlementCount).toBe(2);
+    expect(cards.outstandingSettlementAmount).toBe(80000);
+    // The unevidenced payment is never counted as settled.
+    expect(cards.fullySettledCount).toBe(0);
   });
 
   dbIt('Z. R10 and R11 use the SAME canonical variance sign (ACTUAL − EXPECTED); shortfall is negative', async () => {
@@ -942,5 +949,84 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(gw.settlementEvidenceCount).toBe(2);  // full + partial carry actualSettlement
     // A partially settled tx must NEVER be counted as fully settled.
     expect(gw.fullySettledCount).not.toBe(gw.successCount);
+  });
+
+  // =========================================================================
+  // Task H regressions — OUTSTANDING SETTLEMENT semantics + distinct drills.
+  // =========================================================================
+
+  dbIt('AF. Outstanding settlement uses EXPECTED settlement (paid − gateway fee), never the raw paid amount', async () => {
+    const day = '2001-07-01';
+    // paidAmount 100, gatewayFee 2, NO Settlement row → expected = 98.
+    await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, gatewayFee: 2, paidAt: new Date(`${day}T10:00:00.000Z`) });
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.bellsCollection).toBe(100);
+    expect(cards.settlementEvidenceAmount).toBeNull();
+    expect(cards.outstandingSettlementCount).toBe(1);
+    expect(cards.outstandingSettlementAmount).toBe(98);   // NOT 100
+    expect(cards.outstandingSettlementAmount).not.toBe(100);
+  });
+
+  dbIt('AG. A PARTIALLY_MATCHED settlement contributes only its REMAINING outstanding amount', async () => {
+    const day = '2001-07-03';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.ALATPAY, 100, 60, 'PARTIALLY_MATCHED');
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.settlementEvidenceAmount).toBe(60);
+    expect(cards.outstandingSettlementAmount).toBe(40);    // 100 − 60
+    expect(cards.outstandingSettlementCount).toBe(1);
+    expect(cards.partialSettlementCount).toBe(1);
+    expect(cards.fullySettledCount).toBe(0);
+  });
+
+  dbIt('AH. An exact MATCHED settlement leaves zero outstanding and counts as fully settled', async () => {
+    const day = '2001-07-05';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.PAYSTACK, 100, 100, 'MATCHED');
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.outstandingSettlementAmount).toBe(0);
+    expect(cards.outstandingSettlementCount).toBe(0);
+    expect(cards.fullySettledCount).toBe(1);
+    expect(cards.settlementEvidenceAmount).toBe(100);
+  });
+
+  dbIt('AI. An excess settlement never produces a negative outstanding amount', async () => {
+    const day = '2001-07-07';
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, gatewayFee: 0, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(tx.id, PaymentGateway.PAYSTACK, 100, 110, 'MATCHED');
+
+    const cards = await dashboardSummaryCards(dayCtx(day));
+    expect(cards.outstandingSettlementAmount).toBe(0);
+    expect(cards.outstandingSettlementAmount).not.toBe(-10);
+    expect(cards.outstandingSettlementCount).toBe(0);
+  });
+
+  dbIt('AJ. FULLY_SETTLED drill-down returns only MATCHED/SETTLED (never PARTIALLY_MATCHED)', async () => {
+    const day = '2001-07-09';
+    const { tx: full } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(full.id, PaymentGateway.ALATPAY, 100, 100, 'SETTLED');
+    const { tx: part } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 200, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    await makeSettlement(part.id, PaymentGateway.ALATPAY, 200, 120, 'PARTIALLY_MATCHED');
+
+    const reg = await paymentRegister({ ...dayCtx(day), reconciliationStatus: ['MATCHED', 'SETTLED'], page: 1, pageSize: 50 });
+    const refs = reg.rows.map((r: any) => r.transactionReference);
+    expect(refs).toContain(full.reference);
+    expect(refs).not.toContain(part.reference);
+  });
+
+  dbIt('AK. PARTIALLY_SETTLED drill-down returns only PARTIALLY_MATCHED (never MATCHED/SETTLED)', async () => {
+    const day = '2001-07-11';
+    const { tx: full } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    await makeSettlement(full.id, PaymentGateway.PAYSTACK, 100, 100, 'MATCHED');
+    const { tx: part } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 200, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    await makeSettlement(part.id, PaymentGateway.PAYSTACK, 200, 120, 'PARTIALLY_MATCHED');
+
+    const reg = await paymentRegister({ ...dayCtx(day), reconciliationStatus: ['PARTIALLY_MATCHED'], page: 1, pageSize: 50 });
+    const refs = reg.rows.map((r: any) => r.transactionReference);
+    expect(refs).toContain(part.reference);
+    expect(refs).not.toContain(full.reference);
   });
 });
