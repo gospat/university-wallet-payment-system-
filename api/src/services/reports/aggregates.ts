@@ -181,6 +181,98 @@ export function buildReconciliationStatusFilter(f: ReportFilterCtx): Prisma.Sql 
 }
 
 // ---------------------------------------------------------------------------
+// Refund scope.
+//
+// A Refund carries no gateway/student/bill of its own — it inherits them from
+// the transaction it was issued against (Refund.originalTransaction). Every
+// report that computes `net = filtered gross − refunds` MUST scope its refunds
+// through that original transaction, otherwise a provider/student/bill-filtered
+// report silently subtracts unrelated refunds.
+//
+// Every condition below is derivable authoritatively (no invented links):
+//   provider   -> originalTransaction.gateway
+//   student    -> originalTransaction.userId
+//   matric     -> originalTransaction.user.matricNumber
+//   bill/fee   -> originalTransaction.invoice.feeId
+//   category   -> originalTransaction.invoice.fee.categoryId
+//   level      -> originalTransaction.invoice.fee.level
+//   session    -> originalTransaction.invoice.session
+//   semester   -> originalTransaction.invoice.semester
+//   college/department/programme -> originalTransaction.user
+//
+// NOTE: a free-text register search (q) is NOT applied to the refund summary:
+// a refund has no receipt/reference of its own, so applying the payment-row text
+// search to refunds would be an invented association. The refund summary is
+// therefore scoped by the authoritative financial dimensions above + date.
+// Aliases expected by refundScopeFromWhere(): rf, t2, u2, i2, fe2.
+// ---------------------------------------------------------------------------
+function buildRefundScopeConds(f: ReportFilterCtx): Prisma.Sql[] {
+  const conds: Prisma.Sql[] = [];
+  if (f.provider) conds.push(Prisma.sql`t2.gateway = ${f.provider}`);
+  if (f.studentId) conds.push(Prisma.sql`t2.userId = ${f.studentId}`);
+  if (f.studentMatric) conds.push(Prisma.sql`u2.matricNumber = ${f.studentMatric}`);
+  const resolvedBillId = f.billId ?? f.feeId;
+  const resolvedCategoryId = f.billCategoryId ?? f.feeCategoryId;
+  const resolvedLevel = f.levelValue ?? f.level;
+  if (resolvedBillId) conds.push(Prisma.sql`i2.feeId = ${resolvedBillId}`);
+  if (resolvedCategoryId) conds.push(Prisma.sql`fe2.categoryId = ${resolvedCategoryId}`);
+  if (resolvedLevel) conds.push(Prisma.sql`fe2.level = ${resolvedLevel}`);
+  if (f.session) conds.push(Prisma.sql`i2.session = ${f.session}`);
+  if (f.semester) conds.push(Prisma.sql`i2.semester = ${f.semester}`);
+  if (f.collegeId) conds.push(Prisma.sql`u2.facultyId = ${f.collegeId}`);
+  if (f.departmentId) conds.push(Prisma.sql`u2.departmentId = ${f.departmentId}`);
+  if (f.programmeId) conds.push(Prisma.sql`u2.programmeId = ${f.programmeId}`);
+  return conds;
+}
+
+// Build the `FROM refunds rf ... WHERE ...` fragment (PAID refunds only, the
+// Lagos business-day half-open range [fromInclusive, toExclusive), and the
+// optional filter scope). Pass explicit bounds (e.g. a comparative bucket) to
+// override reportDateRange(f). The scope joins are only emitted when the report
+// actually carries a scope filter.
+function refundScopeFromWhere(
+  f: ReportFilterCtx,
+  bounds?: { fromInclusive?: Date; toExclusive?: Date },
+): Prisma.Sql {
+  const b = bounds ?? reportDateRange(f);
+  const conds: Prisma.Sql[] = [Prisma.sql`rf.status = 'PAID'`];
+  if (b.fromInclusive) conds.push(Prisma.sql`rf.updatedAt >= ${b.fromInclusive}`);
+  if (b.toExclusive)   conds.push(Prisma.sql`rf.updatedAt < ${b.toExclusive}`);
+  const scope = buildRefundScopeConds(f);
+  conds.push(...scope);
+  const joins = scope.length > 0
+    ? Prisma.sql`
+        INNER JOIN transactions t2 ON t2.id = rf.originalTransactionId
+        INNER JOIN users u2        ON u2.id = t2.userId
+        LEFT  JOIN invoices i2     ON i2.id = t2.invoiceId
+        LEFT  JOIN fees fe2        ON fe2.id = i2.feeId`
+    : Prisma.sql``;
+  return Prisma.sql`FROM refunds rf${joins} WHERE ${Prisma.join(conds, ' AND ')}`;
+}
+
+// R10 variant: a CORRELATED refund subquery for a per-gateway aggregation.
+// The gateway dimension is correlated to the OUTER row (t.gateway) so every
+// gateway row reports only its own refunds, AND the same report scope filters
+// (student/bill/session/semester/category/level/org) are applied through the
+// refund's original transaction — so a student/bill-filtered gateway report
+// never subtracts refunds that belong to a filtered-out scope. Date basis is the
+// refund completion (rf.updatedAt) as a half-open [fromInclusive, toExclusive).
+function correlatedGatewayRefundSql(f: ReportFilterCtx): Prisma.Sql {
+  const b = reportDateRange(f);
+  const conds: Prisma.Sql[] = [Prisma.sql`t2.gateway = t.gateway`, Prisma.sql`rf.status = 'PAID'`];
+  if (b.fromInclusive) conds.push(Prisma.sql`rf.updatedAt >= ${b.fromInclusive}`);
+  if (b.toExclusive)   conds.push(Prisma.sql`rf.updatedAt < ${b.toExclusive}`);
+  conds.push(...buildRefundScopeConds(f));
+  return Prisma.sql`COALESCE((SELECT SUM(rf.requestedAmount)
+      FROM refunds rf
+        INNER JOIN transactions t2 ON t2.id = rf.originalTransactionId
+        INNER JOIN users u2        ON u2.id = t2.userId
+        LEFT  JOIN invoices i2     ON i2.id = t2.invoiceId
+        LEFT  JOIN fees fe2        ON fe2.id = i2.feeId
+      WHERE ${Prisma.join(conds, ' AND ')}),0)`;
+}
+
+// ---------------------------------------------------------------------------
 // R1 — Dashboard 12 summary cards.
 // ---------------------------------------------------------------------------
 export async function dashboardSummaryCards(f: ReportFilterCtx) {
@@ -216,39 +308,37 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
   }>;
   const base = Array.isArray(rows) && rows.length > 0 ? rows[0] : {} as any;
 
-  // Refunds COMPLETED only (per spec: Net = Bells collected − refunded issued where refund PAID)
-  const { fromInclusive: refundFrom, toExclusive: refundTo } = reportDateRange(f);
-  const refundWhere: Prisma.Sql[] = [Prisma.sql`rf.status = 'PAID'`];
-  if (refundFrom) refundWhere.push(Prisma.sql`rf.updatedAt >= ${refundFrom}`);
-  if (refundTo)   refundWhere.push(Prisma.sql`rf.updatedAt < ${refundTo}`);
-  const refundSql = Prisma.sql`
-    SELECT COALESCE(SUM(rf.requestedAmount),0) AS refunded
-    FROM refunds rf
-    WHERE ${Prisma.join(refundWhere, ' AND ')}
-  `;
-  const rRows = await prisma.$queryRaw<[{ refunded: string | number }][]>(refundSql) as unknown as Array<{ refunded: string | number }>;
-  const refunds = d(Array.isArray(rRows) && rRows.length > 0 ? rRows[0].refunded : 0);
+  // Refunds COMPLETED only (per spec: Net = Bells collected − refunded issued where refund PAID).
+  // Scoped to the SAME filters as the collections they offset (via the refund's
+  // original transaction), so a provider/student/bill-filtered dashboard never
+  // subtracts unrelated refunds.
+  const refundSql = Prisma.sql`SELECT COALESCE(SUM(rf.requestedAmount),0) AS amount ${refundScopeFromWhere(f)}`;
+  const rRows = await prisma.$queryRaw<[{ amount: string | number }][]>(refundSql) as unknown as Array<{ amount: string | number }>;
+  const refunds = d(Array.isArray(rRows) && rRows.length > 0 ? rRows[0].amount : 0);
 
-  // Reconciliation: count SUCCESS txs that are matched vs unmatched via receipts existence + nonvoided
-  // Reconciled = SUCCESS tx with Receipt that has R11 settlement MATCHED / SETTLED status
+  // SETTLEMENT coverage (NOT payment reconciliation): SUCCESS txs whose R11
+  // Settlement row shows the money settled/credited vs those still awaiting
+  // settlement evidence. A Settlement row being MATCHED/SETTLED is a BANK/GATEWAY
+  // settlement fact — it is reported with settlement terminology, never as
+  // "reconciled".
   const reconConds: Prisma.Sql[] = [where];
   const extraRecon = buildReconciliationStatusFilter(f);
   if (extraRecon) reconConds.push(extraRecon);
   const reconWhere = Prisma.join(reconConds, ' AND ');
   const reconSql = Prisma.sql`
     SELECT
-      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN 1 ELSE 0 END) AS reconciledCount,
-      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN r.paidAmount ELSE 0 END) AS reconciledAmt,
-      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN 1 ELSE 0 END) AS unreconciledCount,
-      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN r.paidAmount ELSE 0 END) AS unreconciledAmt
+      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN 1 ELSE 0 END) AS settledCount,
+      SUM(CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN r.paidAmount ELSE 0 END) AS settledAmt,
+      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN 1 ELSE 0 END) AS pendingSettlementCount,
+      SUM(CASE WHEN s.status IS NULL OR s.status IN ('PENDING_SETTLEMENT','VARIANCE','UNMATCHED','UNDER_REVIEW') THEN r.paidAmount ELSE 0 END) AS pendingSettlementAmt
     FROM transactions t
       INNER JOIN receipts r ON r.transactionId = t.id
       LEFT  JOIN settlements s ON s.transactionId = t.id
     WHERE ${reconWhere}
   `;
   const rcon = await prisma.$queryRaw<Array<{
-    reconciledCount: string|number; reconciledAmt: string|number;
-    unreconciledCount: string|number; unreconciledAmt: string|number;
+    settledCount: string|number; settledAmt: string|number;
+    pendingSettlementCount: string|number; pendingSettlementAmt: string|number;
   }>>(reconSql);
   const reconRow = Array.isArray(rcon) && rcon.length > 0 ? rcon[0] : {} as any;
 
@@ -266,10 +356,10 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
     gatewayFees: d(base.gatewayFee),
     refunds,
     netCollection: net,
-    reconciledAmount: d(reconRow.reconciledAmt),
-    reconciledCount: Number(reconRow.reconciledCount ?? 0),
-    unreconciledAmount: d(reconRow.unreconciledAmt),
-    unreconciledCount: Number(reconRow.unreconciledCount ?? 0),
+    settledAmount: d(reconRow.settledAmt),
+    settledCount: Number(reconRow.settledCount ?? 0),
+    pendingSettlementAmount: d(reconRow.pendingSettlementAmt),
+    pendingSettlementCount: Number(reconRow.pendingSettlementCount ?? 0),
   };
 }
 
@@ -278,7 +368,6 @@ export async function dashboardSummaryCards(f: ReportFilterCtx) {
 // ---------------------------------------------------------------------------
 export async function dailyCollections(f: ReportFilterCtx) {
   const { where } = buildSuccessReceiptTxCtx(f);
-  const { fromInclusive, toExclusive } = reportDateRange(f);
   const sql = Prisma.sql`
     SELECT
       agg.day                                              AS date,
@@ -311,10 +400,7 @@ export async function dailyCollections(f: ReportFilterCtx) {
     ) agg
     LEFT JOIN (
       SELECT DATE(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR)) AS refundDay, COALESCE(SUM(rf.requestedAmount),0) AS refunds
-      FROM refunds rf
-      WHERE rf.status = 'PAID'
-        AND (${fromInclusive ? Prisma.sql`rf.updatedAt >= ${fromInclusive}` : Prisma.sql`1=1`})
-        AND (${toExclusive ? Prisma.sql`rf.updatedAt < ${toExclusive}` : Prisma.sql`1=1`})
+      ${refundScopeFromWhere(f)}
       GROUP BY DATE(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR))
     ) ref ON ref.refundDay = agg.day
     ORDER BY agg.day DESC
@@ -373,8 +459,7 @@ export async function monthlyCollections(f: ReportFilterCtx) {
     ) agg
     LEFT JOIN (
       SELECT DATE_FORMAT(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR), '%Y-%m') AS refundMonth, COALESCE(SUM(rf.requestedAmount),0) AS refunds
-      FROM refunds rf
-      WHERE rf.status = 'PAID'
+      ${refundScopeFromWhere(f)}
       GROUP BY DATE_FORMAT(DATE_ADD(rf.updatedAt, INTERVAL 1 HOUR), '%Y-%m')
     ) ref ON ref.refundMonth = agg.month
     ORDER BY agg.month DESC
@@ -596,12 +681,12 @@ export async function paymentRegister(
       LEFT  JOIN fees fe    ON fe.id = i.feeId
     WHERE ${searchWhere}
   `;
-  // Refunds sum for same filter range (COMPLETED only)
-  const { fromInclusive: refundFrom, toExclusive: refundTo } = reportDateRange(f);
-  const refundWhere: Prisma.Sql[] = [Prisma.sql`rf.status = 'PAID'`];
-  if (refundFrom) refundWhere.push(Prisma.sql`rf.updatedAt >= ${refundFrom}`);
-  if (refundTo)   refundWhere.push(Prisma.sql`rf.updatedAt < ${refundTo}`);
-  const refundSql = Prisma.sql`SELECT COALESCE(SUM(rf.requestedAmount),0) AS amount FROM refunds rf WHERE ${Prisma.join(refundWhere, ' AND ')}`;
+  // Refunds sum for the SAME filter scope as the register rows (COMPLETED only).
+  // A refund is linked to a gateway/student/bill only through the transaction it
+  // was issued against, so the summary is scoped via refundScopeFromWhere() — a
+  // register filtered to ALATPay must NOT subtract Paystack refunds, etc. The
+  // date basis stays the refund completion (rf.updatedAt).
+  const refundSql = Prisma.sql`SELECT COALESCE(SUM(rf.requestedAmount),0) AS amount ${refundScopeFromWhere(f)}`;
 
   const rowsSql = Prisma.sql`
     SELECT
@@ -1131,16 +1216,17 @@ export async function paymentGatewayReport(f: ReportFilterCtx) {
       COUNT(DISTINCT CASE WHEN t.status='REVERSED' THEN t.id END)  AS reversedCount,
       ${sumSuccessAmount}                                          AS gross,
       ${sumSuccessGatewayFee}                                      AS gatewayFees,
-      COALESCE((SELECT SUM(rf.requestedAmount) FROM refunds rf
-        INNER JOIN transactions t2 ON t2.id = rf.originalTransactionId
-        WHERE t2.gateway = t.gateway AND rf.status='PAID'
-          AND (${fromInclusive ? Prisma.sql`rf.updatedAt >= ${fromInclusive}` : Prisma.sql`1=1`})
-          AND (${toExclusive   ? Prisma.sql`rf.updatedAt < ${toExclusive}`   : Prisma.sql`1=1`})
-      ),0)                                                        AS refunds,
+      ${correlatedGatewayRefundSql(f)}                             AS refunds,
       ${sumSuccessAmount} - ${sumSuccessGatewayFee}                AS expectedSettlement,
-      COUNT(DISTINCT CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN t.id END) AS reconciledCount,
-      (${sumSuccessAmount} - ${sumSuccessGatewayFee})
-        - COALESCE(SUM(CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 THEN s.actualSettlement ELSE 0 END),0) AS variance
+      -- Settlement-derived (BANK/GATEWAY settlement) coverage — NOT payment
+      -- reconciliation. Count of successful txs whose Settlement row shows the
+      -- money was matched/settled. Reported with settlement terminology.
+      COUNT(DISTINCT CASE WHEN s.status IN ('MATCHED','SETTLED','PARTIALLY_MATCHED') THEN t.id END) AS settledCount,
+      -- Authoritative actual-settlement EVIDENCE. A row only counts when the
+      -- Settlement record carries a real actualSettlement value; a SUCCESS tx with
+      -- NO Settlement row is NOT "₦0 received" — it is UNKNOWN and must fail closed.
+      COUNT(DISTINCT CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 AND s.actualSettlement IS NOT NULL THEN t.id END) AS settlementEvidenceCount,
+      COALESCE(SUM(CASE WHEN t.status='SUCCESS' AND r.id IS NOT NULL AND r.isVoided=0 AND s.actualSettlement IS NOT NULL THEN s.actualSettlement ELSE 0 END),0) AS settledActualAmount
     FROM transactions t
       LEFT  JOIN receipts r   ON r.transactionId = t.id
       LEFT  JOIN settlements s ON s.transactionId = t.id
@@ -1152,19 +1238,42 @@ export async function paymentGatewayReport(f: ReportFilterCtx) {
     ORDER BY gross DESC
   `;
   const rows = await prisma.$queryRaw<any[]>(sql);
-  return (Array.isArray(rows) ? rows : []).map((r: any) => ({
-    provider: String(r.provider ?? ''),
-    successCount: Number(r.successCount ?? 0),
-    failCount: Number(r.failCount ?? 0),
-    pendingCount: Number(r.pendingCount ?? 0),
-    reversedCount: Number(r.reversedCount ?? 0),
-    gross: d(r.gross),
-    gatewayFees: d(r.gatewayFees),
-    refunds: d(r.refunds),
-    expectedSettlement: d(r.expectedSettlement),
-    reconciledCount: Number(r.reconciledCount ?? 0),
-    variance: d(r.variance),
-  }));
+  return (Array.isArray(rows) ? rows : []).map((r: any) => {
+    const successCount = Number(r.successCount ?? 0);
+    const expectedSettlement = d(r.expectedSettlement);
+    const settlementEvidenceCount = Number(r.settlementEvidenceCount ?? 0);
+    // Coverage of authoritative actual-settlement evidence across the successful
+    // payments in this scope: NONE / PARTIAL / FULL.
+    const settlementCoverage: 'NONE' | 'PARTIAL' | 'FULL' =
+      settlementEvidenceCount <= 0 ? 'NONE'
+        : settlementEvidenceCount >= successCount ? 'FULL'
+          : 'PARTIAL';
+    // FAIL CLOSED: no settlement evidence => actual settlement is UNKNOWN (null),
+    // never ₦0. A monetary variance is only published when the WHOLE expected
+    // amount is covered by authoritative settlement evidence; partial coverage is
+    // surfaced via settlementCoverage, never as a complete-period variance.
+    const actualSettlement = settlementEvidenceCount > 0 ? d(r.settledActualAmount) : null;
+    const settlementVariance =
+      settlementCoverage === 'FULL' && actualSettlement != null
+        ? d(expectedSettlement - actualSettlement)
+        : null;
+    return {
+      provider: String(r.provider ?? ''),
+      successCount,
+      failCount: Number(r.failCount ?? 0),
+      pendingCount: Number(r.pendingCount ?? 0),
+      reversedCount: Number(r.reversedCount ?? 0),
+      gross: d(r.gross),
+      gatewayFees: d(r.gatewayFees),
+      refunds: d(r.refunds),
+      expectedSettlement,
+      settledCount: Number(r.settledCount ?? 0),
+      settlementEvidenceCount,
+      settlementCoverage,
+      actualSettlement,
+      settlementVariance,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1871,11 +1980,19 @@ export async function transactionStatusMix(f: ReportFilterCtx) {
   const canonicalKeys = ['SUCCESSFUL','PENDING','FAILED','CANCELLED','REFUNDED','PARTIALLY_REFUNDED'];
   for (const k of canonicalKeys) if (!merged[k]) merged[k] = { count: 0, amount: 0 };
   // Refunds from refund table: PAID = REFUNDED, APPROVED/REQUESTED not yet paid = PARTIALLY_REFUNDED
+  // Refund buckets obey the SAME provider filter as the transaction mix above,
+  // through the refund's original transaction, so a provider-filtered status mix
+  // never folds another gateway's refunds into its REFUNDED / PARTIALLY_REFUNDED
+  // buckets. (R17's transaction mix applies only the provider dimension, so the
+  // refunds are not scoped by student/bill facets it does not itself apply.)
   const refSql = Prisma.sql`
-    SELECT status, COUNT(*) AS cnt, COALESCE(SUM(requestedAmount),0) AS amount FROM refunds
-    WHERE (${r17From ? Prisma.sql`createdAt >= ${r17From}` : Prisma.sql`1=1`})
-      AND (${r17To   ? Prisma.sql`createdAt < ${r17To}`   : Prisma.sql`1=1`})
-    GROUP BY status
+    SELECT rf.status, COUNT(*) AS cnt, COALESCE(SUM(rf.requestedAmount),0) AS amount
+    FROM refunds rf
+    ${f.provider ? Prisma.sql`INNER JOIN transactions t2 ON t2.id = rf.originalTransactionId` : Prisma.sql``}
+    WHERE (${r17From ? Prisma.sql`rf.createdAt >= ${r17From}` : Prisma.sql`1=1`})
+      AND (${r17To   ? Prisma.sql`rf.createdAt < ${r17To}`   : Prisma.sql`1=1`})
+      ${f.provider ? Prisma.sql`AND t2.gateway = ${f.provider}` : Prisma.sql``}
+    GROUP BY rf.status
   `;
   const refRows = await prisma.$queryRaw<any[]>(refSql);
   for (const r of Array.isArray(refRows) ? refRows : []) {
@@ -1981,12 +2098,16 @@ export async function comparativeReports(range: 'D' | 'M' | 'S', f: ReportFilter
     if (resolvedCategoryId) conds.push(Prisma.sql`fe.categoryId = ${resolvedCategoryId}`);
     if (resolvedBillId) conds.push(Prisma.sql`i.feeId = ${resolvedBillId}`);
     const w = Prisma.join(conds, ' AND ');
+    // Refunds are bounded by the bucket's Lagos half-open range [from, to) and
+    // scoped by the same filters as the bucket's collections (via the refund's
+    // original transaction). A refund exactly at `to` belongs to the NEXT bucket
+    // only — never double-counted here.
+    const refundSub = Prisma.sql`(SELECT SUM(rf.requestedAmount) ${refundScopeFromWhere(f, { fromInclusive: from, toExclusive: to })})`;
     const s = await prisma.$queryRaw<Array<{txCount:any;uniquePayers:any;gross:any;refunds:any;net:any}>>(Prisma.sql`
       SELECT COUNT(DISTINCT t.id) AS txCount, COUNT(DISTINCT t.userId) AS uniquePayers,
              COALESCE(SUM(r.paidAmount),0) AS gross,
-             COALESCE((SELECT SUM(requestedAmount) FROM refunds WHERE status='PAID' AND updatedAt>=${from} AND updatedAt<=${to}),0) AS refunds,
-             COALESCE(SUM(r.paidAmount),0)
-             - COALESCE((SELECT SUM(requestedAmount) FROM refunds WHERE status='PAID' AND updatedAt>=${from} AND updatedAt<=${to}),0) AS net
+             COALESCE(${refundSub},0) AS refunds,
+             COALESCE(SUM(r.paidAmount),0) - COALESCE(${refundSub},0) AS net
       FROM transactions t
         INNER JOIN receipts r ON r.transactionId=t.id
         INNER JOIN users u     ON u.id = t.userId

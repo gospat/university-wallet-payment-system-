@@ -170,8 +170,10 @@ export const EXPORT_COLUMN_CATALOG: Record<ReportColumnsCatalogKey, Column[]> = 
     { key: 'gatewayFees', header: 'Gateway Fees', isMoney: true },
     { key: 'refunds', header: 'Refunds', isMoney: true },
     { key: 'expectedSettlement', header: 'Expected Settlement', isMoney: true },
-    { key: 'reconciledCount', header: 'Reconciled Txs', isNum: true },
-    { key: 'variance', header: 'Variance', isMoney: true },
+    { key: 'settledCount', header: 'Settled Txs', isNum: true },
+    { key: 'settlementCoverage', header: 'Settlement Coverage' },
+    { key: 'actualSettlement', header: 'Actual Settlement', isMoney: true },
+    { key: 'settlementVariance', header: 'Settlement Variance', isMoney: true },
   ],
   settlement: [
     { key: 'transactionReference', header: 'Tx Ref', isMonospace: true },
@@ -184,7 +186,7 @@ export const EXPORT_COLUMN_CATALOG: Record<ReportColumnsCatalogKey, Column[]> = 
     { key: 'settlementRef', header: 'Settlement Ref', isMonospace: true },
     { key: 'actualSettlement', header: 'Actual Settlement', isMoney: true },
     { key: 'variance', header: 'Variance', isMoney: true },
-    { key: 'reconciliationStatus', header: 'Recon Status' },
+    { key: 'reconciliationStatus', header: 'Settlement Status' },
   ],
   exceptions: [
     { key: 'exceptionKind', header: 'Exception Code' },

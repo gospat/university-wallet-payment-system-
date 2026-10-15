@@ -290,7 +290,7 @@ export const TXN_ALLOWED_SORTS: Record<string, string[]> = {
   'general-ledger': ['transactionDate', 'entryType', 'account', 'debit', 'credit', 'transactionId'],
   'receipt-register': ['receiptNumber', 'date', 'studentName', 'matricNumber', 'billName', 'baseAmount', 'totalAmount', 'provider'],
   'transaction-status': ['status', 'count', 'amount', 'sharePct'],
-  'payment-gateway': ['provider', 'successCount', 'failCount', 'pendingCount', 'gross', 'gatewayFees', 'expectedSettlement', 'variance'],
+  'payment-gateway': ['provider', 'successCount', 'failCount', 'pendingCount', 'gross', 'gatewayFees', 'expectedSettlement', 'settlementVariance'],
   'settlement': ['transactionReference', 'provider', 'paymentDate', 'paymentAmount', 'expectedSettlement', 'settlementDate', 'actualSettlement', 'variance', 'reconciliationStatus'],
   'refunds': ['refundDate', 'studentName', 'matricNumber', 'originalAmount', 'refundAmount', 'provider', 'status'],
   'comparative': ['bucket', 'period', 'txCount', 'uniquePayers', 'gross', 'net', 'deltaNet', 'deltaNetPct'],
@@ -318,8 +318,8 @@ export const FACET_LABELS: Record<FacetName, string> = {
   BY_GATEWAY: 'Gateway Fee Breakdown',
   BY_REFUND: 'Refunded Payments',
   BY_NET: 'Net Revenue View',
-  RECONCILED: 'Reconciled Transactions',
-  UNRECONCILED: 'Unreconciled Transactions',
+  RECONCILED: 'Settled Transactions (Settlement Matched)',
+  UNRECONCILED: 'Pending Settlement Transactions',
 };
 
 export function applyFacetToFilters(facet: string, base: any = {}): any {

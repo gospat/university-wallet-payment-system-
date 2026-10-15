@@ -11,11 +11,18 @@
 //   • M      Revenue-by-Bill totals do not multiply because of joins
 //   • N/O    Provider filters return only that provider's financial collections
 //   • P      Screen and export totals agree for the same filters
+//   • Q/R/S  Task F — refund scoping (monthly range, comparative boundary,
+//            payment-register provider/student scope)
+//   • T-*    Task F — R10 settlement evidence fails closed (NONE/PARTIAL/FULL)
+//   • U      Task F — R10 gateway refunds honour the report filter scope
 //
-// Pure-function tests always run; DB-backed tests are guarded by dbAvailable.
+// Pure-function tests always run. DB-backed tests execute against the
+// development/test DB and are reported as SKIPPED (never silently passed) when
+// no database is reachable.
 // All fixtures use a synthetic year (2001) so they never collide with real data.
 // =============================================================================
 
+import { execFileSync } from 'child_process';
 import prisma from '../config/database';
 import { Role, TransactionType, TransactionStatus, PaymentGateway, Prisma } from '@prisma/client';
 import {
@@ -24,6 +31,8 @@ import {
   lagosDayBounds,
   buildReconciliationStatusFilter,
   dailyCollections,
+  monthlyCollections,
+  comparativeReports,
   paymentGatewayReport,
   settlementReport,
   revenueByBill,
@@ -32,6 +41,32 @@ import {
 } from '../services/reports/aggregates';
 import { EXPORT_COLUMN_CATALOG } from '../services/reportExport/catalog';
 import { fetchReportDataForExport } from '../services/reportExport';
+
+// ---------------------------------------------------------------------------
+// DB availability probe — resolved SYNCHRONOUSLY at collection time so the
+// DB-backed specs can be registered with `it.skip` when no database is
+// reachable. A test that early-returns inside its body is recorded by Jest as
+// PASSED, which would falsely imply its assertions executed. Skipping at
+// registration makes Jest report them as SKIPPED instead.
+// ---------------------------------------------------------------------------
+function probeDbSync(): boolean {
+  if (!process.env.DATABASE_URL) return false;
+  const script =
+    "const {PrismaClient}=require('@prisma/client');" +
+    "const p=new PrismaClient();" +
+    "p.$queryRawUnsafe('SELECT 1').then(()=>p.$disconnect())" +
+    ".then(()=>process.exit(0)).catch(()=>process.exit(1));";
+  try {
+    execFileSync(process.execPath, ['-e', script], { stdio: 'ignore', env: process.env, timeout: 20000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const DB_AVAILABLE = probeDbSync();
+// DB-backed specs: executed when a database is reachable, otherwise reported
+// explicitly as SKIPPED (never silently returned as passed).
+const dbIt: jest.It = DB_AVAILABLE ? it : it.skip;
 
 // ---------------------------------------------------------------------------
 // A/B/C — Lagos business-date semantics (pure).
@@ -134,7 +169,7 @@ describe('Reports — reconciliationStatus filter accepts a single enum OR an ar
 describe('Reports — backend/UI/export column contracts agree', () => {
   const UI_COLUMNS: Record<string, string[]> = {
     daily: ['date', 'txCount', 'studentCount', 'gross', 'convenienceFee', 'serviceCharge', 'gatewayFee', 'refunds', 'net'],
-    gateway: ['provider', 'successCount', 'failCount', 'pendingCount', 'gross', 'gatewayFees', 'expectedSettlement'],
+    gateway: ['provider', 'successCount', 'failCount', 'pendingCount', 'gross', 'gatewayFees', 'expectedSettlement', 'settledCount', 'settlementCoverage', 'actualSettlement', 'settlementVariance'],
     settlement: ['transactionReference', 'provider', 'paymentDate', 'paymentAmount', 'gatewayFee', 'expectedSettlement', 'settlementDate', 'settlementRef', 'actualSettlement', 'variance'],
     payment_register: ['createdAt', 'studentName', 'matricNumber', 'provider', 'billName', 'baseAmount', 'convenienceFee', 'gatewayFee', 'totalAmount', 'status', 'receiptNumber'],
   };
@@ -174,12 +209,14 @@ describe('Reports — backend/UI/export column contracts agree', () => {
 // ---------------------------------------------------------------------------
 describe('Reports — DB-backed financial semantics', () => {
   let studentId: number | null = null;
-  let dbAvailable = false;
 
   const txIds: number[] = [];
   const receiptIds: number[] = [];
   const invoiceIds: number[] = [];
   const feeIds: number[] = [];
+  const refundIds: number[] = [];
+  const settlementIds: number[] = [];
+  const extraUserIds: number[] = [];
 
   // Synthetic days (year 2001) — effectively impossible to collide with real data.
   const DAY_SUCCESS = '2001-02-03';
@@ -187,39 +224,53 @@ describe('Reports — DB-backed financial semantics', () => {
   const DAY_ATTEMPTS = '2001-02-07';
   const DAY_SETTLEMENT = '2001-02-09';
   const DAY_REVENUE = '2001-02-11';
+  const DAY_REGISTER = '2001-02-13';
+  const DAY_GW_NONE = '2001-02-15';
+  const DAY_GW_FULL = '2001-02-17';
+  const DAY_GW_PARTIAL = '2001-02-19';
+  const DAY_GW_SCOPE = '2001-02-21';
 
   function dayCtx(day: string): ReportFilterCtx {
     return { dateFrom: new Date(`${day}T00:00:00.000Z`), dateTo: new Date(`${day}T00:00:00.000Z`) };
   }
 
   beforeAll(async () => {
-    try {
-      let s = await prisma.user.findFirst({ where: { role: Role.STUDENT }, select: { id: true }, orderBy: { id: 'asc' } });
-      if (!s) {
-        s = await prisma.user.create({
-          data: {
-            email: `report-foundation-${Date.now()}@university.edu.ng`,
-            password: '$2b$10$testpasswordhash',
-            firstName: 'Report',
-            lastName: 'Foundation',
-            role: Role.STUDENT,
-            matricNumber: `RF-${Date.now()}`,
-          },
-          select: { id: true },
-        });
-      }
-      studentId = s.id;
-      dbAvailable = true;
-    } catch {
-      dbAvailable = false;
-    }
+    if (!DB_AVAILABLE) return;
+    // A DEDICATED synthetic student, so these specs never share scope with real
+    // students (critical for the comparative/register refund isolation specs).
+    const s = await prisma.user.create({
+      data: {
+        email: `report-foundation-${Date.now()}@university.edu.ng`,
+        password: '$2b$10$testpasswordhash',
+        firstName: 'Report',
+        lastName: 'Foundation',
+        role: Role.STUDENT,
+        matricNumber: `RF-${Date.now()}`,
+      },
+      select: { id: true },
+    });
+    studentId = s.id;
   });
 
   afterEach(async () => {
+    if (refundIds.length) { await prisma.refund.deleteMany({ where: { id: { in: refundIds } } }); refundIds.length = 0; }
+    if (settlementIds.length) { await prisma.settlement.deleteMany({ where: { id: { in: settlementIds } } }); settlementIds.length = 0; }
     if (receiptIds.length) { await prisma.receipt.deleteMany({ where: { id: { in: receiptIds } } }); receiptIds.length = 0; }
     if (txIds.length) { await prisma.transaction.deleteMany({ where: { id: { in: txIds } } }); txIds.length = 0; }
     if (invoiceIds.length) { await prisma.invoice.deleteMany({ where: { id: { in: invoiceIds } } }); invoiceIds.length = 0; }
     if (feeIds.length) { await prisma.fee.deleteMany({ where: { id: { in: feeIds } } }); feeIds.length = 0; }
+    if (extraUserIds.length) { await prisma.user.deleteMany({ where: { id: { in: extraUserIds } } }); extraUserIds.length = 0; }
+  });
+
+  afterAll(async () => {
+    if (!DB_AVAILABLE || !studentId) return;
+    // Leftovers are already cleared per-test; delete the dedicated student.
+    await prisma.receipt.deleteMany({ where: { studentId } });
+    await prisma.refund.deleteMany({ where: { requestedById: studentId } });
+    await prisma.settlement.deleteMany({ where: { transaction: { userId: studentId } } });
+    await prisma.transaction.deleteMany({ where: { userId: studentId } });
+    await prisma.invoice.deleteMany({ where: { studentId } });
+    await prisma.user.delete({ where: { id: studentId } });
   });
 
   let seq = 0;
@@ -233,13 +284,15 @@ describe('Reports — DB-backed financial semantics', () => {
     gatewayFee?: number;
     feeId?: number;
     invoiceId?: number;
+    userId?: number;
   }) {
     seq += 1;
     const ref = `RPT-FND-${Date.now()}-${seq}`;
+    const owner = opts.userId ?? studentId!;
     const tx = await prisma.transaction.create({
       data: {
         reference: ref,
-        userId: studentId!,
+        userId: owner,
         gateway: opts.gateway,
         amount: opts.amount,
         type: TransactionType.FEE_PAYMENT,
@@ -254,7 +307,7 @@ describe('Reports — DB-backed financial semantics', () => {
         receiptNumber: `RCPT-${ref}`,
         verificationToken: `vt-${ref}`,
         transactionId: tx.id,
-        studentId: studentId!,
+        studentId: owner,
         invoiceId: opts.invoiceId ?? null,
         paidAmount: opts.amount,
         convenienceFee: opts.convenienceFee ?? 0,
@@ -292,8 +345,73 @@ describe('Reports — DB-backed financial semantics', () => {
     return tx;
   }
 
-  it('D. SUCCESS collection is dated by Receipt.paidAt, not Transaction.createdAt', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  // Create an extra synthetic student (isolated from the dedicated one) for
+  // cross-student scope isolation tests. Cleaned up in afterEach.
+  async function makeStudent() {
+    seq += 1;
+    const s = await prisma.user.create({
+      data: {
+        email: `report-extra-${Date.now()}-${seq}@university.edu.ng`,
+        password: '$2b$10$testpasswordhash',
+        firstName: 'Extra',
+        lastName: `Student${seq}`,
+        role: Role.STUDENT,
+        matricNumber: `RFX-${Date.now()}-${seq}`,
+      },
+      select: { id: true },
+    });
+    extraUserIds.push(s.id);
+    return s.id;
+  }
+
+  // A PAID refund against an original transaction, with its COMPLETION date
+  // pinned deterministically. Refund.updatedAt is @updatedAt (Prisma-managed),
+  // so it must be set via raw SQL to model "refund completed at <date>".
+  async function makePaidRefund(originalTransactionId: number, amount: number, completedAt: Date, requestedById?: number) {
+    seq += 1;
+    const refund = await prisma.refund.create({
+      data: {
+        refundNumber: `RFD-RPT-${Date.now()}-${seq}`,
+        originalTransactionId,
+        requestedAmount: amount,
+        reason: 'reports-foundation test refund',
+        status: 'PAID',
+        requestedById: requestedById ?? studentId!,
+        paidAt: completedAt,
+      },
+    });
+    refundIds.push(refund.id);
+    await prisma.$executeRaw`UPDATE refunds SET updatedAt = ${completedAt} WHERE id = ${refund.id}`;
+    return refund;
+  }
+
+  // An authoritative Settlement record for a successful transaction.
+  async function makeSettlement(
+    transactionId: number,
+    gateway: PaymentGateway,
+    paymentAmount: number,
+    actualSettlement: number | null,
+    status: 'PENDING_SETTLEMENT' | 'SETTLED' | 'MATCHED' | 'PARTIALLY_MATCHED' = 'SETTLED',
+  ) {
+    seq += 1;
+    const s = await prisma.settlement.create({
+      data: {
+        settlementRef: `SET-RPT-${Date.now()}-${seq}`,
+        transactionId,
+        gateway,
+        paymentAmount,
+        gatewayFee: 0,
+        expectedSettlement: paymentAmount,
+        actualSettlement,
+        paymentDate: new Date(),
+        status,
+      },
+    });
+    settlementIds.push(s.id);
+    return s;
+  }
+
+  dbIt('D. SUCCESS collection is dated by Receipt.paidAt, not Transaction.createdAt', async () => {
     // created long before the Lagos day; receipt.paidAt inside the day.
     await makeSuccessTx({
       gateway: PaymentGateway.PAYSTACK,
@@ -310,8 +428,7 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(Number(dayRow.gross)).toBe(100);
   });
 
-  it('C(DB). A receipt paid exactly at toExclusive is EXCLUDED from the selected day', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('C(DB). A receipt paid exactly at toExclusive is EXCLUDED from the selected day', async () => {
     const ctx = dayCtx(DAY_BOUNDARY_OUT);
     const { toExclusive } = reportDateRange(ctx);
     await makeSuccessTx({
@@ -324,8 +441,7 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(total).toBe(0); // the boundary payment must not be counted
   });
 
-  it('E/F. R10 counts FAILED/PENDING attempts even when a SUCCESS receipt exists in range', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('E/F. R10 counts FAILED/PENDING attempts even when a SUCCESS receipt exists in range', async () => {
     const ctx = dayCtx(DAY_ATTEMPTS);
     await makeSuccessTx({
       gateway: PaymentGateway.PAYSTACK,
@@ -347,8 +463,7 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(ps.expectedSettlement).toBeCloseTo(ps.gross - ps.gatewayFees, 2);
   });
 
-  it('G/N/O. Provider filtering isolates each gateway and returns only its financial collections', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('G/N/O. Provider filtering isolates each gateway and returns only its financial collections', async () => {
     const ctx = dayCtx(DAY_SUCCESS);
     await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, paidAt: new Date(`${DAY_SUCCESS}T09:00:00.000Z`) });
     await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 200, paidAt: new Date(`${DAY_SUCCESS}T09:30:00.000Z`) });
@@ -364,8 +479,7 @@ describe('Reports — DB-backed financial semantics', () => {
     }
   });
 
-  it('K. Settlement with no Settlement row yields actualSettlement=null, variance=null (no fake variance)', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('K. Settlement with no Settlement row yields actualSettlement=null, variance=null (no fake variance)', async () => {
     const ctx = dayCtx(DAY_SETTLEMENT);
     const ref = await makeSuccessTx({
       gateway: PaymentGateway.PAYSTACK,
@@ -382,12 +496,12 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(row.reconciliationStatus).toBe('PENDING_SETTLEMENT');
   });
 
-  it('M. Revenue-by-Bill collected total does not multiply because of invoice/payment joins', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('M. Revenue-by-Bill collected total does not multiply because of invoice/payment joins', async () => {
     // Derive the required Fee FK fields from an existing fee so this fixture is
     // valid against the real schema (Fee requires categoryId/academicSession/createdById).
     const sample = await prisma.fee.findFirst({ select: { categoryId: true, createdById: true, academicSession: true } });
-    if (!sample) { console.warn('No fee row to derive category — skipping'); return; }
+    // Fail LOUDLY (never a silent pass) if the seeded environment is missing fees.
+    if (!sample) throw new Error('DB-backed test requires at least one seeded fee row');
 
     const suffix = `${Date.now()}`;
     const fee = await prisma.fee.create({
@@ -427,8 +541,7 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(row.expectedAmount).toBe(200);
   });
 
-  it('L. Payment Register exposes the documented field set for each successful payment', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('L. Payment Register exposes the documented field set for each successful payment', async () => {
     const ctx = dayCtx(DAY_SUCCESS);
     await makeSuccessTx({
       gateway: PaymentGateway.PAYSTACK,
@@ -446,8 +559,7 @@ describe('Reports — DB-backed financial semantics', () => {
     }
   });
 
-  it('P. Screen and export produce identical Daily Collections rows for the same filters', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('P. Screen and export produce identical Daily Collections rows for the same filters', async () => {
     const ctx = dayCtx(DAY_SUCCESS);
     await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, paidAt: new Date(`${DAY_SUCCESS}T08:00:00.000Z`) });
 
@@ -457,8 +569,7 @@ describe('Reports — DB-backed financial semantics', () => {
     expect(exported.columnsKey).toBe('daily');
   });
 
-  it('P2. Screen and export produce identical Gateway report rows for the same filters', async () => {
-    if (!dbAvailable) { console.warn('DB unavailable — skipping'); return; }
+  dbIt('P2. Screen and export produce identical Gateway report rows for the same filters', async () => {
     const ctx = dayCtx(DAY_ATTEMPTS);
     await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${DAY_ATTEMPTS}T08:00:00.000Z`) });
     await makeAttemptTx({ gateway: PaymentGateway.ALATPAY, amount: 40, status: TransactionStatus.FAILED, createdAt: new Date(`${DAY_ATTEMPTS}T09:00:00.000Z`) });
@@ -467,5 +578,153 @@ describe('Reports — DB-backed financial semantics', () => {
     const exported = await fetchReportDataForExport('PAYMENT_GATEWAY', ctx);
     expect(exported.rows).toEqual(screen);
     expect(exported.columnsKey).toBe('gateway');
+  });
+
+  // =========================================================================
+  // Task F follow-up regressions.
+  // =========================================================================
+
+  dbIt('Q. Monthly refunds are limited to the selected Lagos date range (same-month refund outside range excluded)', async () => {
+    const day = '2001-04-15';
+    const ctx = dayCtx(day);
+    const { tx } = await makeSuccessTx({
+      gateway: PaymentGateway.ALATPAY,
+      amount: 100,
+      paidAt: new Date(`${day}T10:00:00.000Z`),
+    });
+    // Refund completed INSIDE the selected Lagos day (15 Apr).
+    await makePaidRefund(tx.id, 10, new Date(`${day}T12:00:00.000Z`));
+    // Refund completed LATER in the SAME calendar month but OUTSIDE the range.
+    await makePaidRefund(tx.id, 50, new Date('2001-04-25T12:00:00.000Z'));
+
+    const rows = await monthlyCollections(ctx);
+    const april = rows.find((r: any) => r.month === '2001-04')!;
+    expect(april).toBeTruthy();
+    expect(april.gross).toBe(100);
+    // Only the in-range refund (10) counts — the 50 from 25 Apr must be excluded
+    // even though it falls in the same calendar month.
+    expect(april.refunds).toBe(10);
+  });
+
+  dbIt('R. Comparative refunds: a refund exactly at toExclusive is excluded from the bucket (no double count)', async () => {
+    // Derive today's Lagos bucket with the SAME helpers the implementation uses.
+    const todayLagos = lagosDayOf(new Date());
+    const { fromInclusive: aFrom, toExclusive: aTo } = lagosDayBounds(todayLagos, todayLagos);
+    const insidePaidAt = new Date(aFrom.getTime() + 3 * 3600 * 1000);
+    const { tx } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 100, paidAt: insidePaidAt });
+    // In-bucket refund.
+    await makePaidRefund(tx.id, 10, new Date(aFrom.getTime() + 4 * 3600 * 1000));
+    // Refund EXACTLY at the exclusive upper bound (start of the NEXT Lagos day).
+    await makePaidRefund(tx.id, 50, aTo);
+
+    const cmp = await comparativeReports('D', { studentId: studentId! });
+    // The boundary refund belongs to the FOLLOWING period only, never this one.
+    expect(cmp.rangeA.data.refunds).toBe(10);
+    // Yesterday's bucket's upper bound is today's lower bound, so the boundary
+    // instant is not in it either — it is not double-counted anywhere.
+    expect(cmp.rangeB.data.refunds).toBe(0);
+  });
+
+  dbIt('S. Payment Register refund summary respects provider & student scope (no cross-scope subtraction)', async () => {
+    const studentB = await makeStudent();
+    const day = DAY_REGISTER;
+    const { tx: txAAlat } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 1000, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    const { tx: txAPs }   = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 500, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    const { tx: txBAlat } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 300, paidAt: new Date(`${day}T12:00:00.000Z`), userId: studentB });
+
+    await makePaidRefund(txAAlat.id, 100, new Date(`${day}T13:00:00.000Z`));
+    await makePaidRefund(txAPs.id,   200, new Date(`${day}T13:30:00.000Z`));
+    await makePaidRefund(txBAlat.id,  50, new Date(`${day}T14:00:00.000Z`), studentB);
+
+    const base = dayCtx(day);
+    // ALATPay register must NOT subtract the Paystack refund (200).
+    const alat = await paymentRegister({ ...base, provider: PaymentGateway.ALATPAY, page: 1, pageSize: 50 });
+    expect(alat.summary.refunds).toBe(150); // 100 (A) + 50 (B); Paystack 200 excluded
+    // Paystack register must NOT subtract the ALATPay refunds (100 + 50).
+    const ps = await paymentRegister({ ...base, provider: PaymentGateway.PAYSTACK, page: 1, pageSize: 50 });
+    expect(ps.summary.refunds).toBe(200);
+    // Student A register must NOT subtract student B's refund (50).
+    const stuA = await paymentRegister({ ...base, studentId: studentId!, page: 1, pageSize: 50 });
+    expect(stuA.summary.refunds).toBe(300); // 100 + 200
+    const stuB = await paymentRegister({ ...base, studentId: studentB, page: 1, pageSize: 50 });
+    expect(stuB.summary.refunds).toBe(50);
+    // Combined scope: ALATPay + student A.
+    const alatA = await paymentRegister({ ...base, provider: PaymentGateway.ALATPAY, studentId: studentId!, page: 1, pageSize: 50 });
+    expect(alatA.summary.refunds).toBe(100);
+  });
+
+  dbIt('T-A. R10 with NO settlement evidence: actualSettlement=null, settlementVariance=null, coverage NONE', async () => {
+    const ctx = dayCtx(DAY_GW_NONE);
+    await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${DAY_GW_NONE}T10:00:00.000Z`) });
+
+    const rows = await paymentGatewayReport(ctx);
+    const alat = rows.find((r: any) => r.provider === 'ALATPAY')!;
+    expect(alat).toBeTruthy();
+    expect(alat.expectedSettlement).toBeCloseTo(100, 2);
+    expect(alat.settlementCoverage).toBe('NONE');
+    // Unknown settlement must NEVER be reported as ₦0 received.
+    expect(alat.actualSettlement).toBeNull();
+    expect(alat.settlementVariance).toBeNull();
+  });
+
+  dbIt('T-B. R10 with FULL settlement evidence: actual total and variance are computed', async () => {
+    const ctx = dayCtx(DAY_GW_FULL);
+    const { tx: txA } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${DAY_GW_FULL}T10:00:00.000Z`) });
+    await makeSettlement(txA.id, PaymentGateway.ALATPAY, 100, 100, 'SETTLED');
+    const { tx: txP } = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 200, paidAt: new Date(`${DAY_GW_FULL}T11:00:00.000Z`) });
+    await makeSettlement(txP.id, PaymentGateway.PAYSTACK, 200, 190, 'MATCHED');
+
+    const rows = await paymentGatewayReport(ctx);
+    const alat = rows.find((r: any) => r.provider === 'ALATPAY')!;
+    const ps = rows.find((r: any) => r.provider === 'PAYSTACK')!;
+    expect(alat.settlementCoverage).toBe('FULL');
+    expect(alat.actualSettlement).toBe(100);
+    expect(alat.settlementVariance).toBe(0);
+    expect(ps.settlementCoverage).toBe('FULL');
+    expect(ps.actualSettlement).toBe(190);
+    expect(ps.settlementVariance).toBe(10);
+  });
+
+  dbIt('T-C. R10 with PARTIAL settlement evidence: coverage PARTIAL and no misleading full-period variance', async () => {
+    const ctx = dayCtx(DAY_GW_PARTIAL);
+    const { tx: settled } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 200, paidAt: new Date(`${DAY_GW_PARTIAL}T10:00:00.000Z`) });
+    await makeSettlement(settled.id, PaymentGateway.ALATPAY, 200, 195, 'SETTLED');
+    // A second successful payment with NO settlement evidence.
+    await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 100, paidAt: new Date(`${DAY_GW_PARTIAL}T11:00:00.000Z`) });
+
+    const rows = await paymentGatewayReport(ctx);
+    const alat = rows.find((r: any) => r.provider === 'ALATPAY')!;
+    expect(alat.successCount).toBe(2);
+    expect(alat.settlementEvidenceCount).toBe(1);
+    expect(alat.settlementCoverage).toBe('PARTIAL');
+    expect(alat.actualSettlement).toBe(195);    // only the available evidence
+    // Must NOT compare the FULL expected amount against partial actual evidence.
+    expect(alat.settlementVariance).toBeNull();
+  });
+
+  dbIt('U. R10 gateway refund summary is scoped to the report filters (no cross-scope refund subtraction)', async () => {
+    const studentB = await makeStudent();
+    const day = DAY_GW_SCOPE;
+    // Student A: ALATPAY success + refund (100) and PAYSTACK success + refund (40).
+    const { tx: txAAlat } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 1000, paidAt: new Date(`${day}T10:00:00.000Z`) });
+    const { tx: txAPs }   = await makeSuccessTx({ gateway: PaymentGateway.PAYSTACK, amount: 500, paidAt: new Date(`${day}T11:00:00.000Z`) });
+    // Student B: ALATPAY refund (60) — must never be subtracted from A's rows.
+    const { tx: txBAlat } = await makeSuccessTx({ gateway: PaymentGateway.ALATPAY, amount: 300, paidAt: new Date(`${day}T12:00:00.000Z`), userId: studentB });
+    await makePaidRefund(txAAlat.id, 100, new Date(`${day}T13:00:00.000Z`));
+    await makePaidRefund(txAPs.id,    40, new Date(`${day}T13:30:00.000Z`));
+    await makePaidRefund(txBAlat.id,  60, new Date(`${day}T14:00:00.000Z`), studentB);
+
+    const base = dayCtx(day);
+    // Whole scope: ALATPAY = 100 (A) + 60 (B); PAYSTACK = 40 (A).
+    const all = await paymentGatewayReport(base);
+    expect(all.find((r: any) => r.provider === 'ALATPAY')!.refunds).toBe(160);
+    expect(all.find((r: any) => r.provider === 'PAYSTACK')!.refunds).toBe(40);
+    // Student A only: the ALATPAY row must exclude student B's 60.
+    const stuA = await paymentGatewayReport({ ...base, studentId: studentId! });
+    expect(stuA.find((r: any) => r.provider === 'ALATPAY')!.refunds).toBe(100);
+    expect(stuA.find((r: any) => r.provider === 'PAYSTACK')!.refunds).toBe(40);
+    // Provider filter: the PAYSTACK row must never subtract the ALATPAY refunds.
+    const ps = await paymentGatewayReport({ ...base, provider: PaymentGateway.PAYSTACK });
+    expect(ps.find((r: any) => r.provider === 'PAYSTACK')!.refunds).toBe(40);
   });
 });

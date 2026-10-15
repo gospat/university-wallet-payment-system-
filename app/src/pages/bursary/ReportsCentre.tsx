@@ -235,34 +235,28 @@ const DashboardCardsDef: DashboardCardDef[] = [
     microcopy: 'Bells collections − refunds − charges',
   },
   {
-    key: 'reconciledAmount',
-    title: 'Reconciled Amount',
+    key: 'settledAmount',
+    title: 'Settled Amount',
     icon: Landmark,
     accent: 'text-emerald-800',
     bg: 'bg-emerald-50 border-emerald-200',
     permission: 'REPORTS_VIEW_RECONCILIATION',
     facetName: 'RECONCILED',
-    accessor: (c) => c?.reconciledAmount ?? c?.totalCollected,
+    accessor: (c) => c?.settledAmount,
     isMoney: true,
-    microcopy: 'Matched + settled in bank',
+    microcopy: 'Settlement matched / confirmed',
   },
   {
-    key: 'unreconciledAmount',
-    title: 'Unreconciled Amount',
+    key: 'pendingSettlementAmount',
+    title: 'Pending Settlement',
     icon: AlertTriangle,
     accent: 'text-amber-800',
     bg: 'bg-amber-50 border-amber-200',
     permission: 'REPORTS_VIEW_RECONCILIATION',
     facetName: 'UNRECONCILED',
-    accessor: (c) => {
-      const total = Number(c?.totalCollected ?? 0);
-      const recon = Number(c?.reconciledAmount ?? 0);
-      if (!total) return c?.unreconciledAmount;
-      const diff = total - recon;
-      return c?.unreconciledAmount ?? (diff > 0 ? diff : 0);
-    },
+    accessor: (c) => c?.pendingSettlementAmount,
     isMoney: true,
-    microcopy: 'Awaiting settlement / variance',
+    microcopy: 'Awaiting authoritative settlement',
   },
 ];
 

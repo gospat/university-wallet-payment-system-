@@ -147,7 +147,10 @@ const COLS: any = {
     { key: 'gross', header: 'Bells Success', isMoney: true },
     { key: 'gatewayFees', header: 'GW Fees', isMoney: true },
     { key: 'expectedSettlement', header: 'Exp. Sett.', isMoney: true },
-    { key: 'variance', header: 'Variance', isMoney: true },
+    { key: 'settledCount', header: 'Settled Txs', isNum: true },
+    { key: 'settlementCoverage', header: 'Sett. Coverage' },
+    { key: 'actualSettlement', header: 'Actual Sett.', isMoney: true },
+    { key: 'settlementVariance', header: 'Sett. Variance', isMoney: true },
   ],
   settlement: [
     { key: 'transactionReference', header: 'Tx Ref', isMonospace: true },
@@ -160,7 +163,7 @@ const COLS: any = {
     { key: 'settlementRef', header: 'Sett. Ref', isMonospace: true },
     { key: 'actualSettlement', header: 'Actual', isMoney: true },
     { key: 'variance', header: 'Variance', isMoney: true },
-    { key: 'reconciliationStatus', header: 'Recon Status' },
+    { key: 'reconciliationStatus', header: 'Sett. Status' },
   ],
   refunds: [
     { key: 'refundDate', header: 'Date' },
@@ -259,7 +262,7 @@ const COLS: any = {
     { key: 'actualSettlement', header: 'Actual', isMoney: true },
     { key: 'variance', header: 'Variance', isMoney: true },
     { key: 'variancePct', header: 'Var %', isNum: true },
-    { key: 'reconciliationStatus', header: 'Recon Status' },
+    { key: 'reconciliationStatus', header: 'Sett. Status' },
   ],
 };
 
