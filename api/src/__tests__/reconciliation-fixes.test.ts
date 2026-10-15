@@ -119,7 +119,7 @@ describe('Reconciliation Engine Corrections', () => {
       .mockResolvedValue({ rows: [], available: false });
     alatByIdSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
-      .mockResolvedValue({ row: null, available: false });
+      .mockResolvedValue({ row: null, available: false, notFound: false });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
       .mockResolvedValue({ rows: [], available: true });
@@ -197,7 +197,7 @@ describe('Reconciliation Engine Corrections', () => {
       .mockResolvedValue({ rows: [], available: false });
     alatByIdSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
-      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true });
+      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true, notFound: false });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
       .mockResolvedValue({ rows: [], available: true });
@@ -232,7 +232,7 @@ describe('Reconciliation Engine Corrections', () => {
       .mockResolvedValue({ rows: [], available: false });
     alatByIdSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
-      .mockResolvedValue({ row: null, available: false });
+      .mockResolvedValue({ row: null, available: false, notFound: false });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
       .mockResolvedValue({ rows: [], available: true });
@@ -660,7 +660,7 @@ describe('Reconciliation Engine Corrections', () => {
       .mockResolvedValue({ rows: [], available: false });
     alatByIdSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
-      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true });
+      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true, notFound: false });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
       .mockResolvedValue({ rows: [], available: true });
@@ -740,9 +740,9 @@ describe('Reconciliation Engine Corrections', () => {
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
       .mockImplementation(({ providerId }: any) => {
         if (providerId === UUID_A) {
-          return Promise.resolve({ row: alatRow(UUID_A, 50000, 'SUCCESS'), available: true });
+          return Promise.resolve({ row: alatRow(UUID_A, 50000, 'SUCCESS'), available: true, notFound: false });
         }
-        return Promise.resolve({ row: null, available: false });
+        return Promise.resolve({ row: null, available: false, notFound: false });
       });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
@@ -780,7 +780,7 @@ describe('Reconciliation Engine Corrections', () => {
       .mockResolvedValue({ rows: [], available: false });
     alatByIdSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
-      .mockResolvedValue({ row: null, available: false });
+      .mockResolvedValue({ row: null, available: false, notFound: false });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
       .mockResolvedValue({ rows: [], available: true });
@@ -872,7 +872,7 @@ describe('Reconciliation Engine Corrections', () => {
       .mockResolvedValue({ rows: [], available: false });
     alatByIdSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
-      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true });
+      .mockResolvedValue({ row: alatRow(ALAT_UUID, 50000, 'SUCCESS'), available: true, notFound: false });
     psSpy = jest
       .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
       .mockResolvedValue({ rows: [], available: true });
@@ -996,5 +996,332 @@ describe('Reconciliation Engine Corrections', () => {
     expect(await prisma.auditLog.count()).toBe(auditBefore);
     expect(await prisma.settlement.count()).toBe(settlementBefore);
     expect(await prisma.refund.count()).toBe(refundBefore);
+  });
+
+  // ====================================================================
+  // Lagos business-day boundary tests (Issue 1)
+  // ====================================================================
+  const LAGOS_OFFSET_MS = 60 * 60 * 1000; // UTC+1, no DST
+  function lagosToUtc(y: number, mo: number, d: number, h: number, mi: number, s = 0, ms = 0) {
+    return new Date(Date.UTC(y, mo - 1, d, h, mi, s, ms) - LAGOS_OFFSET_MS);
+  }
+  const SAME_DAY_FROM = new Date('2026-10-15T00:00:00.000Z');
+  const SAME_DAY_TO = new Date('2026-10-15T00:00:00.000Z');
+
+  async function setupLagosSuccessTx(refKey: string, paidAtLagosUtc: Date) {
+    const t = await createTx({
+      reference: `PAY-PS-${refKey}`,
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref(refKey),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      createdAt: paidAtLagosUtc,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-${refKey}-${Date.now()}`,
+        verificationToken: `vt-${refKey}-${Date.now()}`,
+        transactionId: t.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt: paidAtLagosUtc,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    createdReceiptIds.push(r.id);
+    return t;
+  }
+
+  function mockPaystackMatch(refKey: string, paidAt: Date) {
+    return jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({
+        rows: [paystackRow(refKey, 50000, 'success', paidAt.toISOString())],
+        available: true,
+      });
+  }
+  function mockAlatEmptyAvailable() {
+    return jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+  }
+
+  it('S27: same-day 15/10/2026 includes payment at 15 Oct 00:00 Lagos', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const paidAt = lagosToUtc(2026, 10, 15, 0, 0, 0, 0); // 14 Oct 23:00 UTC
+    await setupLagosSuccessTx('LAGOS-0000', paidAt);
+    psSpy = mockPaystackMatch('LAGOS-0000', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    expect(items.find((i) => i.paymentReference === 'PAY-PS-LAGOS-0000')).toBeDefined();
+  });
+
+  it('S28: same-day 15/10/2026 includes payment at 15 Oct 12:00 Lagos', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const paidAt = lagosToUtc(2026, 10, 15, 12, 0, 0, 0); // 15 Oct 11:00 UTC
+    await setupLagosSuccessTx('LAGOS-1200', paidAt);
+    psSpy = mockPaystackMatch('LAGOS-1200', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    expect(items.find((i) => i.paymentReference === 'PAY-PS-LAGOS-1200')).toBeDefined();
+  });
+
+  it('S29: same-day 15/10/2026 includes payment at 15 Oct 23:59:59 Lagos', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const paidAt = lagosToUtc(2026, 10, 15, 23, 59, 59, 0); // 15 Oct 22:59:59 UTC
+    await setupLagosSuccessTx('LAGOS-2359', paidAt);
+    psSpy = mockPaystackMatch('LAGOS-2359', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    expect(items.find((i) => i.paymentReference === 'PAY-PS-LAGOS-2359')).toBeDefined();
+  });
+
+  it('S30: same-day 15/10/2026 excludes payment at 14 Oct 23:59:59 Lagos', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const paidAt = lagosToUtc(2026, 10, 14, 23, 59, 59, 0); // 14 Oct 22:59:59 UTC
+    await setupLagosSuccessTx('LAGOS-EXCL-1', paidAt);
+    psSpy = mockPaystackMatch('LAGOS-EXCL-1', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    expect(items.find((i) => i.paymentReference === 'PAY-PS-LAGOS-EXCL-1')).toBeUndefined();
+  });
+
+  it('S31: same-day 15/10/2026 excludes payment at 16 Oct 00:00 Lagos', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const paidAt = lagosToUtc(2026, 10, 16, 0, 0, 0, 0); // 15 Oct 23:00 UTC — exclusive upper boundary
+    await setupLagosSuccessTx('LAGOS-EXCL-2', paidAt);
+    psSpy = mockPaystackMatch('LAGOS-EXCL-2', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    expect(items.find((i) => i.paymentReference === 'PAY-PS-LAGOS-EXCL-2')).toBeUndefined();
+  });
+
+  it('S32: multi-day 30/09–14/10 includes the complete final calendar day 14 Oct', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    // 14 Oct 23:59:59 Lagos = 14 Oct 22:59:59 UTC — must be included
+    const paidAt = lagosToUtc(2026, 10, 14, 23, 59, 59, 0);
+    await setupLagosSuccessTx('MULTI-END', paidAt);
+    psSpy = mockPaystackMatch('MULTI-END', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: new Date('2026-09-30T00:00:00.000Z'),
+      dateTo: new Date('2026-10-14T00:00:00.000Z'),
+      gateway: PaymentGateway.PAYSTACK,
+    });
+    expect(items.find((i) => i.paymentReference === 'PAY-PS-MULTI-END')).toBeDefined();
+  });
+
+  it('S33: attempt 14 Oct 23:58 paid 15 Oct 00:03 Lagos appears under 15 October', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const created = lagosToUtc(2026, 10, 14, 23, 58, 0, 0); // 14 Oct 22:58 UTC
+    const paidAt = lagosToUtc(2026, 10, 15, 0, 3, 0, 0); // 14 Oct 23:03 UTC
+    const t = await createTx({
+      reference: 'PAY-PS-MID-LAG',
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref('PS-MID-LAG'),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      createdAt: created,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-MIDLAG-${Date.now()}`,
+        verificationToken: `vt-midlag-${Date.now()}`,
+        transactionId: t.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    createdReceiptIds.push(r.id);
+    psSpy = mockPaystackMatch('PS-MID-LAG', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-PS-MID-LAG');
+    expect(item).toBeDefined();
+    expect(item?.date).toBe(paidAt.toISOString());
+  });
+
+  it('S34: SUCCESS item displays receipt.paidAt financial date, not createdAt', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const created = new Date('2026-10-10T00:00:00.000Z');
+    const paidAt = lagosToUtc(2026, 10, 15, 9, 30, 0, 0);
+    const t = await createTx({
+      reference: 'PAY-PS-DATE-DISP',
+      gateway: PaymentGateway.PAYSTACK,
+      paystackReference: ref('PS-DATE-DISP'),
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+      createdAt: created,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-DATEDISP-${Date.now()}`,
+        verificationToken: `vt-datedisp-${Date.now()}`,
+        transactionId: t.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    createdReceiptIds.push(r.id);
+    psSpy = mockPaystackMatch('PS-DATE-DISP', paidAt);
+    alatSpy = mockAlatEmptyAvailable();
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: SAME_DAY_FROM, dateTo: SAME_DAY_TO, gateway: PaymentGateway.PAYSTACK,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-PS-DATE-DISP');
+    expect(item).toBeDefined();
+    expect(item?.date).toBe(paidAt.toISOString());
+    expect(item?.date).not.toBe(created.toISOString());
+  });
+
+  it('S35: ALATPay list omits UUID + individual succeeds → GATEWAY_INDIVIDUAL_LOOKUP', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const uuid = '11111111-1111-1111-1111-111111111111';
+    const t = await createTx({
+      reference: 'PAY-ALAT-LISTMISS',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+    const r = await prisma.receipt.create({
+      data: {
+        receiptNumber: `RCT-LISTMISS-${Date.now()}`,
+        verificationToken: `vt-listmiss-${Date.now()}`,
+        transactionId: t.id,
+        studentId: testStudentId!,
+        paidAmount: 50000,
+        paymentChannel: 'card',
+        paidAt: TX_DATE,
+        qrCodeData: 'x',
+        convenienceFee: 0,
+        serviceCharge: 0,
+        gatewayFee: 0,
+        totalAmount: 50000,
+      },
+    });
+    createdReceiptIds.push(r.id);
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: alatRow(uuid, 50000, 'SUCCESS'), available: true, notFound: false });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-LISTMISS');
+    expect(item).toBeDefined();
+    expect(item?.classification).toBe('MATCHED');
+    expect(item?.verificationMethod).toBe('GATEWAY_INDIVIDUAL_LOOKUP');
+  });
+
+  it('S36: ALATPay list omits UUID + individual transport fails → UNABLE_TO_VERIFY', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const uuid = '22222222-2222-2222-2222-222222222222';
+    await createTx({
+      reference: 'PAY-ALAT-TRANSPORT',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: null, available: false, notFound: false });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-TRANSPORT');
+    expect(item).toBeDefined();
+    expect(item?.classification).not.toBe('MISSING_GATEWAY');
+    expect(item?.classification).toBe('UNABLE_TO_VERIFY');
+  });
+
+  it('S37: ALATPay individual definitive not-found → MISSING_GATEWAY only when proven', async () => {
+    if (!dbAvailable) { console.warn('[recon-fix] DB unavailable — skipping'); return; }
+    const uuid = '33333333-3333-3333-3333-333333333333';
+    await createTx({
+      reference: 'PAY-ALAT-NOTFOUND',
+      gateway: PaymentGateway.ALATPAY,
+      alatpayFinalTransactionId: uuid,
+      status: TransactionStatus.SUCCESS,
+      expectedAmount: 50000,
+      amount: 50000,
+    });
+
+    alatSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+    alatByIdSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchAlatpayTxById')
+      .mockResolvedValue({ row: null, available: false, notFound: true });
+    psSpy = jest
+      .spyOn(ReconModule._reconciliationInternals, 'fetchPaystackTxListRange')
+      .mockResolvedValue({ rows: [], available: true });
+
+    const { items } = await ReconciliationService.runCompare({
+      dateFrom: DATE_FROM, dateTo: DATE_TO, gateway: PaymentGateway.ALATPAY,
+    });
+    const item = items.find((i) => i.paymentReference === 'PAY-ALAT-NOTFOUND');
+    expect(item).toBeDefined();
+    expect(item?.classification).toBe('MISSING_GATEWAY');
   });
 });

@@ -34,14 +34,14 @@ router.get(
   validateQuery(SummaryQuery),
   catchAsync(async (req: any, res) => {
     const { dateFrom, dateTo, feeId, gateway, chargeSource } = req.query as any;
-    const { summary } = await ReconciliationService.runCompare({
+    const { summary, effectiveRange } = await ReconciliationService.runCompare({
       dateFrom: new Date(dateFrom),
       dateTo: new Date(dateTo),
       feeId: feeId !== undefined && feeId !== null ? Number(feeId) : undefined,
       gateway: gateway ?? undefined,
       chargeSource: chargeSource ?? 'ALL',
     });
-    res.status(200).json({ status: 'success', data: { summary } });
+    res.status(200).json({ status: 'success', data: { summary, effectiveRange } });
   }),
 );
 
@@ -78,7 +78,7 @@ router.get(
     const page = Number(q.page ?? 1);
     const limit = Number(q.limit ?? 50);
     const skip = (page - 1) * limit;
-    const { items, summary } = await ReconciliationService.runCompare({
+    const { items, summary, effectiveRange } = await ReconciliationService.runCompare({
       dateFrom: new Date(q.dateFrom),
       dateTo: new Date(q.dateTo),
       feeId: q.feeId !== undefined && q.feeId !== null ? Number(q.feeId) : undefined,
@@ -111,6 +111,7 @@ router.get(
           dateFrom: q.dateFrom,
           dateTo: q.dateTo,
         },
+        effectiveRange,
         summary,
       },
     });

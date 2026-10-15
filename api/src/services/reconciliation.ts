@@ -118,6 +118,12 @@ export type ReconciliationItem = {
 export type RunCompareResult = {
   summary: ReconciliationSummary;
   items: ReconciliationItem[];
+  effectiveRange: {
+    from: string;
+    to: string;
+    timezone: string;
+    inclusive: boolean;
+  };
 };
 
 const CLASSIFICATION_PRIORITY: Classification[] = [
@@ -135,6 +141,55 @@ const CLASSIFICATION_PRIORITY: Classification[] = [
 
 const AMOUNT_TOLERANCE_KOBO = 50; // 0.50 NGN in minor units
 const JSON_DB_NULL = Prisma.JsonNull;
+
+// Bells University business timezone: Africa/Lagos = UTC+01:00 (no DST).
+// All reconciliation calendar-day selections are interpreted in this timezone
+// regardless of server-local or browser timezone.
+const LAGOS_OFFSET_MS = 60 * 60 * 1000; // UTC+1
+
+/**
+ * Convert a user-supplied date range into an effective UTC range that
+ * represents the selected Lagos calendar days, using an EXCLUSIVE upper
+ * boundary to avoid 23:59:59.999 precision problems.
+ *
+ * The frontend sends date-only values (e.g. "2026-10-15"). z.coerce.date()
+ * parses these as midnight UTC (2026-10-15T00:00:00.000Z). We treat the
+ * Y-M-D components as the Lagos calendar day selected by the user.
+ *
+ * Lagos day 15 Oct 2026:
+ *   >= 2026-10-14T23:00:00.000Z  (15 Oct 00:00 Lagos)
+ *   <  2026-10-15T23:00:00.000Z  (16 Oct 00:00 Lagos, exclusive)
+ *
+ * @returns { from, to } where `to` is exclusive.
+ */
+export function lagosBusinessDayRange(dateFrom: Date, dateTo: Date): {
+  from: Date;
+  to: Date;
+  timezone: string;
+} {
+  // Take the UTC Y-M-D components of the parsed input. For date-only strings
+  // this is exactly the selected calendar day. We never rely on the local
+  // timezone of the server.
+  const fromY = dateFrom.getUTCFullYear();
+  const fromM = dateFrom.getUTCMonth();
+  const fromD = dateFrom.getUTCDate();
+  const toY = dateTo.getUTCFullYear();
+  const toM = dateTo.getUTCMonth();
+  const toD = dateTo.getUTCDate();
+
+  // Start of the first selected Lagos day = that UTC calendar day's midnight
+  // minus one hour (Lagos is UTC+1).
+  const fromUtcMidnight = Date.UTC(fromY, fromM, fromD);
+  const from = new Date(fromUtcMidnight - LAGOS_OFFSET_MS);
+
+  // Exclusive upper bound: start of the Lagos day AFTER the last selected day.
+  // = UTC midnight of (last selected day + 1) minus one hour
+  // = UTC midnight of last selected day + 23 hours.
+  const toUtcMidnight = Date.UTC(toY, toM, toD);
+  const to = new Date(toUtcMidnight + 23 * 60 * 60 * 1000);
+
+  return { from, to, timezone: 'Africa/Lagos' };
+}
 
 export async function fetchPaystackTxListRange(params: {
   from: Date;
@@ -284,9 +339,9 @@ export async function fetchAlatpayTxListRange(params: {
  */
 export async function fetchAlatpayTxById(params: {
   providerId: string;
-}): Promise<{ row: AlatpayTxRow | null; available: boolean }> {
+}): Promise<{ row: AlatpayTxRow | null; available: boolean; notFound: boolean }> {
   const providerId = String(params.providerId ?? '').trim();
-  if (!providerId) return { row: null, available: false };
+  if (!providerId) return { row: null, available: false, notFound: false };
   try {
     const secret = getActiveAlatpaySecretKey();
     const baseUrl = getAlatpayBaseUrl();
@@ -296,6 +351,7 @@ export async function fetchAlatpayTxById(params: {
       `${baseUrl}/transaction/api/v1/transactions/${safeRef}`,
     ];
     let lastErr: any = null;
+    let lastStatus: number | null = null;
     for (const url of candidates) {
       try {
         const r = await axios.get(url, {
@@ -308,25 +364,31 @@ export async function fetchAlatpayTxById(params: {
         });
         const payload = r?.data?.data ?? r?.data?.Value?.Data ?? r?.data;
         if (payload && (payload.Id || payload.id || payload.transactionId)) {
-          return { row: payload as AlatpayTxRow, available: true };
+          return { row: payload as AlatpayTxRow, available: true, notFound: false };
         }
-      } catch (err) {
+        // 2xx response but no transaction body — treat as definitive not-found.
+        return { row: null, available: true, notFound: true };
+      } catch (err: any) {
         lastErr = err;
+        lastStatus = err?.response?.status ?? null;
       }
     }
-    if (lastErr && process.env.NODE_ENV !== 'test') {
+    // Distinguish definitive not-found (404) from transport/availability errors.
+    // Only an HTTP 404 proves the transaction does not exist at the provider.
+    const notFound = lastStatus === 404;
+    if (!notFound && process.env.NODE_ENV !== 'test') {
       console.warn(
         `[recon:alatpay] individual lookup failed for ${providerId}:`,
-        lastErr?.response?.status,
+        lastStatus,
         lastErr?.message,
       );
     }
-    return { row: null, available: false };
+    return { row: null, available: !notFound, notFound };
   } catch (err: any) {
     if (process.env.NODE_ENV !== 'test') {
       console.warn(`[recon:alatpay] individual lookup unavailable for ${providerId}:`, err?.message);
     }
-    return { row: null, available: false };
+    return { row: null, available: false, notFound: false };
   }
 }
 
@@ -410,16 +472,25 @@ export class ReconciliationService {
   }): Promise<RunCompareResult> {
     const { dateFrom, dateTo, feeId, gateway, chargeSource = 'ALL' } = params;
 
+    // The API is authoritative for interpreting the user-supplied date range.
+    // The frontend sends date-only values (e.g. "2026-10-15") which
+    // z.coerce.date() parses as midnight UTC. We interpret those calendar days
+    // in the Bells University business timezone (Africa/Lagos, UTC+1) and use
+    // an EXCLUSIVE upper boundary for safe database queries.
+    const effective = lagosBusinessDayRange(dateFrom, dateTo);
+    const fromMs = effective.from.getTime();
+    const toMs = effective.to.getTime();
+
     // Authoritative financial date differs by status:
-    //   SUCCESS  -> receipt.paidAt (provider paid timestamp), fallback updatedAt
+    //   SUCCESS  -> receipt.paidAt (provider paid timestamp), fallback createdAt
     //   FAILED/PENDING/REVERSED -> createdAt (attempt creation)
     // The Prisma OR catches transactions whose attempt was created in range OR
     // whose receipt (successful payment) was issued in range. In-memory filtering
     // then applies the precise authoritative financial date.
     const internalWhere: Prisma.TransactionWhereInput = {
       OR: [
-        { createdAt: { gte: dateFrom, lte: dateTo } },
-        { receipts: { some: { paidAt: { gte: dateFrom, lte: dateTo } } } },
+        { createdAt: { gte: effective.from, lt: effective.to } },
+        { receipts: { some: { paidAt: { gte: effective.from, lt: effective.to } } } },
       ],
     };
     if (feeId !== undefined && feeId !== null) {
@@ -479,8 +550,6 @@ export class ReconciliationService {
     //   FAILED/PENDING/REVERSED -> createdAt (attempt creation time)
     // Note: updatedAt is intentionally NOT used as it can be bumped by any
     // later edit, not just the status transition to SUCCESS.
-    const fromMs = dateFrom.getTime();
-    const toMs = dateTo.getTime();
     const financialDateOf = (tx: InternalTx): Date => {
       if (tx.status === TransactionStatus.SUCCESS) {
         const rct = (tx.receipts ?? []).find((r) => !(r as any).isVoided) ?? (tx.receipts ?? [])[0];
@@ -491,7 +560,7 @@ export class ReconciliationService {
     };
     internalTxs = internalTxs.filter((t) => {
       const ms = financialDateOf(t).getTime();
-      return ms >= fromMs && ms <= toMs;
+      return ms >= fromMs && ms < toMs;
     });
 
     type ByKey = Map<string, InternalTx[]>;
@@ -532,13 +601,16 @@ export class ReconciliationService {
     let alatpayListAvailable = false;
     let alatpayIndividualAvailable = false;
     const alatpayVerifiedRefs = new Set<string>();
+    // Refs whose individual lookup definitively returned NOT FOUND (HTTP 404).
+    // Only these may be considered MISSING_GATEWAY under full list coverage.
+    const alatpayNotFoundRefs = new Set<string>();
 
     for (const g of gatewaysToPull) {
       if (g === PaymentGateway.PAYSTACK) {
         try {
           const { rows, available } = await _reconciliationInternals.fetchPaystackTxListRange({
-            from: dateFrom,
-            to: dateTo,
+            from: effective.from,
+            to: effective.to,
           });
           paystackAvailable = available;
           for (const r of rows) gatewayRows.push({ gateway: g, ...r });
@@ -553,37 +625,51 @@ export class ReconciliationService {
       } else if (g === PaymentGateway.ALATPAY) {
         try {
           const { rows, available } = await _reconciliationInternals.fetchAlatpayTxListRange({
-            from: dateFrom,
-            to: dateTo,
+            from: effective.from,
+            to: effective.to,
           });
           alatpayListAvailable = available;
           for (const r of rows) gatewayRows.push({ gateway: g, ...r });
-          if (!available) {
-            // List endpoint unavailable. Fall back to READ-ONLY individual
-            // transaction lookup for each internal ALATPay transaction that
-            // has a valid provider UUID. This does NOT write financial state.
-            // A successful individual lookup does NOT restore full gateway
-            // coverage — only known internal UUIDs can be verified; gateway-only
-            // transactions remain undiscoverable.
-            const alatpayInternal = internalTxs.filter(
-              (t) => (t.gateway ?? PaymentGateway.ALATPAY) === PaymentGateway.ALATPAY,
-            );
-            for (const tx of alatpayInternal) {
-              const providerId =
-                (tx as any).alatpayFinalTransactionId ||
-                (isAlatpayUuid((tx as any).alatpayReference) ? (tx as any).alatpayReference : null);
-              if (!providerId) continue;
-              try {
-                const { row, available: lookupAvailable } =
-                  await _reconciliationInternals.fetchAlatpayTxById({ providerId });
-                if (lookupAvailable && row) {
-                  alatpayIndividualAvailable = true;
-                  gatewayRows.push({ gateway: g, ...row });
-                  alatpayVerifiedRefs.add(providerId);
-                }
-              } catch {
-                // individual lookup failure — leave availability flags as-is
+
+          // Individually verify known internal ALATPay UUIDs that were NOT
+          // returned by the list endpoint. This covers two cases:
+          //   A) list endpoint unavailable (partial coverage fallback)
+          //   B) list endpoint available but a known UUID is absent from the
+          //      returned list (ALATPay list results may be incomplete).
+          //
+          // A successful individual lookup reconciles the transaction.
+          // A definitive NOT FOUND (HTTP 404) may later become MISSING_GATEWAY
+          // under full list coverage. A transport/5xx/timeout failure must
+          // become UNABLE_TO_VERIFY — never MISSING_GATEWAY.
+          const alatpayInternal = internalTxs.filter(
+            (t) => (t.gateway ?? PaymentGateway.ALATPAY) === PaymentGateway.ALATPAY,
+          );
+          const listRefs = new Set(
+            rows.map((r) =>
+              String(r.Id ?? r.id ?? r.transactionId ?? r.reference ?? r.orderId ?? '').trim(),
+            ),
+          );
+          for (const tx of alatpayInternal) {
+            const providerId =
+              (tx as any).alatpayFinalTransactionId ||
+              (isAlatpayUuid((tx as any).alatpayReference) ? (tx as any).alatpayReference : null);
+            if (!providerId) continue;
+            if (listRefs.has(providerId)) continue;
+            try {
+              const { row, available: lookupAvailable, notFound } =
+                await _reconciliationInternals.fetchAlatpayTxById({ providerId });
+              if (lookupAvailable && row) {
+                alatpayIndividualAvailable = true;
+                gatewayRows.push({ gateway: g, ...row });
+                alatpayVerifiedRefs.add(providerId);
+              } else if (notFound) {
+                alatpayNotFoundRefs.add(providerId);
               }
+              // else: lookup failed (transport/5xx/timeout) — leave as
+              // UNABLE_TO_VERIFY later; do not add to notFound set.
+            } catch {
+              // individual lookup threw — leave availability flags as-is;
+              // this transaction will be UNABLE_TO_VERIFY, not MISSING_GATEWAY.
             }
           }
         } catch (e: any) {
@@ -719,27 +805,56 @@ export class ReconciliationService {
         flags.add('PENDING_ATTEMPT');
       }
 
+      const repInternal = internalSuccess[0] || internalRows[0];
+      const repGateway = gatewaySuccess[0] || gwRowsArr[0];
+
       // MISSING_GATEWAY only when the provider has FULL list coverage
       // (AVAILABLE) and there is a genuine successful internal record with no
-      // corresponding gateway record. Under PARTIALLY_AVAILABLE we cannot
-      // prove the gateway record is missing, so it is UNABLE_TO_VERIFY.
-      if (anyInternal && !anyGateway && hasInternalSuccess && providerFullAvailable) {
+      // corresponding gateway record.
+      //
+      // For ALATPay we additionally require definitive proof of absence:
+      // the internal transaction must have a usable provider UUID AND that
+      // UUID must have returned a definitive NOT FOUND from the individual
+      // lookup. A transport/5xx/timeout failure, or a missing provider UUID,
+      // must be UNABLE_TO_VERIFY — never MISSING_GATEWAY.
+      //
+      // Under PARTIALLY_AVAILABLE we cannot prove the gateway record is
+      // missing, so it is always UNABLE_TO_VERIFY.
+      const alatpayHasUsableUuid =
+        g === PaymentGateway.ALATPAY &&
+        !!((repInternal as any)?.alatpayFinalTransactionId ||
+          (isAlatpayUuid((repInternal as any)?.alatpayReference) ? (repInternal as any)?.alatpayReference : null));
+      const alatpayDefinitivelyNotFound =
+        g === PaymentGateway.ALATPAY &&
+        alatpayHasUsableUuid &&
+        alatpayNotFoundRefs.has(ref);
+
+      if (
+        anyInternal &&
+        !anyGateway &&
+        hasInternalSuccess &&
+        providerFullAvailable &&
+        (g === PaymentGateway.PAYSTACK || alatpayDefinitivelyNotFound)
+      ) {
         flags.add('MISSING_GATEWAY');
       }
-      // If provider is not fully available (UNAVAILABLE or PARTIALLY_AVAILABLE
-      // without a successful individual lookup for this record) and we have an
-      // internal success with no gateway match, classify as UNABLE_TO_VERIFY
+      // If provider is not fully available, or (for ALATPay) we cannot
+      // definitively prove absence, classify as UNABLE_TO_VERIFY
       // (never MISSING_GATEWAY).
-      if (anyInternal && !anyGateway && hasInternalSuccess && !providerFullAvailable) {
+      const alatpayCannotProveAbsence =
+        g === PaymentGateway.ALATPAY && !alatpayDefinitivelyNotFound;
+      if (
+        anyInternal &&
+        !anyGateway &&
+        hasInternalSuccess &&
+        (!providerFullAvailable || alatpayCannotProveAbsence)
+      ) {
         flags.add('UNABLE_TO_VERIFY');
       }
 
       if (anyGateway && !anyInternal) {
         flags.add('MISSING_INTERNAL');
       }
-
-      const repInternal = internalSuccess[0] || internalRows[0];
-      const repGateway = gatewaySuccess[0] || gwRowsArr[0];
 
       // Amount comparison using integer minor units (kobo) to avoid float errors.
       // Compare provider GROSS amount against internal expectedAmount.
@@ -786,8 +901,15 @@ export class ReconciliationService {
       const classification = pickHighestPriority(flags);
 
       let dateStr: string | undefined;
-      if (repGateway) dateStr = gatewayTxDate(repGateway);
-      else if (repInternal) dateStr = repInternal.createdAt.toISOString();
+      if (repGateway) {
+        dateStr = gatewayTxDate(repGateway);
+      } else if (repInternal) {
+        // Display the same authoritative financial date used to include the
+        // transaction in the report. For SUCCESS this is receipt.paidAt; for
+        // FAILED/PENDING/etc it is createdAt. Do not display createdAt for a
+        // SUCCESS transaction that was filtered in by receipt.paidAt.
+        dateStr = financialDateOf(repInternal).toISOString();
+      }
 
       let studentName: string | null = null;
       let studentId: number | null = null;
@@ -880,7 +1002,16 @@ export class ReconciliationService {
       } as ReconciliationSummary,
     );
 
-    return { summary, items };
+    return {
+      summary,
+      items,
+      effectiveRange: {
+        from: effective.from.toISOString(),
+        to: effective.to.toISOString(),
+        timezone: effective.timezone,
+        inclusive: false,
+      },
+    };
   }
 
   static async exportReport(params: {
@@ -891,7 +1022,7 @@ export class ReconciliationService {
     gateway?: PaymentGateway;
     chargeSource?: ChargeSourceFilter;
   }): Promise<{ format: 'csv' | 'json'; payload: string | RunCompareResult; filename: string }> {
-    const { summary, items } = await ReconciliationService.runCompare({
+    const { summary, items, effectiveRange } = await ReconciliationService.runCompare({
       dateFrom: params.dateFrom,
       dateTo: params.dateTo,
       feeId: params.feeId,
@@ -902,7 +1033,7 @@ export class ReconciliationService {
     if (params.format === 'json') {
       return {
         format: 'json',
-        payload: { summary, items },
+        payload: { summary, items, effectiveRange },
         filename: `recon-${ts(params.dateFrom)}-${ts(params.dateTo)}.json`,
       };
     }
