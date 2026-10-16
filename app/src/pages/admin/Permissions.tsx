@@ -14,15 +14,37 @@ type AlertState = {
   type: 'error' | 'success' | 'info';
 };
 
-const PERMISSION_CATEGORIES = ['Students', 'Fees', 'Payments', 'Admin'] as const;
-type PermissionCategory = typeof PERMISSION_CATEGORIES[number];
+// Display order for known categories; any unrecognised category is appended
+// alphabetically so a NEW backend category (e.g. "Reports") appears here
+// automatically. There is deliberately NO hardcoded permission/category list.
+const CATEGORY_ORDER: string[] = [
+  'Dashboard',
+  'Students',
+  'Fees',
+  'Payments',
+  'Direct Billing',
+  'Receipts',
+  'Academic Structure',
+  'Reconciliation',
+  'Reports',
+  'Admin',
+];
 
-const normalizeCategory = (raw: string): PermissionCategory => {
-  const up = raw.toUpperCase();
-  if (up.includes('STUDENT')) return 'Students';
-  if (up.includes('FEE') || up.includes('BILL') || up.includes('INVOICE')) return 'Fees';
-  if (up.includes('PAYMENT') || up.includes('RECEIPT') || up.includes('REFUND') || up.includes('TRANSACTION')) return 'Payments';
-  return 'Admin';
+const buildCategoryList = (perms: Array<{ category?: string | null }>): string[] => {
+  const present = Array.from(new Set(perms.map((p) => p.category || 'Other')));
+  const known = CATEGORY_ORDER.filter((c) => present.includes(c));
+  const extra = present.filter((c) => !CATEGORY_ORDER.includes(c)).sort();
+  return [...known, ...extra];
+};
+
+const groupByCategory = (perms: PermissionOut[]): Map<string, PermissionOut[]> => {
+  const map = new Map<string, PermissionOut[]>();
+  perms.forEach((p) => {
+    const cat = p.category || 'Other';
+    if (!map.has(cat)) map.set(cat, []);
+    map.get(cat)!.push(p);
+  });
+  return map;
 };
 
 const ROLE_BADGE: Record<string, string> = {
@@ -42,7 +64,7 @@ const PermissionsPage: React.FC = () => {
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'error' });
   const [q, setQ] = useState('');
-  const [expandedCats, setExpandedCats] = useState<Set<PermissionCategory>>(new Set());
+  const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     navCounters().then(setNavCounts).catch(() => setNavCounts({}));
@@ -53,12 +75,7 @@ const PermissionsPage: React.FC = () => {
     try {
       const data = await permissionsApi.list();
       setPermissions(data);
-      const grouped = groupPermsByCategory(data);
-      const initialExpanded = new Set<PermissionCategory>();
-      if (grouped['Students'].length > 0) {
-        initialExpanded.add('Students');
-      }
-      setExpandedCats(initialExpanded);
+      setExpandedCats(new Set(buildCategoryList(data)));
     } catch (err: any) {
       if (signal?.aborted) return;
       if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return;
@@ -72,15 +89,7 @@ const PermissionsPage: React.FC = () => {
     load();
   }, [load]);
 
-  const groupPermsByCategory = (perms: PermissionOut[]): Record<PermissionCategory, PermissionOut[]> => {
-    const result: Record<PermissionCategory, PermissionOut[]> = { Students: [], Fees: [], Payments: [], Admin: [] };
-    perms.forEach((p) => {
-      result[normalizeCategory(p.category)].push(p);
-    });
-    return result;
-  };
-
-  const toggleCat = (cat: PermissionCategory) => {
+  const toggleCat = (cat: string) => {
     setExpandedCats((prev) => {
       const next = new Set(prev);
       if (next.has(cat)) next.delete(cat);
@@ -100,7 +109,8 @@ const PermissionsPage: React.FC = () => {
       })
     : permissions;
 
-  const grouped = groupPermsByCategory(filteredPermissions);
+  const categories = buildCategoryList(filteredPermissions);
+  const grouped = groupByCategory(filteredPermissions);
 
   const content = (
     <div className="space-y-6">
@@ -138,8 +148,8 @@ const PermissionsPage: React.FC = () => {
       )}
 
       <div className="space-y-3">
-        {PERMISSION_CATEGORIES.map((cat) => {
-          const catPerms = grouped[cat];
+        {categories.map((cat) => {
+          const catPerms = grouped.get(cat) ?? [];
           if (catPerms.length === 0 && !q.trim()) return null;
           const isExpanded = expandedCats.has(cat);
           return (
@@ -156,12 +166,7 @@ const PermissionsPage: React.FC = () => {
                   ) : (
                     <ChevronRight className="h-5 w-5 text-gray-500 shrink-0" />
                   )}
-                  <Shield className={`h-5 w-5 shrink-0 ${
-                    cat === 'Students' ? 'text-blue-600' :
-                    cat === 'Fees' ? 'text-amber-600' :
-                    cat === 'Payments' ? 'text-emerald-600' :
-                    'text-gray-600'
-                  }`} />
+                  <Shield className="h-5 w-5 shrink-0 text-gray-600" />
                   <div className="text-left">
                     <div className="text-lg font-bold text-gray-900">{cat}</div>
                   </div>
@@ -184,7 +189,18 @@ const PermissionsPage: React.FC = () => {
                         <div className="flex flex-col gap-3">
                           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                             <div className="min-w-0 flex-1">
-                              <h4 className="text-base font-bold text-gray-900">{perm.name}</h4>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h4 className="text-base font-bold text-gray-900">{perm.name}</h4>
+                                {perm.adminOnly ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-700 border border-gray-300">
+                                    Admin only
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    Assignable to Bursary
+                                  </span>
+                                )}
+                              </div>
                               <div className="mt-1">
                                 <code className="font-mono bg-gray-100 inline-block px-2 py-0.5 text-xs text-gray-700 rounded border border-gray-200">
                                   {perm.key}

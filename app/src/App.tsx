@@ -9,7 +9,7 @@ import BursaryLogin from './pages/auth/BursaryLogin';
 import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import StudentDashboard from './pages/student/Dashboard';
-import PrivateRoute from './components/PrivateRoute';
+import PrivateRoute, { RequirePermission } from './components/PrivateRoute';
 import PortalShell from './components/PortalShell';
 import { FileQuestion, Home, ShieldAlert, Loader2 } from 'lucide-react';
 import { StudentFeesPage, InvoiceDetailPage } from './pages/student/Fees';
@@ -457,34 +457,34 @@ const App: React.FC = () => {
 
           <Route element={<PrivateRoute roles={['BURSARY', 'ADMIN']} />}>
             <Route path="/bursary/dashboard" element={<Suspense fallback={<PageLoader />}><BursaryDashboard /></Suspense>} />
-            <Route path="/bursary/students" element={<Suspense fallback={<PageLoader />}><BursaryStudentsWrapped /></Suspense>} />
+            <Route path="/bursary/students" element={<RequirePermission permission="VIEW_STUDENTS"><Suspense fallback={<PageLoader />}><BursaryStudentsWrapped /></Suspense></RequirePermission>} />
             <Route path="/bursary/fees" element={<Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense>} />
             <Route path="/bursary/fees/:tab" element={<Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense>} />
             <Route path="/bursary/bills/create" element={<Suspense fallback={<PageLoader />}><BursaryCreateBillWrapped /></Suspense>} />
-            <Route path="/bursary/refunds" element={<Suspense fallback={<PageLoader />}><BursaryRefunds /></Suspense>} />
+            <Route path="/bursary/refunds" element={<RequirePermission permission="PROCESS_REFUND"><Suspense fallback={<PageLoader />}><BursaryRefunds /></Suspense></RequirePermission>} />
 
-            <Route path="/bursary/payments" element={<Suspense fallback={<PageLoader />}><BursaryPaymentsWrapped /></Suspense>} />
-            <Route path="/bursary/receipts" element={<Suspense fallback={<PageLoader />}><BursaryReceiptsWrapped /></Suspense>} />
-            <Route path="/bursary/audit-logs" element={<Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense>} />
+            <Route path="/bursary/payments" element={<RequirePermission permission="VIEW_PAYMENTS"><Suspense fallback={<PageLoader />}><BursaryPaymentsWrapped /></Suspense></RequirePermission>} />
+            <Route path="/bursary/receipts" element={<RequirePermission permission="VIEW_RECEIPTS"><Suspense fallback={<PageLoader />}><BursaryReceiptsWrapped /></Suspense></RequirePermission>} />
+            <Route path="/bursary/audit-logs" element={<RequirePermission permission="AUDIT_LOGS_VIEW_LIMITED"><Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense></RequirePermission>} />
             <Route path="/bursary/direct-billing" element={<Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense>} />
             <Route path="/bursary/direct-billing/:tab" element={<Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense>} />
             <Route path="/bursary/reports/centre" element={
-              <Suspense fallback={<PageLoader />}><BursaryReportsCentre role="BURSARY" activePath="/bursary/reports/centre" /></Suspense>
+              <RequirePermission permission="REPORTS_VIEW_COLLECTIONS"><Suspense fallback={<PageLoader />}><BursaryReportsCentre role="BURSARY" activePath="/bursary/reports/centre" /></Suspense></RequirePermission>
             } />
             <Route path="/bursary/reports/view/:reportKey" element={
               <Suspense fallback={<PageLoader />}><BursaryGenericReportWrapped /></Suspense>
             } />
             <Route path="/bursary/reports/student-statement" element={
-              <Suspense fallback={<PageLoader />}><BursaryStudentStatementPage role="BURSARY" activePath="/bursary/reports/student-statement" /></Suspense>
+              <RequirePermission permission="REPORTS_VIEW_COLLECTIONS"><Suspense fallback={<PageLoader />}><BursaryStudentStatementPage role="BURSARY" activePath="/bursary/reports/student-statement" /></Suspense></RequirePermission>
             } />
             <Route path="/bursary/reports/exceptions" element={
-              <Suspense fallback={<PageLoader />}><BursaryReconciliationExceptionsPage role="BURSARY" activePath="/bursary/reports/exceptions" /></Suspense>
+              <RequirePermission permission="REPORTS_VIEW_RECONCILIATION"><Suspense fallback={<PageLoader />}><BursaryReconciliationExceptionsPage role="BURSARY" activePath="/bursary/reports/exceptions" /></Suspense></RequirePermission>
             } />
             <Route path="/bursary/reports/export-centre" element={
-              <Suspense fallback={<PageLoader />}><BursaryExportCentre role="BURSARY" activePath="/bursary/reports/export-centre" /></Suspense>
+              <RequirePermission permission="REPORTS_EXPORT_EXCEL"><Suspense fallback={<PageLoader />}><BursaryExportCentre role="BURSARY" activePath="/bursary/reports/export-centre" /></Suspense></RequirePermission>
             } />
             <Route path="/bursary/reports/scheduled" element={
-              <Suspense fallback={<PageLoader />}><BursaryScheduledReports role="BURSARY" activePath="/bursary/reports/scheduled" /></Suspense>
+              <RequirePermission permission="REPORTS_SCHEDULE"><Suspense fallback={<PageLoader />}><BursaryScheduledReports role="BURSARY" activePath="/bursary/reports/scheduled" /></Suspense></RequirePermission>
             } />
             {/* Backward compat: old placeholder routes redirect to Reports Centre */}
             <Route path="/bursary/reports/daily" element={<Navigate to="/bursary/reports/view/daily-collections" replace />} />

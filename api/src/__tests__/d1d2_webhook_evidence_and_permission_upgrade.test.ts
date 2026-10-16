@@ -237,6 +237,14 @@ jest.mock('../config/database', () => {
           }
           return Promise.resolve(null);
         }),
+        // RBAC seeding reads the BURSARY init/release sentinels with
+        // `where: { id: { in: [...] } }`; support that shape.
+        findMany: jest.fn((a: any) => {
+          const ids: string[] = a?.where?.id?.in ?? (a?.where?.id ? [String(a.where.id)] : []);
+          return Promise.resolve(
+            ids.filter((id) => counters[id]).map((id) => JSON.parse(JSON.stringify(counters[id])))
+          );
+        }),
         upsert: jest.fn((a: any) => {
           const id = a.where?.id ?? 'receipt_number';
           if (!counters[id]) counters[id] = { id, value: 1, updatedAt: new Date() };

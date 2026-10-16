@@ -249,6 +249,12 @@ jest.mock('../config/database', () => {
       },
       counter: {
         findUnique: jest.fn((a: any) => Promise.resolve(counters[a.where.id] ? { ...counters[a.where.id] } : null)),
+        // RBAC seeding reads the BURSARY init/release sentinels with
+        // `where: { id: { in: [...] } }`; support that shape.
+        findMany: jest.fn((a: any) => {
+          const ids: string[] = a?.where?.id?.in ?? (a?.where?.id ? [String(a.where.id)] : []);
+          return Promise.resolve(ids.filter((id) => counters[id]).map((id) => ({ ...counters[id] })));
+        }),
         upsert: jest.fn((a: any) => {
           const id = String(a.where.id);
           const existing = counters[id];

@@ -5,7 +5,7 @@ import prisma from '../config/database';
 import { Role, AccountStatus } from '@prisma/client';
 import { catchAsync } from '../utils/catchAsync';
 import { i18n } from '../i18n/en';
-import { PERMISSION_DEFS } from '../services/permissionSeed';
+import { PERMISSION_DEFS, isAdminOnlyPermission } from '../services/permissionSeed';
 
 declare global {
   namespace Express {
@@ -22,12 +22,43 @@ declare global {
   }
 }
 
+// ---------------------------------------------------------------------------
+// AUTHORIZATION MODEL
+// ---------------------------------------------------------------------------
+//   protect()            → AUTHENTICATION (resolves req.user + effective permissions)
+//   restrictTo(...roles) → HARD ROLE BOUNDARY (e.g. finance-only endpoints)
+//   requirePermission(k) → CAPABILITY authorization (per-permission)
+//
+//   ADMIN    → intentional SUPER ADMINISTRATOR (see isSuperAdmin): bypasses
+//              individual permission checks and always holds the full registry.
+//   BURSARY  → capability checks resolved LIVE from the authoritative
+//              RolePermission table (never from stale token claims).
+//   STUDENT  → role-specific student access.
+//
+// The ADMIN bypass is INTENTIONAL, CENTRALISED here and covered by tests.
+// Do not duplicate it elsewhere.
+// ---------------------------------------------------------------------------
+
+const SUPER_ADMIN_ROLE: Role = Role.ADMIN;
+
+/** ADMIN is the protected super-administrator; its bypass is intentional. */
+export function isSuperAdmin(role: Role | undefined | null): boolean {
+  return role === SUPER_ADMIN_ROLE;
+}
+
 const ROLE_PERMS_CACHE_TTL_MS = 1000;
 const rolePermsCache = new Map<string, { ts: number; perms: string[] }>();
 let lastRolePermissionDBWriteAt = 0;
 
+/**
+ * Invalidate the live role-permission cache. Called after any write to
+ * RolePermission (role update endpoint, permission seeding) so that a REMOVED
+ * permission stops working immediately on the next request — no stale window
+ * within this process.
+ */
 export function bumpRolePermsVersion() {
   lastRolePermissionDBWriteAt = Date.now();
+  rolePermsCache.clear();
 }
 
 async function resolveRolePermissionsLive(role: Role, fallback: string[]): Promise<string[]> {
@@ -106,9 +137,12 @@ export const protect = catchAsync(
 
     const role = currentUser.role as Role;
     let effectivePermissions: string[];
-    if (role === Role.ADMIN) {
+    if (isSuperAdmin(role)) {
+      // Intentional super-admin: ADMIN always holds the full canonical registry.
       effectivePermissions = PERMISSION_DEFS.map((p) => p.key);
     } else {
+      // BURSARY (and any other configurable role): resolve LIVE from the
+      // authoritative RolePermission table, ignoring stale token claims.
       effectivePermissions = await resolveRolePermissionsLive(role, decodedPermissions);
     }
 
@@ -130,14 +164,29 @@ export const restrictTo = (...roles: Role[]) => {
   };
 };
 
+/**
+ * CAPABILITY authorization.
+ *
+ * - ADMIN (super-admin): intentional bypass.
+ * - ADMIN-only capabilities (Layer 4 defence-in-depth): enforced as ADMIN-only
+ *   here, so a forged/legacy RolePermission row can never grant a sensitive
+ *   capability to a non-ADMIN role.
+ * - Otherwise: the requested key must be present in the caller's live
+ *   permissions.
+ */
 export const requirePermission = (permKey: string) => {
   return (req: Request, res: Response, next: NextFunction) => {
     const user = req.user;
     if (!user) {
       return next(new AppError(i18n.errors.auth.notPermitted, 403));
     }
-    if (user.role === 'ADMIN') {
+    if (isSuperAdmin(user.role)) {
       return next();
+    }
+    // Layer 4: never let a non-ADMIN reach an ADMIN-only capability, even if an
+    // invalid RolePermission row exists for it.
+    if (isAdminOnlyPermission(permKey)) {
+      return next(new AppError(i18n.errors.auth.notPermitted, 403));
     }
     const perms = user.permissions;
     if (!Array.isArray(perms) || !perms.includes(permKey)) {

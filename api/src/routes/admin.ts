@@ -24,7 +24,7 @@ import { catchAsync } from '../utils/catchAsync';
 import { AdminSearchService } from '../services/search';
 import { SystemSettingsService } from '../services/systemSettings';
 import { AdminNotificationService } from '../services/adminNotification';
-import { PERMISSION_DEFS } from '../services/permissionSeed';
+import { PERMISSION_CATALOGUE, isAdminOnlyPermission } from '../services/permissionSeed';
 import { buildBranding } from '../utils/branding';
 import bcrypt from 'bcrypt';
 import { reqIp, reqUa } from '../utils/http';
@@ -865,9 +865,22 @@ router.delete(
 // Permission: MANAGE_ROLES
 // ---------------------------------------------------------------------------
 
-const ROLE_META: Record<string, { name: string; description: string }> = {
-  [Role.ADMIN]: { name: 'Administrator', description: 'Full system access with all permissions' },
-  [Role.BURSARY]: { name: 'Bursary', description: 'Financial operations, payments and receipts' },
+const ROLE_META: Record<string, { name: string; description: string; modifiable: boolean }> = {
+  [Role.ADMIN]: {
+    name: 'Administrator',
+    description: 'Full system access with all permissions. Protected super-administrator.',
+    modifiable: false,
+  },
+  [Role.BURSARY]: {
+    name: 'Bursary',
+    description: 'Financial operations, payments and receipts',
+    modifiable: true,
+  },
+  [Role.STUDENT]: {
+    name: 'Student',
+    description: 'Fixed student self-service access. Not configurable.',
+    modifiable: false,
+  },
 };
 
 const RoleNameParam = z.object({ role: z.enum([Role.ADMIN, Role.BURSARY]) });
@@ -875,16 +888,32 @@ const RoleNameParam = z.object({ role: z.enum([Role.ADMIN, Role.BURSARY]) });
 type RolePermRow = { permission: { key: string; name: string; category: string | null; description?: string | null } };
 
 function buildRoleOut(role: string, permsRows: RolePermRow[]) {
-  const meta = ROLE_META[role] ?? { name: role, description: '' };
+  const meta = ROLE_META[role] ?? { name: role, description: '', modifiable: false };
+  const isSuperAdminRole = role === Role.ADMIN;
+  // ADMIN is a protected super-administrator: runtime authorization always grants
+  // it the ENTIRE registry, so report the canonical catalogue rather than a
+  // (possibly stale) RolePermission snapshot.
+  const permissions = isSuperAdminRole
+    ? PERMISSION_CATALOGUE.map((p) => ({
+        key: p.key,
+        name: p.name,
+        category: p.category,
+        description: p.description,
+      }))
+    : permsRows.map((rp) => ({
+        ...rp.permission,
+        category: rp.permission.category ?? 'Admin',
+      }));
   return {
     role,
     name: meta.name,
     description: meta.description,
-    permissions: permsRows.map((rp) => ({
-      ...rp.permission,
-      category: rp.permission.category ?? 'Admin',
-    })),
-    permissionsCount: permsRows.length,
+    /** true only for BURSARY — the single configurable role in this phase. */
+    modifiable: meta.modifiable,
+    /** true for ADMIN: protected super-administrator, never editable. */
+    isSuperAdmin: isSuperAdminRole,
+    permissions,
+    permissionsCount: permissions.length,
   };
 }
 
@@ -903,15 +932,48 @@ async function replaceRolePermissions(
   auditAction: 'CREATE_ROLE' | 'UPDATE_ROLE'
 ) {
   const asRole = role as Role;
+
+  // --- Layer 3: only the CONFIGURABLE role may be modified -------------------
+  // ADMIN is the protected super-administrator (its permission set is always the
+  // full registry and is never stored/edited) and STUDENT is a fixed role.
+  // Accepting either here would allow privilege escalation or a lockout.
+  if (asRole !== Role.BURSARY) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: `Role '${role}' cannot be modified. Only the BURSARY role has a configurable permission set.`,
+    };
+  }
+
+  // --- Normalise input: reject malformed values, remove duplicates -----------
+  if (!Array.isArray(permissionKeys)) {
+    return { ok: false as const, status: 400, error: 'permissionKeys must be an array.' };
+  }
+  const malformed = permissionKeys.filter((k) => typeof k !== 'string' || k.trim().length === 0 || k.length > 64);
+  if (malformed.length > 0) {
+    return { ok: false as const, status: 400, error: 'permissionKeys contains invalid entries.' };
+  }
+  const uniqueKeys = Array.from(new Set(permissionKeys.map((k) => k.trim())));
+
+  // --- Reject ADMIN-only capabilities (Layer 3, server-side) -----------------
+  const adminOnlyRequested = uniqueKeys.filter((k) => isAdminOnlyPermission(k));
+  if (adminOnlyRequested.length > 0) {
+    return {
+      ok: false as const,
+      status: 400,
+      error: `ADMIN-only permission keys cannot be assigned: ${adminOnlyRequested.join(', ')}`,
+    };
+  }
+
   const [perms, oldKeys] = await Promise.all([
     prisma.permission.findMany({
-      where: { key: { in: permissionKeys } },
+      where: { key: { in: uniqueKeys } },
       select: { id: true, key: true },
     }),
     loadRolePermissionKeys(role),
   ]);
   const foundKeys = new Set(perms.map((p) => p.key));
-  const missing = permissionKeys.filter((k) => !foundKeys.has(k));
+  const missing = uniqueKeys.filter((k) => !foundKeys.has(k));
   if (missing.length > 0) {
     return { ok: false as const, status: 400, error: `Unknown permission keys: ${missing.join(', ')}` };
   }
@@ -1014,7 +1076,10 @@ router.get(
   '/roles',
   requirePermission('MANAGE_ROLES'),
   catchAsync(async (_req: any, res) => {
-    const visibleRoles = [Role.ADMIN, Role.BURSARY];
+    // STUDENT is included as a READ-ONLY entry so the UI shows the complete,
+    // accurate picture (it is never configurable — it is a fixed role enforced
+    // by restrictTo(Role.STUDENT) rather than by permission keys).
+    const visibleRoles = [Role.ADMIN, Role.BURSARY, Role.STUDENT];
     const items = await Promise.all(
       visibleRoles.map(async (r) => {
         const perms: RolePermRow[] = await prisma.rolePermission.findMany({
@@ -1024,7 +1089,14 @@ router.get(
         return buildRoleOut(r, perms);
       })
     );
-    res.status(200).json({ status: 'success', data: { items } });
+    res.status(200).json({
+      status: 'success',
+      data: {
+        items,
+        // Only roles whose permission set may be replaced via POST/PATCH /admin/roles.
+        configurableRoles: items.filter((r) => r.modifiable).map((r) => r.role),
+      },
+    });
   }),
 );
 
@@ -1045,7 +1117,8 @@ router.get(
 const CreateRoleSchema = z
   .object({
     role: z.enum([Role.ADMIN, Role.BURSARY]),
-    permissionKeys: z.array(z.string().min(1).max(64)).min(1),
+    // An empty array is VALID: it means "this role has no permissions".
+    permissionKeys: z.array(z.string().min(1).max(64)).max(200),
   })
   .strict();
 
@@ -1069,7 +1142,8 @@ router.post(
 
 const UpdateRoleSchema = z
   .object({
-    permissionKeys: z.array(z.string().min(1).max(64)).min(1),
+    // An empty array is VALID: it removes every permission from the role.
+    permissionKeys: z.array(z.string().min(1).max(64)).max(200),
   })
   .strict();
 
@@ -1094,8 +1168,11 @@ router.patch(
 );
 
 // ---------------------------------------------------------------------------
-// GET /admin/permissions  (15-entries + roles_assigned from PERMISSION_DEFS)
+// GET /admin/permissions  (canonical PERMISSION_CATALOGUE + roles_assigned)
 //   Permission: MANAGE_ROLES
+//   This is the ONE source the frontend uses for displayable permissions;
+//   `adminOnly`/`assignable` tell the UI which keys can never be granted to a
+//   configurable role.
 // ---------------------------------------------------------------------------
 
 router.get(
@@ -1111,11 +1188,13 @@ router.get(
       if (!byPermKey.has(k)) byPermKey.set(k, []);
       byPermKey.get(k)!.push(rp.role);
     }
-    const items = PERMISSION_DEFS.map((def) => ({
+    const items = PERMISSION_CATALOGUE.map((def) => ({
       key: def.key,
       name: def.name,
       category: def.category,
-      description: def.description ?? null,
+      description: def.description,
+      adminOnly: def.adminOnly,
+      assignable: def.assignable,
       roles_assigned: byPermKey.get(def.key) ?? [],
     }));
     res.status(200).json({ status: 'success', data: { items } });

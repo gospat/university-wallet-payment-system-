@@ -3348,18 +3348,19 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS/);
       expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS[\s\S]{0,400}VOID_INVOICES/);
       expect(permSeedSrc).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS[\s\S]{0,400}VOID_TRANSACTIONS/);
-      // Existing-install path uses bursaryMode detection and then branches into
-      //   if (bursaryMode === 'full') → BURSARY_PERMISSION_KEYS (fresh).
+      // Existing-install path uses the fresh-vs-initialized decision and then
+      // branches into
+      //   if (mustGrantBursaryDefaults) → BURSARY_PERMISSION_KEYS (fresh).
       //   else → BURSARY_RELEASE_UPGRADE_KEYS only (existing/delta-upgrade).
       // This regex verifies: the else branch has BURSARY_RELEASE_UPGRADE_KEYS.
-      expect(permSeedSrc).toMatch(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)[\s\S]{0,3000}BURSARY_PERMISSION_KEYS[\s\S]{0,7000}else[\s\S]{0,15000}BURSARY_RELEASE_UPGRADE_KEYS/);
+      expect(permSeedSrc).toMatch(/if\s*\(\s*mustGrantBursaryDefaults\s*\)[\s\S]{0,3000}BURSARY_PERMISSION_KEYS[\s\S]{0,9000}else[\s\S]{0,15000}BURSARY_RELEASE_UPGRADE_KEYS/);
       // The EXISTING branch MUST NOT pass BURSARY_PERMISSION_KEYS. Instead,
       // it should reference only the release set.
-      const [_before, afterFullBranch] = permSeedSrc.split(/if\s*\(\s*bursaryMode\s*===\s*['"]full['"]\s*\)/) as [string, string | undefined];
+      const [_before, afterFullBranch] = permSeedSrc.split(/if\s*\(\s*mustGrantBursaryDefaults\s*\)/) as [string, string | undefined];
       const elseSection = (afterFullBranch ?? '');
       expect(elseSection).toMatch(/BURSARY_RELEASE_UPGRADE_KEYS/);
-      // Fresh path (bursaryMode === 'full') still grants full BURSARY_PERMISSION_KEYS.
-      expect(permSeedSrc).toMatch(/bursaryMode\s*===\s*['"]full['"][\s\S]{0,2500}BURSARY_PERMISSION_KEYS/);
+      // Fresh path (mustGrantBursaryDefaults) still grants full BURSARY_PERMISSION_KEYS.
+      expect(permSeedSrc).toMatch(/mustGrantBursaryDefaults[\s\S]{0,2500}BURSARY_PERMISSION_KEYS/);
       // Safety guard: module-load-time guard against admin-only keys in the
       // release-upgrade set must exist (ADMIN_ONLY_SENSITIVE_KEYS check).
       expect(permSeedSrc).toMatch(/ADMIN_ONLY_SENSITIVE_KEYS\.has\(k\)|ADMIN_ONLY_SENSITIVE_KEYS[\s\S]{0,200}release.*upgrade|BURSARY_RELEASE_UPGRADE_KEYS[\s\S]{0,300}ADMIN_ONLY_SENSITIVE_KEYS/);
@@ -3517,25 +3518,25 @@ describe('Task 20 — Regression Suite (core flows + new endpoints)', () => {
       // Counter.findUnique by SENTINEL_ID must exist in bursary existing-install path.
       expect(permSeedSrc).toMatch(/counter\.findUnique[\s\S]{0,400}SENTINEL_ID/);
       // The delta-add of RELEASE_UPGRADE_KEYS must exist INSIDE the guard that checks alreadyApplied === false.
-      expect(permSeedSrc).toMatch(/alreadyApplied|sentinelFound|hasSentinel/);
-      expect(permSeedSrc).toMatch(/if\s*\(\s*!alreadyApplied[\s\S]{0,200}\)[\s\S]{0,2000}BURSARY_RELEASE_UPGRADE_KEYS|if\s*\(\s*\!\s*\(.*sentinel|if.*!alreadyApplied[\s\S]{0,4000}safeApplyDefaults/);
+      expect(permSeedSrc).toMatch(/alreadyApplied|releaseUpgradeApplied|sentinelFound|hasSentinel/);
+      expect(permSeedSrc).toMatch(/if\s*\(\s*!releaseUpgradeApplied\s*\)[\s\S]{0,2000}BURSARY_RELEASE_UPGRADE_KEYS/);
       // Counter.upsert SENTINEL_ID happens only in the "just applied delta" branch (not repeated if sentinel existed).
       expect(permSeedSrc).toMatch(/counter\.upsert[\s\S]{0,400}SENTINEL_ID/);
     });
 
     it('TR-47.3 Fail-safe: unknown DB error during sentinel read defaults to alreadyApplied=true (never re-issues delta); Counter-model-not-exist error swallowed gracefully (pre-migration environment)', () => {
-      // Counter.findUnique try/catch → unknown error path sets alreadyApplied=true.
-      expect(permSeedSrc).toMatch(/counter\.findUnique[\s\S]{0,1200}alreadyApplied\s*=\s*true/);
+      // Counter.findUnique try/catch → unknown error path sets releaseUpgradeApplied=true.
+      expect(permSeedSrc).toMatch(/counter\.findUnique[\s\S]{0,1200}releaseUpgradeApplied\s*=\s*true/);
       // Already-applied-true in catch block AND the block includes "for safety"/"skipping" or similar fail-safe wording.
-      expect(permSeedSrc).toMatch(/catch[\s\S]{0,1500}alreadyApplied\s*=\s*true/);
+      expect(permSeedSrc).toMatch(/catch[\s\S]{0,1500}releaseUpgradeApplied\s*=\s*true/);
       // "counter" + "exist" error message detection → swallowed to alreadyApplied=false (pre-migration first-run still applies).
       expect(permSeedSrc).toMatch(/counter.*exist|exist.*counter/i);
-      expect(permSeedSrc).toMatch(/alreadyApplied\s*=\s*false[\s\S]{0,200}pre-?migration|pre-?migration[\s\S]{0,200}alreadyApplied\s*=\s*false|first run anyway|first boot/i);
+      expect(permSeedSrc).toMatch(/releaseUpgradeApplied\s*=\s*false[\s\S]{0,200}pre-?migration|pre-?migration[\s\S]{0,200}releaseUpgradeApplied\s*=\s*false|first run anyway|first boot/i);
     });
 
     it('TR-47.4 Fresh-install Bursary path ALSO writes the same sentinel Counter row (so future restarts even with 0 Bursary rows still don\'t accidentally double-add delta)', () => {
-      // BursaryCount===0 / existingCountByRole 0 branch → also upserts the sentinel Counter row.
-      expect(permSeedSrc).toMatch(/existingCountByRole\.get\s*\(\s*Role\.BURSARY\s*\)\s*===\s*0|bursaryCount\s*===\s*0[\s\S]{0,5000}counter\.upsert[\s\S]{0,300}SENTINEL_ID/);
+      // Fresh-install (no Bursary rows → mustGrantBursaryDefaults) branch → also upserts the sentinel Counter row.
+      expect(permSeedSrc).toMatch(/bursaryHasRows[\s\S]{0,300}mustGrantBursaryDefaults[\s\S]{0,4000}counter\.upsert[\s\S]{0,300}SENTINEL_ID/);
     });
   });
 });

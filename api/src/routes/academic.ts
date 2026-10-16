@@ -462,11 +462,10 @@ router.get(
 );
 
 // ============ LEVEL ============
-// TODO: Add VIEW_LEVELS permission key to permissionSeed.ts and requirePermission('VIEW_LEVELS')
-// to GET /levels and GET /levels/:id routes once the perm key exists.
 router.get(
   '/levels',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_LEVELS'),
   validateQuery(ListQuerySchema),
   catchAsync(async (req: Request, res: Response) => {
     const data = await LevelService.list(req.query as any);
@@ -477,6 +476,7 @@ router.get(
 router.get(
   '/levels/:id',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_LEVELS'),
   validateParams(IdParam),
   catchAsync(async (req: Request, res: Response) => {
     const level = await LevelService.get(Number(req.params.id));
@@ -516,11 +516,10 @@ router.post(
 );
 
 // ============ ACADEMIC SESSION ============
-// TODO: Add VIEW_SESSIONS permission key to permissionSeed.ts and requirePermission('VIEW_SESSIONS')
-// to GET /sessions and GET /sessions/:id routes once the perm key exists.
 router.get(
   '/sessions',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_SESSIONS'),
   validateQuery(ListQuerySchema),
   catchAsync(async (req: Request, res: Response) => {
     const data = await AcademicSessionService.list(req.query as any);
@@ -531,6 +530,7 @@ router.get(
 router.get(
   '/sessions/:id',
   restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_SESSIONS'),
   validateParams(IdParam),
   catchAsync(async (req: Request, res: Response) => {
     const session = await AcademicSessionService.get(Number(req.params.id));

@@ -117,40 +117,6 @@ function decodeTokenPayload(token: string | null | undefined): DecodedTokenClaim
   }
 }
 
-// Role-based fallback permission sets (belt-and-suspenders). If the JWT decode crashes
-// (for any reason: malformed tokens, future JWT header changes, unknown encoding quirks)
-// AND the backend safeUserSelect body still omits permissions (which it currently does),
-// we STILL populate sensible defaults so the sidebar NEVER shows the dreaded
-// "No menu items available" panel for an authenticated admin/bursary user.
-// These arrays mirror the backend permissionSeed.ts exactly:
-//   ADMIN → 39 permission keys (entire set, matches screenshot 39/39)
-//   BURSARY → 33 keys = (39 total − 6 BURSARY_EXCLUDED keys), matches screenshot 33/39
-const FALLBACK_ALL_PERMISSION_KEYS: string[] = [
-  'VIEW_DASHBOARD',
-  'VIEW_STUDENTS', 'CREATE_STUDENT', 'BULK_UPLOAD_STUDENTS', 'VIEW_IMPORT_HISTORY',
-  'VIEW_BILL_CATEGORIES', 'VIEW_BILLS_CATALOGUE', 'CREATE_FEE', 'EDIT_FEE', 'BULK_UPLOAD_FEES', 'ASSIGN_FEES',
-  'VIEW_PAYMENTS', 'VERIFY_PAYMENT', 'PROCESS_REFUND',
-  'DIRECT_BILL_STUDENT', 'VIEW_DIRECT_BILLS_LOG',
-  'VIEW_RECEIPTS', 'GENERATE_RECEIPT', 'VERIFY_RECEIPT',
-  'AUDIT_LOGS_VIEW_LIMITED',
-  'VIEW_COLLEGES', 'VIEW_DEPARTMENTS', 'VIEW_PROGRAMMES',
-  'VIEW_RECONCILIATION', 'VIEW_RECONCILIATION_REPORTS',
-  'MANAGE_USERS', 'MANAGE_ROLES', 'SYSTEM_SETTINGS', 'PAYSTACK_CONFIG', 'AUDIT_LOGS_VIEW_FULL',
-  'REPORTS_VIEW_COLLECTIONS', 'REPORTS_VIEW_REVENUE', 'REPORTS_VIEW_ACCOUNTING',
-  'REPORTS_VIEW_RECONCILIATION', 'REPORTS_VIEW_OUTSTANDING', 'REPORTS_VIEW_STUDENT_STATEMENT',
-  'REPORTS_EXPORT_EXCEL', 'REPORTS_EXPORT_PDF', 'REPORTS_SCHEDULE',
-];
-const BURSARY_EXCLUDED_FALLBACK: ReadonlySet<string> = new Set([
-  'MANAGE_USERS', 'MANAGE_ROLES', 'PAYSTACK_CONFIG', 'SYSTEM_SETTINGS', 'AUDIT_LOGS_VIEW_FULL', 'REPORTS_SCHEDULE',
-]);
-const FALLBACK_BURSARY_PERMISSION_KEYS: string[] = FALLBACK_ALL_PERMISSION_KEYS.filter(
-  (k) => !BURSARY_EXCLUDED_FALLBACK.has(k),
-);
-const FALLBACK_PERMS_BY_ROLE: Readonly<Record<'ADMIN' | 'BURSARY', readonly string[]>> = {
-  ADMIN: FALLBACK_ALL_PERMISSION_KEYS,
-  BURSARY: FALLBACK_BURSARY_PERMISSION_KEYS,
-};
-
 function mergeTokenPermissionsIntoUser(
   user: User | null,
   token: string | null | undefined,
@@ -161,34 +127,25 @@ function mergeTokenPermissionsIntoUser(
   const tokenRole: Role | undefined = (claims?.role as Role) || undefined;
 
   // === RBAC PRIORITY CHAIN (HIGHEST → LOWEST) ====================================
-  // 1. user.permissions from API RESPONSE BODY (/auth/me, /auth/login, /auth/refresh)
-  //    — HIGHEST PRIORITY. This is the actual RolePermission rows in the DB RIGHT
-  //    NOW, re-fetched every time performSessionValidation() runs (page load,
-  //    token change, refetchUser). If Admin disabled Students for Bursary in the
-  //    Admin → Roles UI, then /auth/me returns user.permissions = 26 keys WITHOUT
-  //    VIEW_STUDENTS/CREATE_STUDENT/… — and that MUST win over the STALE signed
-  //    JWT accessToken claims, which were signed at the LAST login/refresh time
-  //    (maybe 14 days ago, still showing the old 33). Prior implementation had
-  //    these two REVERSED, causing the exact bug reported: "Admin unticked
-  //    Students → Bursary sidebar still shows Student Management".
-  // 2. tokenPerms (signed JWT accessToken claims) — used ONLY if API response body
-  //    does NOT carry a permissions array (backwards compat / older servers).
-  // 3. Role-based hardcoded fallback arrays (FALLBACK_PERMS_BY_ROLE) — absolute
-  //    last resort so sidebar NEVER shows the empty "No menu items available"
-  //    panel for a legitimately-authenticated admin/bursary user even if every
-  //    single pipeline above failed (malformed token, backend omits field,
-  //    corrupt JSON…).
+  // 1. user.permissions from the API RESPONSE BODY (/auth/me, /auth/login,
+  //    /auth/refresh) — AUTHORITATIVE. The backend resolves it from the ONE
+  //    canonical registry: ADMIN always receives the full registry, BURSARY is
+  //    resolved LIVE from the RolePermission table.
+  //    An EMPTY array is a VALID, MEANINGFUL value — it means "this role has no
+  //    permissions". It must NEVER be replaced by an invented default, otherwise
+  //    removing a permission in Admin → Roles would appear to have no effect.
+  // 2. tokenPerms (signed JWT accessToken claims) — used ONLY when the API
+  //    response carries no permissions array at all (older/partial payload).
+  // 3. [] — the frontend deliberately does NOT maintain its own hardcoded
+  //    permission list; it cannot know the backend registry.
   // =================================================================================
   let resolvedPerms: string[];
-  if (Array.isArray(user.permissions) && user.permissions.length > 0) {
+  if (Array.isArray(user.permissions)) {
     resolvedPerms = user.permissions;
-  } else if (tokenPerms && tokenPerms.length > 0) {
+  } else if (tokenPerms) {
     resolvedPerms = tokenPerms;
   } else {
-    const effectiveRole = (tokenRole ?? user.role) as 'ADMIN' | 'BURSARY' | 'STUDENT' | undefined;
-    resolvedPerms = effectiveRole === 'ADMIN' || effectiveRole === 'BURSARY'
-      ? [...FALLBACK_PERMS_BY_ROLE[effectiveRole]]
-      : [];
+    resolvedPerms = [];
   }
 
   return {

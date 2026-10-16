@@ -2,39 +2,37 @@ import { Prisma, Role } from '@prisma/client';
 import prisma from '../config/database';
 import { bumpRolePermsVersion } from '../middlewares/auth';
 
-// Sensitive ADMIN-ONLY capabilities. Bursary must NEVER receive these even
-// when they exist in PERMISSION_DEFS. These controls allow user impersonation,
-// queue job destruction, payment-provider credential exposure, refund approval
-// authority, and tenant-wide system configuration changes.
-const ADMIN_ONLY_SENSITIVE_KEYS = new Set([
-  // Identity & privilege escalation
-  'IMPERSONATE_USERS',
-  'MANAGE_USERS',
-  'MANAGE_ROLES',
-  // Payments trust / money movement authority
-  'APPROVE_REFUNDS',
-  'FLUSH_QUEUES',
-  // Configuration & secrets
-  'MANAGE_SETTINGS',
-  'SYSTEM_SETTINGS',
-  'PAYSTACK_CONFIG',
-  'MANAGE_PAYMENT_PROVIDERS',
-  'MANAGE_EMAIL_TEMPLATES',
-  // Full-audit exposure
-  'AUDIT_LOGS_VIEW_FULL',
-  // Automated BullMQ scheduled jobs (elevated trust — BullMQ queue access)
-  'REPORTS_SCHEDULE',
-  'SCHEDULE_REPORTS',
-]);
+// ---------------------------------------------------------------------------
+// CANONICAL PERMISSION REGISTRY
+// ---------------------------------------------------------------------------
+// PERMISSION_DEFS below is the SINGLE authoritative permission registry for the
+// whole application. The backend permission enum, the frontend types and the
+// GET /admin/permissions endpoint are all derived from / validated against it.
+//
+// ADMIN-only classification is declared INLINE on the registry entry itself via
+// `adminOnly: true` (see ADMIN_ONLY_PERMISSION_KEYS / isAdminOnlyPermission
+// derived after the array). Those capabilities can never be granted to a
+// configurable role (BURSARY) and are: user impersonation, role/user
+// administration, refund approval authority, queue destruction,
+// payment-provider credential exposure, tenant-wide configuration, full audit
+// exposure and automated BullMQ scheduled jobs.
+export interface PermissionDefinition {
+  key: string;
+  name: string;
+  category: string;
+  description?: string;
+  /** true = ADMIN-only; never assignable to a configurable role (BURSARY). */
+  adminOnly?: boolean;
+}
 
-export const PERMISSION_DEFS: { key: string; name: string; category: string; description?: string }[] = [
+export const PERMISSION_DEFS: PermissionDefinition[] = [
   { key: 'VIEW_DASHBOARD', name: 'View Dashboard', category: 'Dashboard' },
   { key: 'VIEW_AUDIT_LOG', name: 'View Audit Log', category: 'Admin' },
   { key: 'VIEW_USERS', name: 'View Users', category: 'Admin' },
-  { key: 'MANAGE_USERS', name: 'Manage Users', category: 'Admin' },
+  { key: 'MANAGE_USERS', name: 'Manage Users', category: 'Admin', adminOnly: true },
   { key: 'VIEW_ROLES', name: 'View Roles', category: 'Admin' },
-  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin' },
-  { key: 'IMPERSONATE_USERS', name: 'Impersonate Users', category: 'Admin' },
+  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin', adminOnly: true },
+  { key: 'IMPERSONATE_USERS', name: 'Impersonate Users', category: 'Admin', adminOnly: true },
   { key: 'VIEW_STUDENTS', name: 'View Students', category: 'Students' },
   { key: 'CREATE_STUDENT', name: 'Create Student', category: 'Students' },
   { key: 'MANAGE_STUDENTS', name: 'Manage Students', category: 'Students' },
@@ -56,7 +54,7 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
   { key: 'CANCEL_RECEIPTS', name: 'Cancel / Void Receipts', category: 'Receipts' },
   { key: 'VIEW_REFUNDS', name: 'View Refunds', category: 'Payments' },
   { key: 'INITIATE_REFUNDS', name: 'Initiate Refunds', category: 'Payments' },
-  { key: 'APPROVE_REFUNDS', name: 'Approve Refunds', category: 'Payments' },
+  { key: 'APPROVE_REFUNDS', name: 'Approve Refunds', category: 'Payments', adminOnly: true },
   { key: 'VIEW_SETTLEMENTS', name: 'View Settlements', category: 'Payments' },
   { key: 'CREATE_SETTLEMENTS', name: 'Record Settlements', category: 'Payments' },
   { key: 'VIEW_BILL_CATEGORIES', name: 'View Bill Categories', category: 'Fees' },
@@ -75,20 +73,22 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
   { key: 'VIEW_COLLEGES', name: 'View Colleges', category: 'Academic Structure' },
   { key: 'VIEW_DEPARTMENTS', name: 'View Departments', category: 'Academic Structure' },
   { key: 'VIEW_PROGRAMMES', name: 'View Programmes', category: 'Academic Structure' },
+  { key: 'VIEW_LEVELS', name: 'View Levels', category: 'Academic Structure' },
+  { key: 'VIEW_SESSIONS', name: 'View Academic Sessions', category: 'Academic Structure' },
   { key: 'VIEW_RECONCILIATION', name: 'View Reconciliation Dashboard', category: 'Reconciliation' },
   { key: 'VIEW_RECONCILIATION_REPORTS', name: 'View Reconciliation Reports', category: 'Reconciliation' },
   { key: 'RESOLVE_EXCEPTIONS', name: 'Resolve Reconciliation Exceptions', category: 'Reconciliation' },
   { key: 'EXPORT_RECONCILIATION', name: 'Export Reconciliation', category: 'Reconciliation' },
   { key: 'RUN_RECONCILIATION', name: 'Run Reconciliation', category: 'Reconciliation' },
-  { key: 'SYSTEM_SETTINGS', name: 'System Settings', category: 'Admin' },
-  { key: 'PAYSTACK_CONFIG', name: 'Payment Configuration', category: 'Admin' },
-  { key: 'MANAGE_PAYMENT_PROVIDERS', name: 'Manage Payment Providers', category: 'Admin' },
+  { key: 'SYSTEM_SETTINGS', name: 'System Settings', category: 'Admin', adminOnly: true },
+  { key: 'PAYSTACK_CONFIG', name: 'Payment Configuration', category: 'Admin', adminOnly: true },
+  { key: 'MANAGE_PAYMENT_PROVIDERS', name: 'Manage Payment Providers', category: 'Admin', adminOnly: true },
   { key: 'VIEW_SETTINGS', name: 'View Settings', category: 'Admin' },
-  { key: 'MANAGE_SETTINGS', name: 'Manage Settings', category: 'Admin' },
-  { key: 'MANAGE_EMAIL_TEMPLATES', name: 'Manage Email Templates', category: 'Admin' },
+  { key: 'MANAGE_SETTINGS', name: 'Manage Settings', category: 'Admin', adminOnly: true },
+  { key: 'MANAGE_EMAIL_TEMPLATES', name: 'Manage Email Templates', category: 'Admin', adminOnly: true },
   { key: 'VIEW_QUEUES', name: 'View Background Queues', category: 'Admin' },
-  { key: 'FLUSH_QUEUES', name: 'Flush Background Queues', category: 'Admin' },
-  { key: 'AUDIT_LOGS_VIEW_FULL', name: 'Audit Logs (Full)', category: 'Admin' },
+  { key: 'FLUSH_QUEUES', name: 'Flush Background Queues', category: 'Admin', adminOnly: true },
+  { key: 'AUDIT_LOGS_VIEW_FULL', name: 'Audit Logs (Full)', category: 'Admin', adminOnly: true },
   { key: 'AUDIT_LOGS_VIEW_LIMITED', name: 'Audit Logs (Limited)', category: 'Admin' },
   // === BURSARY REPORTS MODULE (existing preserved) ===
   { key: 'REPORTS_VIEW_COLLECTIONS', name: 'Reports: View Collections (R1/R2/R3)', category: 'Reports', description: 'View Daily/Monthly Collection reports and Dashboard collection summary cards' },
@@ -99,19 +99,57 @@ export const PERMISSION_DEFS: { key: string; name: string; category: string; des
   { key: 'REPORTS_VIEW_STUDENT_STATEMENT', name: 'Reports: View Individual Student Statement (R6)', category: 'Reports', description: 'View chronological ledger-style financial statement for one student by matric' },
   { key: 'REPORTS_EXPORT_EXCEL', name: 'Reports: Export Excel/CSV', category: 'Reports', description: 'Export any report to XLSX / CSV (Excel streaming writer, 250k row cap)' },
   { key: 'REPORTS_EXPORT_PDF', name: 'Reports: Export PDF', category: 'Reports', description: 'Export any report to branded PDF with Bells official header + page numbers' },
-  { key: 'REPORTS_SCHEDULE', name: 'Reports: Schedule Recurring (R20)', category: 'Reports', description: 'Create, edit, pause BullMQ-based scheduled report jobs (ADMIN only; Bursary excluded)' },
+  { key: 'REPORTS_SCHEDULE', name: 'Reports: Schedule Recurring (R20)', category: 'Reports', description: 'Create, edit, pause BullMQ-based scheduled report jobs (ADMIN only; Bursary excluded)', adminOnly: true },
   { key: 'VIEW_REPORTS', name: 'View Reports', category: 'Reports' },
   { key: 'EXPORT_REPORTS', name: 'Export Reports', category: 'Reports' },
-  { key: 'SCHEDULE_REPORTS', name: 'Schedule Reports', category: 'Reports' },
+  { key: 'SCHEDULE_REPORTS', name: 'Schedule Reports', category: 'Reports', adminOnly: true },
 ];
 
-const ALL_PERMISSION_KEYS = PERMISSION_DEFS.map((p) => p.key);
+export const ALL_PERMISSION_KEYS: readonly string[] = PERMISSION_DEFS.map((p) => p.key);
 
-const BURSARY_EXCLUDED = new Set<string>([
-  // ALL sensitive ADMIN-ONLY capabilities are always removed from Bursary.
-  // The union of ADMIN_ONLY_SENSITIVE_KEYS with a few additional explicit keys.
-  ...Array.from(ADMIN_ONLY_SENSITIVE_KEYS),
-]);
+/**
+ * SINGLE authoritative ADMIN-only permission definition.
+ * Derived from PERMISSION_DEFS (`adminOnly: true`) so the registry and the
+ * sensitive-permission policy can never drift apart. Used by the role-update
+ * endpoint (Layer 2), the runtime authorization guard (Layer 4) and the seed
+ * cleanup pre-sweep (Layer 3).
+ */
+export const ADMIN_ONLY_PERMISSION_KEYS: readonly string[] = PERMISSION_DEFS
+  .filter((p) => p.adminOnly === true)
+  .map((p) => p.key);
+
+export const ADMIN_ONLY_SENSITIVE_KEYS: ReadonlySet<string> = new Set(ADMIN_ONLY_PERMISSION_KEYS);
+
+export function isAdminOnlyPermission(key: string): boolean {
+  return ADMIN_ONLY_SENSITIVE_KEYS.has(key);
+}
+
+/** Registry entry shape exposed by GET /admin/permissions (canonical catalogue). */
+export interface PermissionCatalogueEntry {
+  key: string;
+  name: string;
+  category: string;
+  description: string | null;
+  adminOnly: boolean;
+  /** false for ADMIN-only capabilities — they are never assignable to BURSARY. */
+  assignable: boolean;
+}
+
+/**
+ * The canonical permission catalogue. The frontend obtains displayable
+ * permissions from GET /admin/permissions (which is built from this array) and
+ * must NOT maintain an independent master list.
+ */
+export const PERMISSION_CATALOGUE: readonly PermissionCatalogueEntry[] = PERMISSION_DEFS.map((p) => ({
+  key: p.key,
+  name: p.name,
+  category: p.category,
+  description: p.description ?? null,
+  adminOnly: p.adminOnly === true,
+  assignable: p.adminOnly !== true,
+}));
+
+const BURSARY_EXCLUDED: ReadonlySet<string> = ADMIN_ONLY_SENSITIVE_KEYS;
 
 export const BURSARY_PERMISSION_KEYS = ALL_PERMISSION_KEYS.filter(
   (k) => !BURSARY_EXCLUDED.has(k),
@@ -159,6 +197,19 @@ for (const k of BURSARY_RELEASE_UPGRADE_KEYS) {
   }
 }
 
+/**
+ * Explicit "BURSARY role has been initialized" marker (a Counter sentinel row).
+ *
+ * Replaces the unsafe `RolePermission count === 0 ⇒ never initialized` heuristic
+ * so that an intentionally zero-permission BURSARY role is NEVER re-seeded with
+ * defaults on a server restart. BURSARY defaults are applied exactly once, when
+ * the role has genuinely never been initialized.
+ *
+ * Reuses the existing Counter table/sentinel pattern (see
+ * BURSARY_RELEASE_UPGRADE_SENTINEL_ID) — therefore NO database migration.
+ */
+export const RBAC_BURSARY_INIT_SENTINEL_ID = 'rbac_bursary_role_initialized_20261016';
+
 export async function seedPermissions() {
   // === Pre-sweep: DELETE any BURSARY RolePermission rows for keys in BURSARY_EXCLUDED
   // (idempotent cleanup — upsert-only below would otherwise preserve stale grants
@@ -203,7 +254,7 @@ export async function seedPermissions() {
 
   const keyToIdMap = new Map<string, number>();
   const allPerms = await prisma.permission.findMany({
-    where: { key: { in: ALL_PERMISSION_KEYS } },
+    where: { key: { in: [...ALL_PERMISSION_KEYS] } },
     select: { id: true, key: true },
   });
   for (const p of allPerms) keyToIdMap.set(p.key, p.id);
@@ -232,7 +283,7 @@ export async function seedPermissions() {
    */
   const safeApplyDefaults = async (
     role: Role,
-    defaultKeys: string[],
+    defaultKeys: readonly string[],
     mode: 'full' | 'diffAdd',
     tx?: Prisma.TransactionClient,
   ) => {
@@ -293,24 +344,70 @@ export async function seedPermissions() {
     }
   };
 
-  const adminCount = existingCountByRole.get(Role.ADMIN) ?? 0;
-  const adminMode: 'full' | 'diffAdd' = adminCount === 0 ? 'full' : 'diffAdd';
-  await safeApplyDefaults(Role.ADMIN, ALL_PERMISSION_KEYS, adminMode);
+  // -------------------------------------------------------------------------
+  // ADMIN: protected SUPER-ADMINISTRATOR (see middlewares/auth.ts).
+  // Runtime authorization always grants ADMIN the whole registry, so its
+  // RolePermission rows exist only so the Roles/Permissions catalogue renders
+  // accurately. Keeping them complete can never weaken security and never
+  // undoes an administrator configuration, because ADMIN permissions are not
+  // user-configurable in this phase.
+  // -------------------------------------------------------------------------
+  await safeApplyDefaults(Role.ADMIN, ALL_PERMISSION_KEYS, 'full');
 
   const bursaryCount = existingCountByRole.get(Role.BURSARY) ?? 0;
-  const bursaryMode: 'full' | 'diffAdd' = bursaryCount === 0 ? 'full' : 'diffAdd';
-  if (bursaryMode === 'full') {
-    // FRESH installation: Bursary has never had a permission row → grant the
-    // complete safe Bursary default set.
-    // F4: atomic grant + sentinel inside a single prisma.$transaction so that
-    // a crash between grant and sentinel cannot leave ambiguous state that
-    // re-grants on the next boot. Counter-not-exist in pre-migration env
-    // rolls back the sentinel write; we fall back to the safe non-atomic
-    // grant-only path (the first boot is not customised yet; the sentinel
-    // write will retry on next boot once the Prisma client and DB schema have converged (Counter table already created by 0001_audit_gl_counter_receipts; transient unavailability can occur during rolling deploy drift when client and live DB schema are temporarily out of sync).
+
+  // -------------------------------------------------------------------------
+  // BURSARY: configurable. Its saved RolePermission set is AUTHORITATIVE.
+  //
+  // "Never initialized" is determined by an EXPLICIT marker — NEVER by
+  // `RolePermission count === 0`. A zero-permission BURSARY role is a VALID,
+  // intentional administrator configuration and must survive server restarts.
+  //
+  // Markers consulted (existing Counter table — no schema change):
+  //   RBAC_BURSARY_INIT_SENTINEL_ID        (this correction)
+  //   BURSARY_RELEASE_UPGRADE_SENTINEL_ID  (legacy proof of a prior seed)
+  // -------------------------------------------------------------------------
+  let bursaryInitialized = false;
+  try {
+    const markers = await prisma.counter.findMany({
+      where: { id: { in: [RBAC_BURSARY_INIT_SENTINEL_ID, BURSARY_RELEASE_UPGRADE_SENTINEL_ID] } },
+      select: { id: true },
+    });
+    bursaryInitialized = markers.length > 0;
+  } catch (e) {
+    const msg = (e as Error)?.message ?? '';
+    // Fail-safe: if we cannot PROVE the role is uninitialized, assume it IS
+    // initialized so defaults are never re-granted over an admin's config.
+    bursaryInitialized = true;
+    if (!(msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist'))) {
+      console.warn('[seedPermissions] BURSARY init marker read failed; assuming initialized (fail-safe):', msg.slice(0, 180));
+    }
+  }
+
+  // A pre-existing install that already has rows predates the marker; adopt its
+  // current state as initialized (add nothing, remove nothing).
+  const bursaryHasRows = bursaryCount > 0;
+  const mustGrantBursaryDefaults = !bursaryInitialized && !bursaryHasRows;
+
+  const writeBursaryInitMarker = async (tx?: Prisma.TransactionClient) => {
+    const db: Prisma.TransactionClient | typeof prisma = tx ?? prisma;
+    await db.counter.upsert({
+      where: { id: RBAC_BURSARY_INIT_SENTINEL_ID },
+      create: { id: RBAC_BURSARY_INIT_SENTINEL_ID, value: 1 },
+      update: {},
+    });
+  };
+
+  if (mustGrantBursaryDefaults) {
+    // FRESH installation: BURSARY has genuinely never been initialized. Apply
+    // the full safe default set and record the explicit init marker atomically
+    // so a crash between the two can never trigger a later re-grant.
     try {
       await prisma.$transaction(async (tx) => {
-        await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode, tx);
+        await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, 'full', tx);
+        await writeBursaryInitMarker(tx);
+        // The full default set already contains the release-upgrade delta keys;
+        // record that sentinel too so the delta never re-runs on this install.
         await tx.counter.upsert({
           where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
           create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
@@ -322,86 +419,70 @@ export async function seedPermissions() {
       const counterDoesNotExist =
         msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist');
       if (counterDoesNotExist) {
-        // Graceful rolling-deploy drift first-boot: Counter table not available yet
-        // due to temporary Prisma client / live DB schema divergence.
-        // Apply defaults (cannot write sentinel — server will retry tx-write
-        // on subsequent boots once client and DB schema have converged).
-        console.warn('[seedPermissions:bursary-full] Counter table not available during schema-drift first boot; wrote full Bursary defaults only (sentinel deferred until counter table exists during rolling deploy convergence).');
-        try { await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, bursaryMode); } catch {}
+        // Rolling-deploy schema drift: Counter table not converged yet, so the
+        // marker cannot be written. Apply defaults only; the marker is written
+        // on a subsequent boot once the schema has converged.
+        console.warn('[seedPermissions:bursary-init] Counter table not available during schema-drift first boot; wrote full Bursary defaults only (init marker deferred).');
+        try { await safeApplyDefaults(Role.BURSARY, BURSARY_PERMISSION_KEYS, 'full'); } catch {}
       } else {
-        console.warn('[seedPermissions:bursary-full] Atomic full-default grant + sentinel transaction failed:', msg.slice(0, 200));
+        console.warn('[seedPermissions:bursary-init] Atomic full-default grant + init marker failed:', msg.slice(0, 200));
       }
     }
   } else {
-    // EXISTING installation: Bursary role has been seeded before and admins
-    // may have intentionally removed individual grants (e.g., no student
-    // create, no email templates etc).
-    // E2 + F4: ONE-TIME upgrade. First sentinel-findUnique determines if the
-    // delta has already applied in a prior startup. The sentinel check is
-    // fail-safe: unknown DB error → alreadyApplied = true (we NEVER risk
-    // restoring VOID_INVOICES/VOID_TRANSACTIONS when admin removed them).
-    // If not applied: run grant + sentinel upsert in a SINGLE prisma.$transaction
-    // so crash between grant+sentinel cannot leave ambiguous state that
-    // re-adds on every boot. Counter not-exist graceful same as above.
-    let alreadyApplied = false;
+    // INITIALIZED / customized install: the saved RolePermission set is
+    // authoritative. Deliberately do NOT add missing default keys — that is
+    // exactly the behaviour that used to silently undo an administrator's
+    // intentional removals on every boot.
+    //
+    // The ONLY remaining write is the genuine ONE-TIME release-upgrade delta
+    // (BURSARY_RELEASE_UPGRADE_KEYS) for legacy installs that predate that
+    // release. It is gated by its own sentinel and cannot recur.
+    let releaseUpgradeApplied = false;
     try {
       const sentinelRow = await prisma.counter.findUnique({
         where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
         select: { id: true },
       });
-      alreadyApplied = !!sentinelRow;
+      releaseUpgradeApplied = !!sentinelRow;
     } catch (e) {
       const msg = (e as Error)?.message ?? '';
       if (msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist')) {
-        // Counter table doesn't exist yet — rolling-deploy drift during schema
-        // convergence. Fall back to running the delta (it will be the first
-        // run anyway so it is safe).
-        alreadyApplied = false;
+        releaseUpgradeApplied = false;
       } else {
-        // Unknown DB error: fail-safe NO-OP for the delta-add path so we
-        // never re-restore admin-removed permissions when unsure.
-        console.warn('[seedPermissions:bursary-diffAdd] Bursary sentinel read failed; skipping release-upgrade delta for safety:', msg.slice(0, 180));
-        alreadyApplied = true;
+        // Unknown DB error: fail-safe NO-OP so we never re-restore
+        // admin-removed permissions when unsure.
+        console.warn('[seedPermissions:bursary-upgrade] Bursary sentinel read failed; skipping release-upgrade delta for safety:', msg.slice(0, 180));
+        releaseUpgradeApplied = true;
       }
     }
-    if (!alreadyApplied) {
-      // First boot on existing install: delta-add the newly introduced
-      // cancellation permissions. Admin-only sensitive keys continue to be
-      // removed by the BURSARY_EXCLUDED pre-sweep above and are also
-      // explicitly excluded from BURSARY_RELEASE_UPGRADE_KEYS via module
-      // load-time guard.
+
+    if (!releaseUpgradeApplied) {
       const deltaKeys = Array.from(BURSARY_RELEASE_UPGRADE_KEYS);
       try {
-        // F4: atomic grant + sentinel write. If anything fails inside: no
-        // partial state — the transaction rolls back entirely so future
-        // startups will re-try the whole operation atomically.
         await prisma.$transaction(async (tx) => {
-          await safeApplyDefaults(Role.BURSARY, deltaKeys, bursaryMode, tx);
+          await safeApplyDefaults(Role.BURSARY, deltaKeys, 'diffAdd', tx);
           await tx.counter.upsert({
             where: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID },
             create: { id: BURSARY_RELEASE_UPGRADE_SENTINEL_ID, value: 1 },
             update: {},
           });
+          await writeBursaryInitMarker(tx);
         }, { timeout: 15000 });
       } catch (e) {
         const msg = (e as Error)?.message ?? '';
         const counterDoesNotExist =
           msg.toLowerCase().includes('counter') && msg.toLowerCase().includes('exist');
         if (counterDoesNotExist) {
-          // Rolling-deploy drift graceful path: Counter table not yet converged
-          // so sentinel write is impossible; apply the delta alone (no custom
-          // admin changes can have happened yet in a deploy-drift bootstrap
-          // because no runtime is running with stable schema).
-          console.warn('[seedPermissions:bursary-diffAdd] Counter table missing during rolling-deploy schema drift boot; applied delta defaults (no sentinel; re-tries next startup until counter table exists during convergence).');
-          try { await safeApplyDefaults(Role.BURSARY, deltaKeys, bursaryMode); } catch {}
+          console.warn('[seedPermissions:bursary-upgrade] Counter table missing during schema-drift boot; applied delta defaults only (sentinels deferred).');
+          try { await safeApplyDefaults(Role.BURSARY, deltaKeys, 'diffAdd'); } catch {}
         } else {
-          // Unknown failure: fail silently; do not leave ambiguous half-applied
-          // state; transaction rolled back automatically; next startup re-attempts
-          // the entire atomic upgrade again.
-          console.warn('[seedPermissions:bursary-diffAdd] Atomic delta grant + sentinel transaction failed; rolled back; will retry on next startup:', msg.slice(0, 200));
+          console.warn('[seedPermissions:bursary-upgrade] Atomic delta grant + sentinel failed; rolled back; will retry on next startup:', msg.slice(0, 200));
         }
       }
     }
+    // Note: when releaseUpgradeApplied === true the release sentinel already
+    // exists, which also means the BURSARY init marker exists (it is written
+    // alongside it), so there is nothing further to record here.
   }
 
   // Expose applied statistics for diagnostics (no logging secrets — only counts).

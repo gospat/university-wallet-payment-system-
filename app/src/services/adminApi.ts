@@ -35,9 +35,13 @@ export interface RolePermissionOut {
 }
 
 export interface RoleOut {
-  role: 'ADMIN' | 'BURSARY';
+  role: 'ADMIN' | 'BURSARY' | 'STUDENT';
   name: string;
   description: string;
+  /** true only for BURSARY — the single configurable role. */
+  modifiable: boolean;
+  /** true for ADMIN: protected super-administrator, never editable. */
+  isSuperAdmin: boolean;
   permissions: RolePermissionOut[];
   permissionsCount: number;
 }
@@ -47,6 +51,10 @@ export interface PermissionOut {
   name: string;
   category: string;
   description?: string | null;
+  /** true = ADMIN-only; never assignable to a configurable role (BURSARY). */
+  adminOnly: boolean;
+  /** false for ADMIN-only capabilities — they cannot be granted to BURSARY. */
+  assignable: boolean;
   roles_assigned: string[];
 }
 
@@ -156,11 +164,16 @@ export const usersApi = {
 
 export interface RoleDiff { added: string[]; removed: string[]; }
 
+export type ConfigurableRole = 'BURSARY';
+
 export const rolesApi = {
   list: () =>
-    api.get<{ data: { items: RoleOut[] } }>('/admin/roles').then((r) => (unwrapData<any>(r)?.items ?? []) as RoleOut[]),
-  get: (role: 'ADMIN' | 'BURSARY') =>
+    api
+      .get<{ data: { items: RoleOut[]; configurableRoles?: ConfigurableRole[] } }>('/admin/roles')
+      .then((r) => (unwrapData<any>(r)?.items ?? []) as RoleOut[]),
+  get: (role: RoleOut['role']) =>
     api.get<{ data: RoleOut }>(`/admin/roles/${role}`).then(unwrapData<RoleOut>),
+  // Only BURSARY is configurable; the backend rejects any other role with 403.
   assignPermissions: (role: 'ADMIN' | 'BURSARY', permissionKeys: string[]) =>
     api.post<{ data: RoleOut; diff?: RoleDiff }>('/admin/roles', { role, permissionKeys }).then((r) => unwrapData<any>(r) ?? {}),
   update: (role: 'ADMIN' | 'BURSARY', body: UpdateRolePermissionInput) =>
