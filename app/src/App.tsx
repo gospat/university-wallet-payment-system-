@@ -9,7 +9,11 @@ import BursaryLogin from './pages/auth/BursaryLogin';
 import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import StudentDashboard from './pages/student/Dashboard';
-import PrivateRoute, { RequirePermission } from './components/PrivateRoute';
+import PrivateRoute, {
+  RequirePermission,
+  RequireAnyPermission,
+  REPORTS_VIEW_PERMISSION_PREFIX,
+} from './components/PrivateRoute';
 import PortalShell from './components/PortalShell';
 import { FileQuestion, Home, ShieldAlert, Loader2 } from 'lucide-react';
 import { StudentFeesPage, InvoiceDetailPage } from './pages/student/Fees';
@@ -456,26 +460,26 @@ const App: React.FC = () => {
           </Route>
 
           <Route element={<PrivateRoute roles={['BURSARY', 'ADMIN']} />}>
-            <Route path="/bursary/dashboard" element={<Suspense fallback={<PageLoader />}><BursaryDashboard /></Suspense>} />
+            <Route path="/bursary/dashboard" element={<RequirePermission permission="VIEW_DASHBOARD"><Suspense fallback={<PageLoader />}><BursaryDashboard /></Suspense></RequirePermission>} />
             <Route path="/bursary/students" element={<RequirePermission permission="VIEW_STUDENTS"><Suspense fallback={<PageLoader />}><BursaryStudentsWrapped /></Suspense></RequirePermission>} />
-            <Route path="/bursary/fees" element={<Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense>} />
-            <Route path="/bursary/fees/:tab" element={<Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense>} />
-            <Route path="/bursary/bills/create" element={<Suspense fallback={<PageLoader />}><BursaryCreateBillWrapped /></Suspense>} />
+            <Route path="/bursary/fees" element={<RequireAnyPermission permissions={['VIEW_BILL_CATEGORIES', 'VIEW_BILLS_CATALOGUE', 'EDIT_FEE', 'BULK_UPLOAD_FEES', 'ASSIGN_FEES']}><Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense></RequireAnyPermission>} />
+            <Route path="/bursary/fees/:tab" element={<RequireAnyPermission permissions={['VIEW_BILL_CATEGORIES', 'VIEW_BILLS_CATALOGUE', 'EDIT_FEE', 'BULK_UPLOAD_FEES', 'ASSIGN_FEES']}><Suspense fallback={<PageLoader />}><BursaryFeesWrapped /></Suspense></RequireAnyPermission>} />
+            <Route path="/bursary/bills/create" element={<RequirePermission permission="CREATE_FEE"><Suspense fallback={<PageLoader />}><BursaryCreateBillWrapped /></Suspense></RequirePermission>} />
             <Route path="/bursary/refunds" element={<RequirePermission permission="PROCESS_REFUND"><Suspense fallback={<PageLoader />}><BursaryRefunds /></Suspense></RequirePermission>} />
 
             <Route path="/bursary/payments" element={<RequirePermission permission="VIEW_PAYMENTS"><Suspense fallback={<PageLoader />}><BursaryPaymentsWrapped /></Suspense></RequirePermission>} />
             <Route path="/bursary/receipts" element={<RequirePermission permission="VIEW_RECEIPTS"><Suspense fallback={<PageLoader />}><BursaryReceiptsWrapped /></Suspense></RequirePermission>} />
             <Route path="/bursary/audit-logs" element={<RequirePermission permission="AUDIT_LOGS_VIEW_LIMITED"><Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense></RequirePermission>} />
-            <Route path="/bursary/direct-billing" element={<Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense>} />
-            <Route path="/bursary/direct-billing/:tab" element={<Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense>} />
+            <Route path="/bursary/direct-billing" element={<RequireAnyPermission permissions={['DIRECT_BILL_STUDENT', 'VIEW_DIRECT_BILLS_LOG']}><Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense></RequireAnyPermission>} />
+            <Route path="/bursary/direct-billing/:tab" element={<RequireAnyPermission permissions={['DIRECT_BILL_STUDENT', 'VIEW_DIRECT_BILLS_LOG']}><Suspense fallback={<PageLoader />}><BursaryDirectBillingWrapped /></Suspense></RequireAnyPermission>} />
             <Route path="/bursary/reports/centre" element={
-              <RequirePermission permission="REPORTS_VIEW_COLLECTIONS"><Suspense fallback={<PageLoader />}><BursaryReportsCentre role="BURSARY" activePath="/bursary/reports/centre" /></Suspense></RequirePermission>
+              <RequireAnyPermission permissionPrefix={REPORTS_VIEW_PERMISSION_PREFIX}><Suspense fallback={<PageLoader />}><BursaryReportsCentre role="BURSARY" activePath="/bursary/reports/centre" /></Suspense></RequireAnyPermission>
             } />
             <Route path="/bursary/reports/view/:reportKey" element={
-              <Suspense fallback={<PageLoader />}><BursaryGenericReportWrapped /></Suspense>
+              <RequireAnyPermission permissionPrefix={REPORTS_VIEW_PERMISSION_PREFIX}><Suspense fallback={<PageLoader />}><BursaryGenericReportWrapped /></Suspense></RequireAnyPermission>
             } />
             <Route path="/bursary/reports/student-statement" element={
-              <RequirePermission permission="REPORTS_VIEW_COLLECTIONS"><Suspense fallback={<PageLoader />}><BursaryStudentStatementPage role="BURSARY" activePath="/bursary/reports/student-statement" /></Suspense></RequirePermission>
+              <RequirePermission permission="REPORTS_VIEW_STUDENT_STATEMENT"><Suspense fallback={<PageLoader />}><BursaryStudentStatementPage role="BURSARY" activePath="/bursary/reports/student-statement" /></Suspense></RequirePermission>
             } />
             <Route path="/bursary/reports/exceptions" element={
               <RequirePermission permission="REPORTS_VIEW_RECONCILIATION"><Suspense fallback={<PageLoader />}><BursaryReconciliationExceptionsPage role="BURSARY" activePath="/bursary/reports/exceptions" /></Suspense></RequirePermission>
@@ -495,20 +499,20 @@ const App: React.FC = () => {
             <Route path="/bursary/reports/programme" element={<Navigate to="/bursary/reports/view/hierarchical-revenue" replace />} />
             <Route path="/bursary/reports/student" element={<Navigate to="/bursary/reports/student-statement" replace />} />
             <Route path="/bursary/reconciliation" element={
-              <Suspense fallback={<PageLoader />}><BursaryReconciliationDashboard /></Suspense>
+              <RequirePermission permission="VIEW_RECONCILIATION"><Suspense fallback={<PageLoader />}><BursaryReconciliationDashboard /></Suspense></RequirePermission>
             } />
 
             <Route path="/bursary/academic/faculties" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/academic/faculties" title="Faculties" subtitle="Academic faculties (Admin-managed)" />
+              <RequirePermission permission="VIEW_COLLEGES"><PlaceholderPage role="BURSARY" activePath="/bursary/academic/faculties" title="Faculties" subtitle="Academic faculties (Admin-managed)" /></RequirePermission>
             } />
             <Route path="/bursary/academic/departments" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/academic/departments" title="Departments" subtitle="Academic departments (Admin-managed)" />
+              <RequirePermission permission="VIEW_DEPARTMENTS"><PlaceholderPage role="BURSARY" activePath="/bursary/academic/departments" title="Departments" subtitle="Academic departments (Admin-managed)" /></RequirePermission>
             } />
             <Route path="/bursary/academic/programmes" element={
-              <PlaceholderPage role="BURSARY" activePath="/bursary/academic/programmes" title="Programmes" subtitle="Academic programmes (Admin-managed)" />
+              <RequirePermission permission="VIEW_PROGRAMMES"><PlaceholderPage role="BURSARY" activePath="/bursary/academic/programmes" title="Programmes" subtitle="Academic programmes (Admin-managed)" /></RequirePermission>
             } />
             <Route path="/bursary/academic/student-categories" element={
-              <Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense>
+              <RequirePermission permission="VIEW_STUDENTS"><Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense></RequirePermission>
             } />
           </Route>
 

@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { i18n } from '../i18n/en';
 import { searchAdmin, AdminSearchResponse, SearchStudentRow } from '../services/searchApi';
+import { REPORTS_VIEW_PERMISSION_PREFIX } from './PrivateRoute';
 
 type Role = 'STUDENT' | 'ADMIN' | 'BURSARY';
 
@@ -51,6 +52,13 @@ interface NavItem {
   exact?: boolean;
   sub?: boolean;
   requiresPermission?: string;
+  /**
+   * Visible when the session owns ANY permission beginning with this prefix.
+   * Used for pages reachable through more than one capability (e.g. the Reports
+   * Centre, which any single `REPORTS_VIEW_*` grant may open). ADMIN always
+   * sees the item; an empty permission array never does.
+   */
+  anyPermissionPrefix?: string;
   disabled?: boolean;
   onClick?: () => void;
   counterKey?: string;
@@ -150,6 +158,23 @@ const hasPermission = (
   // return false and hide Administration + Scheduled Reports items from Bursary.
   if (!userPermissions || userPermissions.length === 0) return false;
   return userPermissions.includes(requiresPermission);
+};
+
+/**
+ * Does the session own ANY permission with the given prefix?
+ * ADMIN (super-administrator) always passes; an empty permission array never
+ * does. Mirrors `hasPermission` above and is used only to decide sidebar
+ * VISIBILITY for pages reachable through more than one capability.
+ */
+const hasPermissionPrefix = (
+  prefix: string | undefined,
+  userPermissions?: string[],
+  role?: Role,
+): boolean => {
+  if (!prefix) return true;
+  if (role === 'ADMIN') return true;
+  if (!userPermissions || userPermissions.length === 0) return false;
+  return userPermissions.some((p) => p.startsWith(prefix));
 };
 
 const buildStudentNav = (_counters?: Record<string, number>): NavGroup[] => [
@@ -285,9 +310,9 @@ const buildAdminNav = (
         // routes): general operational overview (Dashboard) vs reconciliation/settlement
         // view (Reconciliation Overview).
         { to: '/bursary/reconciliation', icon: Scale, label: 'Reconciliation Overview', sub: true, requiresPermission: 'VIEW_RECONCILIATION' },
-        { to: '/bursary/reports/centre', icon: BarChart3, label: 'Reports Centre', sub: true, requiresPermission: 'REPORTS_VIEW_COLLECTIONS' },
+        { to: '/bursary/reports/centre', icon: BarChart3, label: 'Reports Centre', sub: true, anyPermissionPrefix: REPORTS_VIEW_PERMISSION_PREFIX },
         { to: '/bursary/reports/exceptions', icon: Shield, label: 'Reconciliation Exceptions', sub: true, requiresPermission: 'REPORTS_VIEW_RECONCILIATION' },
-        { to: '/bursary/reports/student-statement', icon: Search, label: 'Student Statement', sub: true, requiresPermission: 'REPORTS_VIEW_COLLECTIONS' },
+        { to: '/bursary/reports/student-statement', icon: Search, label: 'Student Statement', sub: true, requiresPermission: 'REPORTS_VIEW_STUDENT_STATEMENT' },
         { to: '/bursary/reports/export-centre', icon: FileText, label: 'Export Centre', sub: true, requiresPermission: 'REPORTS_EXPORT_EXCEL' },
         { to: '/bursary/reports/scheduled', icon: CreditCard, label: 'Scheduled Reports', sub: true, requiresPermission: 'REPORTS_SCHEDULE' },
       ],
@@ -444,7 +469,11 @@ const PortalShell: React.FC<PortalShellProps> = ({
       navGroups
         .map((g) => ({
           ...g,
-          visibleItems: g.items.filter((item) => hasPermission(item.requiresPermission, userPermissions, role)),
+          visibleItems: g.items.filter(
+            (item) =>
+              hasPermission(item.requiresPermission, userPermissions, role) &&
+              hasPermissionPrefix(item.anyPermissionPrefix, userPermissions, role),
+          ),
         }))
         .filter((g) => g.visibleItems.length > 0),
     [navGroups, userPermissions, role],

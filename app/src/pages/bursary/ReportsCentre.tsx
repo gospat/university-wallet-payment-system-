@@ -326,7 +326,21 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
     return out;
   }, [preset, customFrom, customTo, provider]);
 
+  const canViewCollections = hasPermission('REPORTS_VIEW_COLLECTIONS', userPerms, role);
+  const canViewReconciliation = hasPermission('REPORTS_VIEW_RECONCILIATION', userPerms, role);
+
   useEffect(() => {
+    // GET /reports/dashboard-summary is protected by REPORTS_VIEW_COLLECTIONS on
+    // the backend. A user who reached the Reports Centre through a different
+    // report permission (REVENUE / ACCOUNTING / RECONCILIATION) must still be
+    // able to use this page, so we never request collection data the session is
+    // not entitled to view — and a denied request must never fail the page.
+    if (!canViewCollections) {
+      setCards(null);
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
     let mounted = true;
     setLoading(true);
     setLoadError(null);
@@ -335,9 +349,16 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
       .catch((e: any) => { if (mounted) setLoadError(String(e?.message ?? e).slice(0, 200)); })
       .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
-  }, [filters]);
+  }, [filters, canViewCollections]);
 
   useEffect(() => {
+    // The exceptions badge is only meaningful for a session allowed to open the
+    // Reconciliation Exceptions report; skip the request entirely otherwise.
+    if (!canViewReconciliation) {
+      setExcTotalCount(null);
+      setExcLoading(false);
+      return;
+    }
     let mounted = true;
     setExcLoading(true);
     const ef: ReportsBaseFilters = {};
@@ -348,7 +369,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
       .catch(() => { if (mounted) setExcTotalCount(0); })
       .finally(() => { if (mounted) setExcLoading(false); });
     return () => { mounted = false; };
-  }, [filters.dateFrom, filters.dateTo]);
+  }, [filters.dateFrom, filters.dateTo, canViewReconciliation]);
 
   const brand = role === 'BURSARY' ? i18n.portals.bursary.dashboardBrand : i18n.portals.admin.dashboardBrand;
   const userText = role === 'BURSARY'
@@ -476,7 +497,11 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
         </div>
       )}
 
-      {/* 12+ Summary Cards Grid */}
+      {/* 12+ Summary Cards Grid — every card is backed by GET /reports/dashboard-summary,
+          which the backend gates with REPORTS_VIEW_COLLECTIONS. The section is hidden
+          entirely for sessions that may not view collections so no unauthorized
+          collection summary data is fetched or displayed. */}
+      {canViewCollections && (
       <div className="mb-6">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
@@ -545,6 +570,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
           })}
         </div>
       </div>
+      )}
 
       {/* Report Library — categorized */}
       <div className="pb-8">

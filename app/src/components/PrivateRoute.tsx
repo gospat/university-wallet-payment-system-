@@ -143,4 +143,58 @@ export const RequirePermission: React.FC<{ permission: string; children: React.R
   return <AccessDenied user={user} />;
 };
 
+/**
+ * Prefix identifying the report-VIEW capabilities that may grant entry to the
+ * Reports Centre. Deliberately excludes:
+ *   • `REPORTS_EXPORT_*` — an export capability alone is not permission to view
+ *     reports;
+ *   • `REPORTS_SCHEDULE` — ADMIN-only, so it can never be a BURSARY entry
+ *     capability.
+ * Any future `REPORTS_VIEW_*` key added to the canonical backend registry is
+ * therefore admitted automatically and this rule can never drift.
+ */
+export const REPORTS_VIEW_PERMISSION_PREFIX = 'REPORTS_VIEW_';
+
+/**
+ * Does the session hold ANY of `permissions`, or any permission beginning with
+ * `permissionPrefix`? ADMIN (the protected super-administrator) always passes;
+ * an EMPTY permissions array means "zero permissions" and never grants access.
+ *
+ * Used where a single page is legitimately reachable through more than one
+ * capability (e.g. the Reports Centre and the Bills workspace) — the backend
+ * still enforces the specific capability for every individual request.
+ */
+export function hasAnyPermission(
+  user: SessionUser | null | undefined,
+  permissions?: string[],
+  permissionPrefix?: string,
+): boolean {
+  if (!user) return false;
+  if (user.role === 'ADMIN') return true;
+  const owned = user.permissions;
+  if (!Array.isArray(owned) || owned.length === 0) return false;
+  if (permissions && permissions.some((p) => owned.includes(p))) return true;
+  if (permissionPrefix && owned.some((p) => p.startsWith(permissionPrefix))) return true;
+  return false;
+}
+
+/**
+ * Permission-aware route/element guard that renders `children` when the session
+ * holds AT LEAST ONE of the supplied capabilities. ADMIN always passes.
+ * Renders the same "Access Denied" screen as PrivateRoute otherwise.
+ */
+export const RequireAnyPermission: React.FC<{
+  /** Explicit capability keys — pass when the allowed set is a fixed list. */
+  permissions?: string[];
+  /** Capability prefix — pass when any registered key with that prefix qualifies. */
+  permissionPrefix?: string;
+  children: React.ReactNode;
+}> = ({ permissions, permissionPrefix, children }) => {
+  const { user, isValidating } = useAuth();
+  if (isValidating) return <SessionSpinner />;
+  if (!user) return <SessionSpinner />;
+  if (hasAnyPermission(user, permissions, permissionPrefix)) return <>{children}</>;
+  return <AccessDenied user={user} />;
+};
+
 export default PrivateRoute;
