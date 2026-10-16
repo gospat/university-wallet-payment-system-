@@ -80,6 +80,7 @@ const safeUserSelect = {
   academicSession: true,
   accountStatus: true,
   mustChangePassword: true,
+  lastLoginAt: true,
   createdAt: true,
   updatedAt: true,
 } as const;

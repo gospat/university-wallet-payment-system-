@@ -60,6 +60,8 @@ const BursaryReconciliationExceptionsPage = React.lazy(() => import('./pages/bur
 const BursaryReconciliationDashboard = React.lazy(() => import('./pages/bursary/ReconciliationDashboard').then(m => ({ default: m.BursaryReconciliationDashboard })));
 const BursaryExportCentre = React.lazy(() => import('./pages/bursary/ExportCentre'));
 const BursaryScheduledReports = React.lazy(() => import('./pages/bursary/ScheduledReports'));
+// STAFF SELF-SERVICE — shared My Profile page for ADMIN + BURSARY (role from useAuth)
+const StaffProfilePage = React.lazy(() => import('./pages/profile/StaffProfile'));
 
 const PageLoader: React.FC = () => (
   <div className="min-h-[60vh] flex items-center justify-center">
@@ -457,6 +459,9 @@ const App: React.FC = () => {
 
             <Route path="/admin/direct-billing" element={<Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense>} />
             <Route path="/admin/direct-billing/:tab" element={<Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense>} />
+            {/* Self-service My Profile — personal account capability, NOT an RBAC
+                operational permission. Role-protected for ADMIN only. */}
+            <Route path="/admin/profile" element={<Suspense fallback={<PageLoader />}><StaffProfilePage /></Suspense>} />
           </Route>
 
           <Route element={<PrivateRoute roles={['BURSARY', 'ADMIN']} />}>
@@ -514,6 +519,10 @@ const App: React.FC = () => {
             <Route path="/bursary/academic/student-categories" element={
               <RequirePermission permission="VIEW_STUDENTS"><Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense></RequirePermission>
             } />
+            {/* Self-service My Profile — personal account capability. Deliberately
+                NOT wrapped in RequirePermission: a BURSARY user with an EMPTY
+                permission set must still reach it. Role-guarded only. */}
+            <Route path="/bursary/profile" element={<Suspense fallback={<PageLoader />}><StaffProfilePage /></Suspense>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/404" replace />} />

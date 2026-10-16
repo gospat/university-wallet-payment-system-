@@ -25,6 +25,7 @@ interface User {
   academicSession?: string | null;
   accountStatus?: 'ACTIVE' | 'SUSPENDED' | 'GRADUATED' | 'WITHDRAWN';
   mustChangePassword?: boolean | null;
+  lastLoginAt?: string | null;
   permissions?: string[];
   createdAt?: string;
   updatedAt?: string;

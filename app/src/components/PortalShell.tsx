@@ -337,6 +337,21 @@ const buildAdminNav = (
     });
   }
 
+  // MY ACCOUNT — personal account capability, NOT an operational RBAC permission.
+  // The Profile item deliberately carries NO `requiresPermission` (and no
+  // `anyPermissionPrefix`) so it is ALWAYS visible to any authenticated
+  // ADMIN/BURSARY session — including a BURSARY user whose permission set is
+  // empty (`permissions: []`), who must still be able to open Profile, view
+  // their own account details, change their own password and log out.
+  // Access control is enforced by ROUTE ROLE (/admin/profile, /bursary/profile),
+  // and the page itself only ever renders the caller's own /auth/me record.
+  // Deliberately NOT introduced: a VIEW_PROFILE / EDIT_PROFILE permission.
+  groups.push({
+    title: 'MY ACCOUNT',
+    headingIcon: UserCircle2,
+    items: [{ to: `${prefix}/profile`, icon: UserCircle2, label: 'Profile' }],
+  });
+
   return groups;
 };
 
@@ -463,6 +478,11 @@ const PortalShell: React.FC<PortalShellProps> = ({
   const navGroups = role === 'STUDENT'
     ? buildStudentNav(navCounters)
     : buildAdminNav(role, navCounters, userPermissions);
+
+  // Discoverability: the header name/avatar links to the signed-in user's own
+  // profile. Logout stays a separate control.
+  const profilePath =
+    role === 'ADMIN' ? '/admin/profile' : role === 'BURSARY' ? '/bursary/profile' : '/student/profile';
 
   const visibleNavGroups = useMemo(
     () =>
@@ -977,13 +997,18 @@ const PortalShell: React.FC<PortalShellProps> = ({
           {!showGlobalSearch && <div className="flex-1" />}
 
           <div className="flex items-center gap-3 shrink-0">
-            <div className="hidden sm:flex items-center gap-2">
+            <Link
+              to={profilePath}
+              className="hidden sm:flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-gray-100 transition-colors"
+              aria-label="Open my profile"
+              title="My Profile"
+            >
               <UserCircle2 className="h-4 w-4 text-gray-500" />
               <div className="flex flex-col leading-tight">
                 <span className="text-sm text-gray-700 truncate max-w-[10rem]">{userText}</span>
                 {userEmail && <span className="text-xs text-gray-400 truncate max-w-[10rem]">{userEmail}</span>}
               </div>
-            </div>
+            </Link>
             <button
               type="button"
               onClick={onLogout}

@@ -265,12 +265,30 @@ describe('A/B/C/D/G/H. Sidebar visibility matches the route permission', () => {
     expect(href('/bursary/reports/centre')).toBeTruthy();
   });
 
-  it('H. an EMPTY BURSARY permission array yields the empty-menu notice', async () => {
+  it('H. an EMPTY BURSARY permission array grants NO operational capability', async () => {
     await renderShell('BURSARY', []);
     expect(href('/bursary/reports/centre')).toBeNull();
     expect(href('/bursary/reports/student-statement')).toBeNull();
     expect(href('/bursary/dashboard')).toBeNull();
-    expect(container.textContent).toContain('No menu items available');
+    expect(href('/bursary/students')).toBeNull();
+    expect(href('/bursary/payments')).toBeNull();
+    // Self-service "MY ACCOUNT → Profile" is a PERSONAL account capability, not
+    // an operational RBAC capability: it never requires a permission, so even a
+    // zero-permission BURSARY session must still see it (and must therefore NOT
+    // be shown the empty-menu notice).
+    expect(href('/bursary/profile')).toBeTruthy();
+    expect(container.textContent).toContain('MY ACCOUNT');
+    expect(container.textContent).not.toContain('No menu items available');
+  });
+
+  it('H2. MY ACCOUNT → Profile is the ONLY sidebar item a zero-permission BURSARY session sees', async () => {
+    await renderShell('BURSARY', []);
+    // Scope to the sidebar <nav>: the header name/avatar area also links to the
+    // user's own profile (discoverability), which is not a navigation item.
+    const links = Array.from(container.querySelectorAll('nav a[href^="/bursary/"]'))
+      .map((a) => a.getAttribute('href'));
+    expect(links).toEqual(['/bursary/profile']);
+    expect(container.textContent).toContain('Profile');
   });
 
   it('G. ADMIN sidebar is unrestricted even with no explicit permissions', async () => {
@@ -290,16 +308,46 @@ describe('F/H. Static route contract — every /bursary/* route is guarded', () 
 
   const GUARDS = ['RequirePermission', 'RequireAnyPermission', 'Navigate'];
 
-  it('no /bursary/* route relies on role-only PrivateRoute (no bare Suspense element)', () => {
+  // Self-service My Profile is a PERSONAL account capability, not an operational
+  // RBAC capability. It is deliberately ROLE-guarded only (never permission-
+  // guarded) so that a BURSARY user with an EMPTY permission set can still open
+  // their own profile, view their own account details, change their own password
+  // and log out. Only the personal-capability route(s) are exempted here.
+  const PERSONAL_CAPABILITY_ROUTES = ['/bursary/profile'];
+
+  const routeLine = (needle: string) =>
+    APP_SRC.split('\n').find((l) => l.includes(needle)) ?? '';
+
+  it('no /bursary/* OPERATIONAL route relies on role-only PrivateRoute (no bare Suspense element)', () => {
     const unguarded: string[] = [];
     const re = /path="(\/bursary\/[^"]*)"\s*element=\{\s*<([A-Za-z]+)/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(APP_SRC)) !== null) {
       // `/bursary/login` is the public sign-in route, not a protected page.
       if (m[1] === '/bursary/login') continue;
+      // Personal account capability — intentionally role-guarded only.
+      if (PERSONAL_CAPABILITY_ROUTES.includes(m[1])) continue;
       if (!GUARDS.includes(m[2])) unguarded.push(`${m[1]} -> <${m[2]}>`);
     }
     expect(unguarded).toEqual([]);
+  });
+
+  it('F2. /bursary/profile exists, renders the shared staff page and carries NO permission guard', () => {
+    const line = routeLine('path="/bursary/profile"');
+    expect(line).toContain('<StaffProfilePage />');
+    expect(line).not.toContain('RequirePermission');
+    expect(line).not.toContain('RequireAnyPermission');
+    // It lives inside the role-guarded BURSARY/ADMIN route group, so it is not public.
+    expect(APP_SRC).toContain("<PrivateRoute roles={['BURSARY', 'ADMIN']} />");
+  });
+
+  it('F3. /admin/profile exists, renders the shared staff page and carries NO permission guard', () => {
+    const line = routeLine('path="/admin/profile"');
+    expect(line).toContain('<StaffProfilePage />');
+    expect(line).not.toContain('RequirePermission');
+    expect(line).not.toContain('RequireAnyPermission');
+    // It lives inside the ADMIN-only route group, so a STUDENT/BURSARY cannot reach it.
+    expect(APP_SRC).toContain("<PrivateRoute roles={['ADMIN']} />");
   });
 
   it('A. student-statement route maps to REPORTS_VIEW_STUDENT_STATEMENT only', () => {
