@@ -362,6 +362,8 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
     previewFeeUpload: noop, stageFeeUpload: noop, stageStudentUpload: noop,
     downloadErrorCsv: jest.fn((_r: any, res: any) => res.status(200).send('csv')),
     confirmStudentUpload: noop,
+    listImportRuns: passArr, getImportRun: passArr, listImportRunRows: passArr,
+    downloadCredentialsCsv: passArr, resendImportRowCredentials: passArr,
   }));
   jest.mock('../controllers/feeBulkUpload', () => ({
     bulkUploadFees: noop, stageFeeUpload: noop, previewFeeUpload: noop,
@@ -575,6 +577,8 @@ describe('8 limiters + webhook regression', () => {
       previewFeeUpload: noop, stageFeeUpload: noop, stageStudentUpload: noop,
       downloadErrorCsv: jest.fn((_r: any, res: any) => res.status(200).send('csv')),
       confirmStudentUpload: noop,
+      listImportRuns: passArr, getImportRun: passArr, listImportRunRows: passArr,
+      downloadCredentialsCsv: passArr, resendImportRowCredentials: passArr,
     }));
     jest.mock('../controllers/feeBulkUpload', () => ({
       bulkUploadFees: noop, stageFeeUpload: noop, previewFeeUpload: noop,

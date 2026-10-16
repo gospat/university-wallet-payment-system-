@@ -265,6 +265,7 @@ const buildAdminNav = (
         { to: `${prefix}/academic/faculties`, icon: School, label: 'Colleges', sub: true, requiresPermission: 'VIEW_COLLEGES' },
         { to: `${prefix}/academic/departments`, icon: School, label: 'Departments', sub: true, requiresPermission: 'VIEW_DEPARTMENTS' },
         { to: `${prefix}/academic/programmes`, icon: School, label: 'Programmes', sub: true, requiresPermission: 'VIEW_PROGRAMMES' },
+        { to: `${prefix}/academic/student-categories`, icon: School, label: 'Student Categories', sub: true, requiresPermission: 'VIEW_STUDENTS' },
       ],
     },
   ];

@@ -153,6 +153,31 @@ export async function navCounters(): Promise<NavCounters> {
   }
 }
 
+/**
+ * Extracts a user-friendly message from an error thrown by the shared API client.
+ * The response interceptor normalizes AxiosErrors into an Error carrying
+ * { message, statusCode, payload }, but some call sites/other axios instances
+ * still surface the raw `err.response.data.error`. Support both shapes.
+ */
+export function apiErrorMessage(err: unknown, fallback = 'Something went wrong.'): string {
+  const e = err as
+    | {
+        response?: { data?: { error?: string; message?: string } };
+        payload?: { error?: string; message?: string };
+        message?: string;
+      }
+    | null
+    | undefined;
+  return (
+    e?.response?.data?.error ??
+    e?.response?.data?.message ??
+    e?.payload?.error ??
+    e?.payload?.message ??
+    e?.message ??
+    fallback
+  );
+}
+
 export async function downloadBlob(
   relativePath: string,
   fallbackFilename: string,

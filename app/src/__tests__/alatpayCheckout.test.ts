@@ -1,6 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { launchAlatpayNativeModal } from '../utils/alatpayCheckout';
 import type { AlatpayPublicCheckout, AlatpayNativeModalLaunchCallbacks } from '../types/alatpay';
+
+type ReportTransactionFn = AlatpayNativeModalLaunchCallbacks['onReportTransaction'];
+type ClosedFn = NonNullable<AlatpayNativeModalLaunchCallbacks['onClosed']>;
+type ErrorFn = NonNullable<AlatpayNativeModalLaunchCallbacks['onError']>;
 
 type CapturedCfg = {
   onTransaction: (tx: unknown) => void;
@@ -38,14 +42,14 @@ function makeCheckout(): AlatpayPublicCheckout {
 
 describe('alatpayCheckout — actual implementation', () => {
   let capturedCfg!: CapturedCfg;
-  let reportSpy: ReturnType<typeof vi.fn>;
-  let closedSpy: ReturnType<typeof vi.fn>;
-  let errorSpy: ReturnType<typeof vi.fn>;
+  let reportSpy: Mock<ReportTransactionFn>;
+  let closedSpy: Mock<ClosedFn>;
+  let errorSpy: Mock<ErrorFn>;
 
   beforeEach(() => {
-    reportSpy = vi.fn();
-    closedSpy = vi.fn();
-    errorSpy = vi.fn();
+    reportSpy = vi.fn<ReportTransactionFn>();
+    closedSpy = vi.fn<ClosedFn>();
+    errorSpy = vi.fn<ErrorFn>();
     window.Alatpay = {
       setup: (cfg: CapturedCfg) => {
         capturedCfg = cfg;

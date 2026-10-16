@@ -605,6 +605,7 @@ export const studentTypes = {
   PART_TIME: 'Part-Time',
   JUPEB: 'JUPEB',
   OTHER: 'Other',
+  TOP_UP: 'Top-Up',
 } as const;
 
 export const entryModes = {
@@ -624,6 +625,7 @@ export const students = {
   filterLevel: 'Level',
   filterSession: 'Session',
   filterStudentType: 'Student Type',
+  filterStudentCategory: 'Student Category',
   filterAccountStatus: 'Account Status',
   filterAll: 'All',
   sortBy: 'Sort by',
@@ -651,6 +653,7 @@ export const students = {
   headerLevel: 'Level',
   headerSession: 'Session',
   headerStudentType: 'Type',
+  headerStudentCategory: 'Category',
   headerAccountStatus: 'Status',
   headerWalletBalance: 'Account',
   headerCreated: 'Created',
@@ -690,6 +693,8 @@ export const students = {
   fieldLevel: 'Level (100, 200, …)',
   fieldAcademicSession: 'Academic Session',
   fieldStudentType: 'Student Type',
+  fieldStudentCategory: 'Student Category',
+  fieldStudentCategoryHint: 'Managed under Academic Structure → Student Categories.',
   fieldEntryMode: 'Entry Mode',
   fieldAdmissionYear: 'Admission Year',
   fieldGraduationYear: 'Graduation Year (Expected)',
@@ -736,6 +741,24 @@ export const students = {
     `Created ${c}, skipped ${s}, failed ${f}.`,
   uploadStageNotFound:
     'Upload stage expired or not found. Please start over.',
+  uploadSendEmails: 'Send credential emails to students',
+  uploadSendEmailsHint:
+    'Queue an email with a temporary password to each newly created student. Failed rows are never emailed.',
+  uploadQueued: 'Import queued — running in the background',
+  uploadQueuedHint:
+    'You can keep this window open to watch progress, or close it — the import continues on the server.',
+  uploadProgress: 'Progress',
+  uploadProcessed: 'Processed',
+  uploadSuccessCount: 'Succeeded',
+  uploadFailCount: 'Failed',
+  uploadSkippedCount: 'Skipped',
+  uploadRunning: 'Importing…',
+  uploadDownloadCredentials: 'Download credentials CSV',
+  uploadDownloadCredentialsHint:
+    'Only available once at least one student was created successfully.',
+  uploadRunFailed:
+    'The import run failed. No students were imported from this run — please review the file and try again.',
+  historyTab: 'Import History',
 };
 
 export const studentFees = {

@@ -29,6 +29,7 @@ enum StudentType {
   PART_TIME
   JUPEB
   OTHER
+  TOP_UP
 }
 
 enum EntryMode {
@@ -210,6 +211,7 @@ model User {
   academicSessionId   Int?
   studentType         StudentType?
   entryMode           EntryMode?
+  studentCategoryId   Int?
   admissionYear       Int?
   graduationYear      Int?
   phoneNumber         String?
@@ -247,11 +249,14 @@ model User {
   reportExportsGenerated ReportExport[] @relation("ReportExportGenerator")
   scheduledReportsCreated ScheduledReport[] @relation("ScheduledReportCreator")
   scheduledReportsPaused ScheduledReport[] @relation("ScheduledReportPauser")
+  studentCategory      StudentCategory? @relation("StudentCategoryMembers", fields: [studentCategoryId], references: [id], onDelete: Restrict)
+  studentCategoriesCreated StudentCategory[] @relation("StudentCategoryCreator")
 
   @@index([accountStatus])
   @@index([college, department, program, level])
   @@index([academicSession])
   @@index([role])
+  @@index([studentCategoryId])
   @@map("users")
 }
 
@@ -524,6 +529,31 @@ model StudentImport {
   @@map("student_imports")
 }
 
+/// Admin-managed student categories (Undergraduate, Postgraduate, Top-Up, …).
+/// Replaces the hard-coded StudentType enum as the source of truth. `code` is
+/// the stable machine key mirrored into User.studentType for backwards
+/// compatibility with fee targeting and legacy UI. Categories are additive:
+/// admins can create new ones at any time, but a category that already has
+/// students pointing at it cannot be hard-deleted (User.studentCategory uses
+/// onDelete: Restrict + a service-level guard that reports the reference count).
+model StudentCategory {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique @db.VarChar(150)
+  code        String   @unique @db.VarChar(40)
+  description String?  @db.VarChar(500)
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdById Int?
+  createdBy   User?    @relation("StudentCategoryCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  students    User[]   @relation("StudentCategoryMembers")
+
+  @@index([isActive])
+  @@map("student_categories")
+}
+
 enum ImportRunStatus {
   PENDING
   PROCESSING
@@ -535,6 +565,7 @@ enum ImportRowStatus {
   PENDING
   SUCCESS
   FAILED
+  SKIPPED
 }
 
 model ImportRun {
@@ -549,6 +580,8 @@ model ImportRun {
   totalRows    Int              @default(0)
   successCount Int              @default(0)
   failCount    Int              @default(0)
+  skippedCount Int    @default(0)
+  strategy     String @default("SKIP") @db.VarChar(16)
 
   createdBy    User             @relation("ImportRunCreator", fields: [createdById], references: [id])
   rows         ImportRow[]
@@ -570,6 +603,8 @@ model ImportRow {
   errorMessage String?          @db.Text
   studentId    Int?
   passwordSent Boolean          @default(false)
+  payload           Json?
+  temporaryPassword String? @db.VarChar(191)
 
   importRun    ImportRun        @relation(fields: [importRunId], references: [id], onDelete: Cascade)
   student      User?            @relation("ImportRowStudent", fields: [studentId], references: [id], onDelete: SetNull)

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { seedPermissions } from './services/permissionSeed';
 import { shutdownQueue } from './config/queue';
 import { shutdownEmailQueue } from './queues/emailQueue';
+import { shutdownStudentImportQueue } from './queues/studentImportQueue';
 import { connectRedis, shutdownProducerRedis } from './config/redis';
 import {
   runProductionGuardrails,
@@ -310,6 +311,7 @@ async function performGracefulShutdown(signal: 'SIGTERM' | 'SIGINT'): Promise<vo
     // Step 2: close both worker pools first (stop polling for jobs)
     try { await shutdownQueue(); } catch (e) { try { console.warn('[shutdown] shutdownQueue:', (e as Error).message); } catch {} }
     try { await shutdownEmailQueue(); } catch (e) { try { console.warn('[shutdown] shutdownEmailQueue:', (e as Error).message); } catch {} }
+    try { await shutdownStudentImportQueue(); } catch (e) { try { console.warn('[shutdown] shutdownStudentImportQueue:', (e as Error).message); } catch {} }
 
     // Step 3: close the shared singleton producer Redis (used outside queues,
     // e.g. rate-limiter store)

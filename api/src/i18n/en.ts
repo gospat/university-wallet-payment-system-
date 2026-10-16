@@ -120,6 +120,7 @@ export const errors = {
     invalidProgrammeId: 'The selected Programme does not exist. Please choose a Programme from the dropdown list under Academic Structure → Programmes.',
     invalidLevelId: 'The selected Level does not exist. Please choose a Level from the dropdown list or add it under Academic Structure → Levels.',
     invalidSessionId: 'The selected Academic Session does not exist. Please choose a Session from the dropdown list or add it under Academic Structure → Sessions.',
+    invalidStudentCategory: 'The selected Student Category does not exist or is no longer active. Please choose a category from the list under Students → Categories.',
   },
 } as const;
 
@@ -191,6 +192,10 @@ export const auditActions = {
   programmeUpdated: 'PROGRAMME_UPDATED',
   programmeDeactivated: 'PROGRAMME_DEACTIVATED',
   programmeDeleted: 'PROGRAMME_DELETED',
+  studentCategoryCreated: 'STUDENT_CATEGORY_CREATED',
+  studentCategoryUpdated: 'STUDENT_CATEGORY_UPDATED',
+  studentCategoryDeactivated: 'STUDENT_CATEGORY_DEACTIVATED',
+  studentCategoryDeleted: 'STUDENT_CATEGORY_DELETED',
 } as const;
 
 export const receipts = {

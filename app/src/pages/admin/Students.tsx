@@ -3,13 +3,15 @@ import { i18n, students, statusLabels, studentTypes } from '../../i18n/en';
 import Modal from '../../components/Modal';
 import ConfirmAction from '../../components/ConfirmAction';
 import PortalShell from '../../components/PortalShell';
-import api, { navCounters, NavCounters, downloadBlob } from '../../services/api';
+import api, { navCounters, NavCounters, downloadBlob, apiErrorMessage } from '../../services/api';
 import type { AxiosRequestConfig } from 'axios';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Copy, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap, ShieldAlert, Key, Lock, Send, Trash2 } from 'lucide-react';
+import { Copy, Download, Eye, EyeOff, RefreshCw, CheckCircle2, Loader2, XCircle, AlertTriangle, GraduationCap, ShieldAlert, Key, Lock, Send, Trash2 } from 'lucide-react';
 import { programmesApi } from '../../services/academicApi';
 import { emailResendCredentialsApi } from '../../services/adminApi';
+import { studentCategoriesApi, StudentCategory } from '../../services/studentCategoriesApi';
+import ImportHistoryPage from './ImportHistoryPage';
 
 type ProgrammeOption = {
   id: number;
@@ -34,6 +36,7 @@ type StudentRow = {
   level?: number | null;
   academicSession?: string | null;
   studentType?: string | null;
+  studentCategory?: { id: number; name: string; code: string | null; isActive: boolean } | null;
   entryMode?: string | null;
   admissionYear?: number | null;
   graduationYear?: number | null;
@@ -63,7 +66,6 @@ type ConfirmState = {
   loading: boolean;
 };
 
-const STUDENT_TYPES = ['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER'] as const;
 const STATUSES = ['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN'] as const;
 
 function generateStrongPassword(length = 14): string {
@@ -88,16 +90,77 @@ type StudentInputState = {
   password: string;
   matricNumber: string;
   programmeId: string;
-  studentType: string;
+  studentCategoryId: string;
   phoneNumber: string;
   accountStatus: string;
 };
+
+type ImportRunStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+
+/**
+ * Normalised progress view of a background import run, consumed by the wizard UI.
+ */
+type ImportRunProgress = {
+  uuid: string;
+  status: ImportRunStatus;
+  totalRows: number;
+  successCount: number;
+  failCount: number;
+  skippedCount: number;
+  percent: number;
+};
+
+/**
+ * Raw shape of GET /admin/students/imports/:uuid — run counters are flattened
+ * next to a `progress` object.
+ */
+interface ImportRunStatusResponse {
+  status?: ImportRunStatus;
+  totalRows?: number;
+  successCount?: number;
+  failCount?: number;
+  skippedCount?: number;
+  progress?: {
+    totalRows?: number;
+    processedRows?: number;
+    successCount?: number;
+    failCount?: number;
+    skippedCount?: number;
+    percent?: number;
+  };
+}
+
+/**
+ * Data envelope of POST /admin/students/upload/:uploadId/confirm.
+ * CANCEL returns only `summary.cancelledRecords`; SKIP/UPDATE additionally
+ * return the queued `run` and a `summary` of the staged file.
+ */
+interface BulkConfirmResponse {
+  strategy?: 'SKIP' | 'UPDATE' | 'CANCEL';
+  importNumber?: string;
+  queued?: boolean;
+  run?: {
+    importRunId?: number;
+    uuid?: string;
+    totalRows?: number;
+    status?: ImportRunStatus;
+    sendCredentialEmails?: boolean;
+  };
+  summary?: {
+    total?: number;
+    valid?: number;
+    invalid?: number;
+    duplicateWithinFile?: number;
+    duplicateExistingDb?: number;
+    cancelledRecords?: number;
+  };
+}
 
 const emptyInput = (): StudentInputState => ({
   email: '', firstName: '', middleName: '', lastName: '',
   password: generateStrongPassword(),
   matricNumber: '', programmeId: '',
-  studentType: 'UNDERGRADUATE', phoneNumber: '', accountStatus: 'ACTIVE',
+  studentCategoryId: '', phoneNumber: '', accountStatus: 'ACTIVE',
 });
 
 const StatusPill: React.FC<{ status: string }> = ({ status }) => {
@@ -173,6 +236,14 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [hierarchyLoading, setHierarchyLoading] = useState(true);
   const [hierarchyErr, setHierarchyErr] = useState<string | null>(null);
 
+  // Student Categories (admin-managed reference data). Only ACTIVE categories are
+  // offered in the pickers/filter; when editing a student who is already assigned
+  // to a now-inactive category we still surface that one so the assignment isn't
+  // silently dropped.
+  const [categoryOptions, setCategoryOptions] = useState<StudentCategory[]>([]);
+  const [categoryLoading, setCategoryLoading] = useState(true);
+  const [categoryErr, setCategoryErr] = useState<string | null>(null);
+
   // Guard refs — set synchronously during render from downstream state vars
   // declared later (editorOpen, bulkOpen). Allows the viewMode useEffect (L181)
   // to check them without TS "used before declaration" errors.
@@ -210,6 +281,25 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setCategoryLoading(true);
+      setCategoryErr(null);
+      try {
+        const result = await studentCategoriesApi.list({ page: 1, limit: 200, isActive: true });
+        if (cancelled) return;
+        setCategoryOptions(result.rows);
+      } catch (e: unknown) {
+        if (!cancelled) setCategoryErr(apiErrorMessage(e, 'Failed to load student categories'));
+      } finally {
+        if (!cancelled) setCategoryLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     if (viewMode === 'create') {
       if (editorOpenRef.current === 'create' || editorOpenRef.current === 'edit') return;
       setEditorState(emptyInput());
@@ -225,7 +315,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   // ---- query state --------------------------------------------------------
   const [query, setQuery] = useState({
     q: '', matric: '', college: '', department: '', program: '',
-    studentType: '', accountStatus: '',
+    studentCategoryId: '', accountStatus: '',
     page: '1', pageSize: '25', sort: 'createdAt', order: 'desc',
   });
   type StudentsPageDataNormalized = { students: StudentRow[]; total: number; page: number; pageSize: number; pageCount?: number };
@@ -288,7 +378,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [query.q, query.matric, query.college, query.department, query.program, query.studentType, query.accountStatus]);
+  }, [query.q, query.matric, query.college, query.department, query.program, query.studentCategoryId, query.accountStatus]);
 
   // ---- alerts and toast ---------------------------------------------------
   const [alert, setAlert] = useState<AlertState>({ isOpen: false, title: '', message: '', type: 'error' });
@@ -317,12 +407,28 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       password: '',
       matricNumber: s.matricNumber ?? '',
       programmeId: '',
-      studentType: s.studentType ?? 'UNDERGRADUATE',
+      studentCategoryId: s.studentCategory ? String(s.studentCategory.id) : '',
       phoneNumber: s.phoneNumber ?? '',
       accountStatus: s.accountStatus,
     });
     setEditorOpen('edit');
   };
+
+  // Category options for the create/edit picker: all ACTIVE categories, plus the
+  // student's current category when it is no longer active, so an existing
+  // assignment is never silently cleared.
+  const editorCategoryOptions: StudentCategory[] = (() => {
+    const opts = [...categoryOptions];
+    const currentId = editorState.studentCategoryId;
+    if (!currentId) return opts;
+    const exists = opts.some((c) => String(c.id) === currentId);
+    if (exists) return opts;
+    const assigned = editingId !== null ? data?.students.find((s) => s.id === editingId)?.studentCategory ?? null : null;
+    if (assigned && String(assigned.id) === currentId) {
+      opts.push({ id: assigned.id, name: assigned.name, code: assigned.code, description: null, isActive: assigned.isActive, sortOrder: null, createdAt: '', updatedAt: '', _count: { students: 0 } });
+    }
+    return opts;
+  })();
 
   const patchEditor = (patch: Partial<StudentInputState>) => setEditorState((s) => ({ ...s, ...patch }));
 
@@ -352,7 +458,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         const v = editorState[k];
         if (v === '' || v === undefined || v === null) return;
         if (k === 'password' && editorOpen === 'edit') return;
-        if (k === 'programmeId') {
+        if (k === 'programmeId' || k === 'studentCategoryId') {
           const n = Number(v);
           if (!Number.isNaN(n) && n > 0) payload[k] = n;
         } else {
@@ -546,16 +652,35 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkStage, setBulkStage] = useState<any>(null);
   const [bulkStrategy, setBulkStrategy] = useState<'SKIP' | 'UPDATE' | 'CANCEL'>('SKIP');
+  const [bulkSendEmails, setBulkSendEmails] = useState(false);
   const [bulkConfirming, setBulkConfirming] = useState(false);
-  const [bulkResult, setBulkResult] = useState<{ created: number; skipped: number; failed: number } | null>(null);
+  const [bulkRun, setBulkRun] = useState<ImportRunProgress | null>(null);
+  const [bulkRunError, setBulkRunError] = useState<string | null>(null);
+  const bulkPollRef = useRef<number | null>(null);
 
-  const resetBulk = () => {
-    setBulkFile(null); setBulkStage(null); setBulkResult(null);
-    setBulkStep(1); setBulkStrategy('SKIP'); setBulkConfirming(false);
+  const stopBulkPolling = () => {
+    if (bulkPollRef.current !== null) {
+      window.clearInterval(bulkPollRef.current);
+      bulkPollRef.current = null;
+    }
   };
 
+  const resetBulk = () => {
+    stopBulkPolling();
+    setBulkFile(null); setBulkStage(null); setBulkRun(null); setBulkRunError(null);
+    setBulkStep(1); setBulkStrategy('SKIP'); setBulkConfirming(false); setBulkSendEmails(false);
+  };
+
+  // Stop polling when the wizard closes or the page unmounts so a background
+  // interval is never leaked after navigation.
+  useEffect(() => {
+    if (!bulkOpen) stopBulkPolling();
+  }, [bulkOpen]);
+  useEffect(() => () => stopBulkPolling(), []);
+
   const pickFile = (f: File) => {
-    setBulkResult(null);
+    setBulkRun(null);
+    setBulkRunError(null);
     const okExt = /\.(csv|xlsx|xls)$/i.test(f.name);
     if (!okExt) {
       setAlert({ isOpen: true, title: 'Invalid file', message: students.uploadInvalidType, type: 'error' });
@@ -586,35 +711,108 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
     }
   };
 
-  const studentsErrorsUrl = (): string => {
-    if (!bulkStage?.uploadId) return '';
-    const base = import.meta.env.VITE_API_URL ?? 'http://localhost:3001/api/v1';
-    const token = localStorage.getItem('token') ?? '';
-    return `${base}/admin/students/upload/${bulkStage.uploadId}/errors.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  // Authenticated CSV download of the staged-upload problem rows. Previously this
+  // opened a URL with the bearer token in the query string, which both leaked the
+  // token and was unauthenticated when the token key differed. downloadBlob sends
+  // the standard Authorization header instead.
+  const downloadErrorsCsv = async () => {
+    if (!bulkStage?.uploadId) return;
+    try {
+      await downloadBlob(`/admin/students/upload/${bulkStage.uploadId}/errors.csv`, 'student-import-errors.csv');
+    } catch (err: unknown) {
+      setAlert({ isOpen: true, title: 'Could not download error report', message: apiErrorMessage(err, i18n.errors.generic), type: 'error' });
+    }
   };
-  const downloadErrorsCsv = () => {
-    const url = studentsErrorsUrl();
-    if (!url) return;
-    const w = window.open(url, '_blank', 'noopener,noreferrer');
-    if (w) w.focus();
+
+  const downloadCredentialsCsv = async (uuid: string) => {
+    try {
+      await downloadBlob(`/admin/students/imports/${uuid}/credentials.csv`, `student-credentials-${uuid}.csv`);
+    } catch (err: unknown) {
+      setAlert({ isOpen: true, title: 'Could not download credentials', message: apiErrorMessage(err, i18n.errors.generic), type: 'error' });
+    }
+  };
+
+  const pollImportRun = (uuid: string) => {
+    stopBulkPolling();
+    bulkPollRef.current = window.setInterval(async () => {
+      try {
+        const res = await api.get<{ data: ImportRunStatusResponse }>(`/admin/students/imports/${uuid}`);
+        const d: ImportRunStatusResponse = res.data?.data ?? {};
+        const progress = d.progress ?? {};
+        const status: ImportRunStatus = d.status ?? 'PROCESSING';
+        const total = Number(progress.totalRows ?? d.totalRows ?? 0);
+        const successCount = Number(d.successCount ?? progress.successCount ?? 0);
+        const failCount = Number(d.failCount ?? progress.failCount ?? 0);
+        const skippedCount = Number(d.skippedCount ?? progress.skippedCount ?? 0);
+        const processed = Number(progress.processedRows ?? (successCount + failCount + skippedCount));
+        const percent = Number(progress.percent ?? (total > 0 ? Math.round((processed / total) * 100) : 0));
+        setBulkRun({
+          uuid,
+          status,
+          totalRows: total,
+          successCount,
+          failCount,
+          skippedCount,
+          percent: Math.max(0, Math.min(100, percent)),
+        });
+        if (status === 'COMPLETED' || status === 'FAILED') {
+          stopBulkPolling();
+          if (status === 'COMPLETED') loadStudents();
+          if (status === 'FAILED') setBulkRunError(students.uploadRunFailed);
+        }
+      } catch (err: unknown) {
+        stopBulkPolling();
+        setBulkRunError(apiErrorMessage(err, 'Lost connection while tracking the import. Open Import History to see the final result.'));
+      }
+    }, 1500);
   };
 
   const confirmBulk = async () => {
     if (!bulkStage?.uploadId) return;
     setBulkConfirming(true);
+    setBulkRunError(null);
     try {
-      const res = await api.post<{ data: any }>(`/admin/students/upload/${bulkStage.uploadId}/confirm`, { duplicateStrategy: bulkStrategy });
-      const d = res.data?.data ?? {};
-      setBulkResult({
-        created: Number(d.created ?? d.successfulRecords ?? 0),
-        skipped: Number(d.skipped ?? d.duplicateRecords ?? 0),
-        failed: Number(d.failed ?? d.failedRecords ?? 0),
-      });
+      const res = await api.post<{ data: BulkConfirmResponse }>(
+        `/admin/students/upload/${bulkStage.uploadId}/confirm`,
+        { duplicateStrategy: bulkStrategy, sendCredentialEmails: bulkSendEmails },
+      );
+      const d: BulkConfirmResponse = res.data?.data ?? {};
+
+      if (bulkStrategy === 'CANCEL') {
+        // 200 shape — the server cancelled the staged upload (no background run).
+        setSearchParams({});
+        setBulkOpen(false);
+        resetBulk();
+        setAlert({
+          isOpen: true,
+          title: students.uploadCancelled,
+          message: `The import was cancelled. ${Number(d.summary?.cancelledRecords ?? 0)} staged record(s) were discarded.`,
+          type: 'success',
+        });
+        return;
+      }
+
+      // 202 shape — a background, chunked run was queued. Poll for live progress.
+      const run: NonNullable<BulkConfirmResponse['run']> = d.run ?? {};
+      const uuid: string = run.uuid ?? '';
       setBulkStep(3);
       setSearchParams({});
-      loadStudents();
-    } catch (err: any) {
-      setAlert({ isOpen: true, title: 'Import failed', message: err?.message ?? i18n.errors.generic, type: 'error' });
+      if (!uuid) {
+        setBulkRunError('The import was queued but no run identifier was returned. Open Import History to check its status.');
+        return;
+      }
+      setBulkRun({
+        uuid,
+        status: run.status ?? 'PENDING',
+        totalRows: Number(run.totalRows ?? d.summary?.total ?? bulkStage?.totalRows ?? 0),
+        successCount: 0,
+        failCount: 0,
+        skippedCount: 0,
+        percent: 0,
+      });
+      pollImportRun(uuid);
+    } catch (err: unknown) {
+      setAlert({ isOpen: true, title: 'Import failed', message: apiErrorMessage(err, i18n.errors.generic), type: 'error' });
     } finally {
       setBulkConfirming(false);
     }
@@ -658,6 +856,11 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
 
   const studentTypeLabel = (v: string | null | undefined) =>
     v ? (studentTypes as any)[v] ?? v : '—';
+
+  // Prefer the admin-managed category name; fall back to the legacy studentType
+  // label for rows imported before categories existed.
+  const categoryLabel = (s: StudentRow): string =>
+    s.studentCategory?.name ?? (s.studentType ? studentTypeLabel(s.studentType) : '—');
 
   const walletBalance = (s: StudentRow) => {
     if (s.wallet && typeof s.wallet.balance === 'string') return `₦${Number(s.wallet.balance).toLocaleString()}`;
@@ -707,6 +910,18 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   📦 {students.uploadButton}
                 </button>
               )}
+              {canBulk && (
+                <button
+                  onClick={() => { setSearchParams({ view: 'history' }); }}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+                    viewMode === 'history'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  🕘 {students.historyTab}
+                </button>
+              )}
             </div>
             <button onClick={() => { setSearchParams({ view: 'create' }); }} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm shadow-sm">
               ＋ {students.createButton}
@@ -714,6 +929,10 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           </div>
         </div>
 
+        {viewMode === 'history' && canBulk ? (
+          <ImportHistoryPage />
+        ) : (
+          <>
         {/* Filters */}
         <div className="bg-white border border-gray-200 rounded-2xl p-6 mb-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -732,10 +951,10 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
             <Field label={students.filterProgram}>
               <input className={inputCls} placeholder="B.Sc. Computer Science" value={query.program} onChange={(e) => setQuery({ ...query, program: e.target.value, page: '1' })} />
             </Field>
-            <Field label={students.filterStudentType}>
-              <select className={inputCls} value={query.studentType} onChange={(e) => setQuery({ ...query, studentType: e.target.value, page: '1' })}>
+            <Field label={students.filterStudentCategory}>
+              <select className={inputCls} value={query.studentCategoryId} onChange={(e) => setQuery({ ...query, studentCategoryId: e.target.value, page: '1' })}>
                 <option value="">{students.filterAll}</option>
-                {STUDENT_TYPES.map((s) => <option key={s} value={s}>{studentTypeLabel(s)}</option>)}
+                {categoryOptions.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
               </select>
             </Field>
             <Field label={students.filterAccountStatus}>
@@ -776,7 +995,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   {[
                     students.headerMatric, students.headerName, students.headerEmail, students.headerPhone,
                     students.headerCollege, students.headerDepartment, students.headerProgram,
-                    students.headerStudentType,
+                    students.headerStudentCategory,
                     students.headerAccountStatus, students.headerWalletBalance, students.headerCreated,
                     students.headerActions,
                   ].map((h) => (
@@ -803,7 +1022,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.college ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.department ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.program ?? '—'}</td>
-                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{studentTypeLabel(s.studentType)}</td>
+                    <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{categoryLabel(s)}</td>
                     <td className="px-4 py-3 whitespace-nowrap"><StatusPill status={s.accountStatus} /></td>
                     <td className="px-4 py-3 text-gray-900 font-medium whitespace-nowrap">{walletBalance(s)}</td>
                     <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">{s.createdAt ? new Date(s.createdAt).toLocaleDateString() : '—'}</td>
@@ -867,6 +1086,8 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
             </div>
           </div>
         </div>
+          </>
+        )}
       </div>
 
       {/* Alert (toast-ish modal) */}
@@ -1060,9 +1281,23 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   </div>
                 )}
 
-                <Field label={students.fieldStudentType}>
-                  <select key="create-student-type" className={validInput()} value={editorState.studentType} onChange={(e) => patchEditor({ studentType: e.target.value })}>
-                    {STUDENT_TYPES.map((s) => <option key={s} value={s}>{studentTypeLabel(s)}</option>)}
+                <Field
+                  label={students.fieldStudentCategory}
+                  hint={categoryErr ?? students.fieldStudentCategoryHint}
+                >
+                  <select
+                    key="create-student-category"
+                    className={validInput()}
+                    value={editorState.studentCategoryId}
+                    onChange={(e) => patchEditor({ studentCategoryId: e.target.value })}
+                    disabled={categoryLoading}
+                  >
+                    <option value="">{categoryLoading ? 'Loading…' : '— Select a Student Category —'}</option>
+                    {editorCategoryOptions.map((c) => (
+                      <option key={c.id} value={String(c.id)}>
+                        {c.name}{c.isActive ? '' : ' (inactive)'}
+                      </option>
+                    ))}
                   </select>
                 </Field>
 
@@ -1363,7 +1598,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   Continue →
                 </button>
               )}
-              {bulkStep === 3 && !bulkResult && (
+              {bulkStep === 3 && !bulkRun && (
                 <button
                   onClick={confirmBulk}
                   disabled={bulkConfirming}
@@ -1372,7 +1607,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   {bulkConfirming ? students.uploadSubmitting : '✓ ' + students.uploadSubmit}
                 </button>
               )}
-              {bulkStep === 3 && bulkResult && (
+              {bulkStep === 3 && bulkRun && (
                 <button
                   onClick={() => { setBulkOpen(false); setSearchParams({}); loadStudents(); }}
                   className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-sm"
@@ -1539,7 +1774,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
             </div>
           )}
 
-          {bulkStep === 3 && !bulkResult && (
+          {bulkStep === 3 && !bulkRun && (
             <div className="space-y-5">
               <div>
                 <p className="text-base font-bold text-gray-900 mb-1 flex items-center gap-2">⚖️ {students.uploadStrategyTitle}</p>
@@ -1571,23 +1806,85 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   })}
                 </div>
               </div>
+              {bulkStrategy !== 'CANCEL' && (
+                <label className="flex items-start gap-3 p-4 border border-gray-200 rounded-2xl bg-white cursor-pointer hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={bulkSendEmails}
+                    onChange={(e) => setBulkSendEmails(e.target.checked)}
+                  />
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">{students.uploadSendEmails}</div>
+                    <div className="text-xs text-gray-500 mt-1">{students.uploadSendEmailsHint}</div>
+                  </div>
+                </label>
+              )}
               <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 text-sm text-gray-700 shadow-inner">
                 {students.uploadConfirmDesc(bulkStage?.validCount ?? 0, bulkStage?.problemCount ?? 0, bulkStrategy)}
               </div>
             </div>
           )}
 
-          {bulkStep === 3 && bulkResult && (
-            <div>
-              <div className="bg-green-50 border-2 border-green-200 rounded-2xl p-6">
-                <p className="text-base font-bold text-green-900 mb-3 flex items-center gap-2">🎉 {students.uploadDone}</p>
-                <dl className="grid grid-cols-3 gap-4 mb-3">
-                  <div className="bg-white rounded-xl px-4 py-4 border border-green-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessCreated}</dt><dd className="text-2xl font-bold text-green-700">{bulkResult.created}</dd></div>
-                  <div className="bg-white rounded-xl px-4 py-4 border border-gray-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessSkipped}</dt><dd className="text-2xl font-bold text-gray-700">{bulkResult.skipped}</dd></div>
-                  <div className="bg-white rounded-xl px-4 py-4 border border-red-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessFailed}</dt><dd className="text-2xl font-bold text-red-700">{bulkResult.failed}</dd></div>
-                </dl>
-                <p className="text-sm text-green-800 font-medium">{students.uploadDoneMessage(bulkResult.created, bulkResult.skipped, bulkResult.failed)}</p>
+          {bulkStep === 3 && bulkRun && (
+            <div className="space-y-5">
+              {bulkRun.status === 'FAILED' ? (
+                <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-5">
+                  <p className="text-base font-bold text-red-900 mb-2 flex items-center gap-2">⚠️ {students.uploadRunFailed}</p>
+                  {bulkRunError && <p className="text-sm text-red-800">{bulkRunError}</p>}
+                </div>
+              ) : bulkRun.status === 'COMPLETED' ? (
+                <div className="bg-green-50 border-2 border-green-200 rounded-2xl p-5">
+                  <p className="text-base font-bold text-green-900 mb-3 flex items-center gap-2">🎉 {students.uploadDone}</p>
+                  <p className="text-sm text-green-800 font-medium">
+                    {students.uploadDoneMessage(bulkRun.successCount, bulkRun.skippedCount, bulkRun.failCount)}
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-blue-50 border-2 border-blue-200 rounded-2xl p-5">
+                  <p className="text-base font-bold text-blue-900 mb-1 flex items-center gap-2">⏳ {students.uploadQueued}</p>
+                  <p className="text-sm text-blue-800">{students.uploadQueuedHint}</p>
+                </div>
+              )}
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-sm font-semibold text-gray-800">{students.uploadProgress}</span>
+                  <span className="text-sm font-bold text-gray-900">{bulkRun.percent}%</span>
+                </div>
+                <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden" role="progressbar" aria-valuenow={bulkRun.percent} aria-valuemin={0} aria-valuemax={100}>
+                  <div
+                    className={`h-3 rounded-full transition-all duration-500 ${bulkRun.status === 'FAILED' ? 'bg-red-500' : bulkRun.status === 'COMPLETED' ? 'bg-green-600' : 'bg-blue-600'}`}
+                    style={{ width: `${bulkRun.percent}%` }}
+                  />
+                </div>
+                {bulkRun.status === 'PENDING' || bulkRun.status === 'PROCESSING' ? (
+                  <p className="text-xs text-gray-500 mt-1.5">{students.uploadRunning}</p>
+                ) : null}
               </div>
+
+              <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="bg-white rounded-xl px-4 py-4 border border-gray-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadTotalRows}</dt><dd className="text-2xl font-bold text-gray-900">{bulkRun.totalRows}</dd></div>
+                <div className="bg-white rounded-xl px-4 py-4 border border-green-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSuccessCount}</dt><dd className="text-2xl font-bold text-green-700">{bulkRun.successCount}</dd></div>
+                <div className="bg-white rounded-xl px-4 py-4 border border-red-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadFailCount}</dt><dd className="text-2xl font-bold text-red-700">{bulkRun.failCount}</dd></div>
+                <div className="bg-white rounded-xl px-4 py-4 border border-gray-100 text-center shadow-sm"><dt className="text-xs text-gray-500 uppercase tracking-wide mb-1">{students.uploadSkippedCount}</dt><dd className="text-2xl font-bold text-gray-700">{bulkRun.skippedCount}</dd></div>
+              </dl>
+
+              {bulkRun.status === 'COMPLETED' && bulkRun.successCount > 0 && (
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                  <button
+                    onClick={() => void downloadCredentialsCsv(bulkRun.uuid)}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold shadow-sm"
+                  >
+                    <Download className="w-4 h-4" /> {students.uploadDownloadCredentials}
+                  </button>
+                  <span className="text-xs text-gray-500">{students.uploadDownloadCredentialsHint}</span>
+                </div>
+              )}
+
+              {bulkRunError && bulkRun.status !== 'FAILED' && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-800">{bulkRunError}</div>
+              )}
             </div>
           )}
         </div>

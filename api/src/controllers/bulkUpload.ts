@@ -16,7 +16,7 @@ import { AppError } from '../utils/AppError';
 import { validateSpreadsheetBytes } from '../utils/security';
 import { i18n } from '../i18n/en';
 import { z } from 'zod';
-import { validateBody, validateParams } from '../middlewares/validate';
+import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
 import { reqIp, reqUa } from '../utils/http';
 
 const ALLOWED_EXT = new Set(['.csv', '.xlsx', '.xls']);
@@ -30,9 +30,23 @@ function ensureTmpDir() {
 
 const ConfirmSchema = z.object({
   duplicateStrategy: z.enum(['SKIP', 'UPDATE', 'CANCEL']).default('SKIP'),
+  sendCredentialEmails: z.boolean().optional().default(false),
 });
 
 const IdParam = z.object({ id: z.string().min(3).max(100).trim() });
+
+const RunRowIdParam = z.object({ id: z.coerce.number().int().positive() });
+
+const ListRunsQuery = z.object({
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
+});
+
+const ListRunRowsQuery = z.object({
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(200).optional().default(50),
+  status: z.enum(['PENDING', 'SUCCESS', 'FAILED', 'SKIPPED']).optional(),
+});
 
 function parseMultipartForm(req: IncomingMessage): Promise<{ fields: Fields; files: Files }> {
   const uploadDir = ensureTmpDir();
@@ -120,15 +134,35 @@ export const confirmStudentUpload = [
   validateBody(ConfirmSchema),
   catchAsync(async (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
+    const { duplicateStrategy, sendCredentialEmails } = req.body as {
+      duplicateStrategy: 'SKIP' | 'UPDATE' | 'CANCEL';
+      sendCredentialEmails: boolean;
+    };
     try {
-      const data = await BulkStudentUploadService.confirmImport({
+      if (duplicateStrategy === 'CANCEL') {
+        // CANCEL is a no-op: it never creates rows. It stays synchronous and
+        // keeps the exact legacy 200 response shape.
+        const data = await BulkStudentUploadService.confirmImport({
+          uploadId: req.params.id,
+          actorId: req.user.id,
+          strategy: duplicateStrategy,
+          ip: reqIp(req),
+          userAgent: reqUa(req),
+        });
+        res.status(200).json({ status: 'success', data });
+        return;
+      }
+      // SKIP / UPDATE now persist the run and hand row creation to the
+      // background worker, so the request returns quickly (202 Accepted).
+      const data = await BulkStudentUploadService.startImport({
         uploadId: req.params.id,
         actorId: req.user.id,
-        strategy: req.body.duplicateStrategy,
+        strategy: duplicateStrategy,
         ip: reqIp(req),
         userAgent: reqUa(req),
+        sendCredentialEmails,
       });
-      res.status(200).json({ status: 'success', data });
+      res.status(202).json({ status: 'success', data });
     } catch (e) {
       return next(e instanceof AppError ? e : new AppError(i18n.errors.upload.importFailed, 400));
     }
@@ -151,5 +185,69 @@ export const downloadErrorCsv = [
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="upload-${req.params.id}-errors.csv"`);
     fs.createReadStream(preview.errorCsvPath).pipe(res);
+  }),
+];
+
+// =============================================================================
+// Background student-import runs (paginated history, live progress, credentials)
+// =============================================================================
+
+/** GET /admin/students/imports — paginated list of background import runs. */
+export const listImportRuns = [
+  validateQuery(ListRunsQuery),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
+    const data = await BulkStudentUploadService.listRuns({
+      page: Number(req.query.page),
+      pageSize: Number(req.query.pageSize),
+    });
+    res.status(200).json({ status: 'success', data });
+  }),
+];
+
+/** GET /admin/students/imports/:uuid — one run plus live progress counters. */
+export const getImportRun = [
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
+    const data = await BulkStudentUploadService.getRun(req.params.id, req.user.id);
+    res.status(200).json({ status: 'success', data });
+  }),
+];
+
+/** GET /admin/students/imports/:uuid/rows — paginated per-row status. */
+export const listImportRunRows = [
+  validateParams(IdParam),
+  validateQuery(ListRunRowsQuery),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
+    const data = await BulkStudentUploadService.listRunRows(req.params.id, {
+      page: Number(req.query.page),
+      pageSize: Number(req.query.pageSize),
+      status: req.query.status as 'PENDING' | 'SUCCESS' | 'FAILED' | 'SKIPPED' | undefined,
+    });
+    res.status(200).json({ status: 'success', data });
+  }),
+];
+
+/** GET /admin/students/imports/:uuid/credentials.csv — download generated credentials. */
+export const downloadCredentialsCsv = [
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
+    const { fileName, csv } = await BulkStudentUploadService.buildCredentialsCsvForRun(req.params.id);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.status(200).send(csv);
+  }),
+];
+
+/** POST /admin/students/imports/rows/:id/resend-credentials — resend one row's login. */
+export const resendImportRowCredentials = [
+  validateParams(RunRowIdParam),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.notLoggedIn, 401));
+    const data = await BulkStudentUploadService.resendCredentialsForRow(Number(req.params.id), req.user.id);
+    res.status(202).json({ status: 'success', data });
   }),
 ];

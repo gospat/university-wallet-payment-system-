@@ -28,6 +28,12 @@ import {
   ListQuerySchema,
 } from '../services/academic';
 import {
+  StudentCategoryService,
+  CreateStudentCategorySchema,
+  UpdateStudentCategorySchema,
+  StudentCategoryListQuerySchema,
+} from '../services/studentCategory';
+import {
   downloadTemplateCsv,
   downloadTemplateXlsx,
   importColleges,
@@ -560,6 +566,77 @@ router.post(
   catchAsync(async (req: Request, res: Response) => {
     const updated = await AcademicSessionService.deactivate(Number(req.params.id), req);
     res.status(200).json({ status: 'success', data: { session: updated } });
+  })
+);
+
+// ============ STUDENT CATEGORIES ============
+// Admin-managed, additive categories (Undergraduate, Postgraduate, Top-Up, …).
+// Reads use VIEW_STUDENTS (ADMIN + BURSARY). Mutations are ADMIN-only.
+// Delete is guarded: a category with students attached returns 409.
+router.get(
+  '/student-categories',
+  restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_STUDENTS'),
+  validateQuery(StudentCategoryListQuerySchema),
+  catchAsync(async (req: Request, res: Response) => {
+    const data = await StudentCategoryService.list(req.query as any);
+    res.status(200).json({ status: 'success', data });
+  })
+);
+
+router.get(
+  '/student-categories/:id',
+  restrictTo('ADMIN', 'BURSARY'),
+  requirePermission('VIEW_STUDENTS'),
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response) => {
+    const category = await StudentCategoryService.get(Number(req.params.id));
+    res.status(200).json({ status: 'success', data: { category } });
+  })
+);
+
+router.post(
+  '/student-categories',
+  restrictTo('ADMIN'),
+  requirePermission('MANAGE_STUDENTS'),
+  validateBody(CreateStudentCategorySchema),
+  catchAsync(async (req: Request, res: Response) => {
+    const created = await StudentCategoryService.create(req.body, req);
+    res.status(201).json({ status: 'success', data: { category: created } });
+  })
+);
+
+router.patch(
+  '/student-categories/:id',
+  restrictTo('ADMIN'),
+  requirePermission('MANAGE_STUDENTS'),
+  validateParams(IdParam),
+  validateBody(UpdateStudentCategorySchema),
+  catchAsync(async (req: Request, res: Response) => {
+    const updated = await StudentCategoryService.update(Number(req.params.id), req.body, req);
+    res.status(200).json({ status: 'success', data: { category: updated } });
+  })
+);
+
+router.post(
+  '/student-categories/:id/deactivate',
+  restrictTo('ADMIN'),
+  requirePermission('MANAGE_STUDENTS'),
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response) => {
+    const updated = await StudentCategoryService.deactivate(Number(req.params.id), req);
+    res.status(200).json({ status: 'success', data: { category: updated } });
+  })
+);
+
+router.delete(
+  '/student-categories/:id',
+  restrictTo('ADMIN'),
+  requirePermission('MANAGE_STUDENTS'),
+  validateParams(IdParam),
+  catchAsync(async (req: Request, res: Response) => {
+    const removed = await StudentCategoryService.remove(Number(req.params.id), req);
+    res.status(200).json({ status: 'success', data: removed });
   })
 );
 

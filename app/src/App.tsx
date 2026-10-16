@@ -32,6 +32,7 @@ const BursaryRefunds = React.lazy(() => import('./pages/bursary/Refunds'));
 const FacultiesPage = React.lazy(() => import('./pages/admin/academic/Faculties'));
 const DepartmentsPage = React.lazy(() => import('./pages/admin/academic/Departments'));
 const ProgrammesPage = React.lazy(() => import('./pages/admin/academic/Programmes'));
+const StudentCategoriesPage = React.lazy(() => import('./pages/admin/StudentCategoriesPage'));
 const UsersPage = React.lazy(() => import('./pages/admin/Users'));
 const RolesPage = React.lazy(() => import('./pages/admin/Roles'));
 const PermissionsPage = React.lazy(() => import('./pages/admin/Permissions'));
@@ -424,6 +425,7 @@ const App: React.FC = () => {
             <Route path="/admin/academic/faculties" element={<Suspense fallback={<PageLoader />}><FacultiesPage /></Suspense>} />
             <Route path="/admin/academic/departments" element={<Suspense fallback={<PageLoader />}><DepartmentsPage /></Suspense>} />
             <Route path="/admin/academic/programmes" element={<Suspense fallback={<PageLoader />}><ProgrammesPage /></Suspense>} />
+            <Route path="/admin/academic/student-categories" element={<Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense>} />
 
             <Route path="/admin/payments" element={<Suspense fallback={<PageLoader />}><AdminPaymentsWrapped /></Suspense>} />
             <Route path="/admin/receipts" element={<Suspense fallback={<PageLoader />}><AdminReceiptsWrapped /></Suspense>} />
@@ -504,6 +506,9 @@ const App: React.FC = () => {
             } />
             <Route path="/bursary/academic/programmes" element={
               <PlaceholderPage role="BURSARY" activePath="/bursary/academic/programmes" title="Programmes" subtitle="Academic programmes (Admin-managed)" />
+            } />
+            <Route path="/bursary/academic/student-categories" element={
+              <Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense>
             } />
           </Route>
 

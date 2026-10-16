@@ -18,6 +18,7 @@ import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { dispatchEmail } from '../queues/emailQueue';
+import { resolveActiveStudentCategory, mirrorStudentTypeForCategory } from './studentCategory';
 
 // ---------------------------------------------------------------------------
 // Secure password generator — parity with frontend create-student widget.
@@ -65,7 +66,7 @@ function generateStrongTemporaryPassword(length = 14): string {
 // "Undergraduate", "200 LEVEL", "DIRECT ENTRY" and convert to Prisma enum
 // values / numeric level. Single point of truth for both create + update.
 // ---------------------------------------------------------------------------
-const STUDENT_TYPE_MAP: Record<string, 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_TIME' | 'JUPEB' | 'OTHER'> = {
+const STUDENT_TYPE_MAP: Record<string, 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_TIME' | 'JUPEB' | 'OTHER' | 'TOP_UP'> = {
   UNDERGRADUATE: 'UNDERGRADUATE', UG: 'UNDERGRADUATE', REGULAR: 'UNDERGRADUATE',
   'UNDER-GRADUATE': 'UNDERGRADUATE', UNDERGRAD: 'UNDERGRADUATE',
   POSTGRADUATE: 'POSTGRADUATE', PG: 'POSTGRADUATE', MASTERS: 'POSTGRADUATE',
@@ -74,6 +75,8 @@ const STUDENT_TYPE_MAP: Record<string, 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_
   PART_TIME: 'PART_TIME', PT: 'PART_TIME',
   JUPEB: 'JUPEB', IJMB: 'JUPEB', ALEVELS: 'JUPEB', 'A-LEVEL': 'JUPEB',
   FOUNDATION: 'JUPEB',
+  TOP_UP: 'TOP_UP', 'TOP-UP': 'TOP_UP', TOPUP: 'TOP_UP', 'TOP UP': 'TOP_UP',
+  CONVERSION: 'TOP_UP',
 };
 const ENTRY_MODE_MAP: Record<string, 'UTME' | 'DIRECT_ENTRY' | 'TRANSFER' | 'OTHER'> = {
   UTME: 'UTME', JAMB: 'UTME', UME: 'UTME',
@@ -81,7 +84,7 @@ const ENTRY_MODE_MAP: Record<string, 'UTME' | 'DIRECT_ENTRY' | 'TRANSFER' | 'OTH
   'DIRECT ENTRY': 'DIRECT_ENTRY', DIRECT_ENTRY: 'DIRECT_ENTRY', DE: 'DIRECT_ENTRY',
   TRANSFER: 'TRANSFER', TRANS: 'TRANSFER',
 };
-function normalizeStudentType(v: unknown): 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_TIME' | 'JUPEB' | 'OTHER' | undefined {
+function normalizeStudentType(v: unknown): 'UNDERGRADUATE' | 'POSTGRADUATE' | 'PART_TIME' | 'JUPEB' | 'OTHER' | 'TOP_UP' | undefined {
   if (v === null || v === undefined) return undefined;
   const s = String(v).trim().toUpperCase().replace(/[_\s-]+/g, '_');
   if (!s) return undefined;
@@ -115,6 +118,24 @@ function normalizeLevelValue(v: unknown): number | null | undefined {
   if (!m) return null;
   const n = Number(m[1]);
   return Number.isFinite(n) ? n : null;
+}
+
+// ---------------------------------------------------------------------------
+// Student category resolution (dynamic, admin-managed).
+// Accepts either `studentCategoryId` (preferred) or the raw `studentCategory`
+// code/name (as typed in a bulk-import spreadsheet). MUST resolve to an ACTIVE
+// category — an unknown value is rejected instead of being silently coerced.
+// ---------------------------------------------------------------------------
+async function resolveStudentCategoryInput(
+  input: Partial<CreateStudentInput>,
+): Promise<{ id: number; code: string; name: string; isActive: boolean } | null> {
+  const rawId = (input as any).studentCategoryId;
+  const rawName = (input as any).studentCategory;
+  const raw = rawId !== undefined && rawId !== null && String(rawId).trim() !== '' ? rawId : rawName;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const category = await resolveActiveStudentCategory(raw);
+  if (!category) throw new AppError(i18n.errors.students.invalidStudentCategory, 400);
+  return category;
 }
 
 async function resolveProgrammeContext(
@@ -269,8 +290,13 @@ export const CreateStudentSchema = z.object({
       return n;
     }),
   academicSession: optStrNullable(20),
-  studentType: optEnumNullable(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']),
+  studentType: optEnumNullable(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER', 'TOP_UP']),
   entryMode: optEnumNullable(['UTME', 'DIRECT_ENTRY', 'TRANSFER', 'OTHER']),
+  studentCategoryId: z.preprocess(
+    (v) => (v === null || v === undefined || (typeof v === 'string' && v.trim() === '') ? undefined : Number(v)),
+    z.number().int().positive().optional(),
+  ),
+  studentCategory: optStrNullable(150),
   admissionYear: optYearNullable,
   graduationYear: optYearNullable,
   phoneNumber: optStrNullable(30),
@@ -315,7 +341,8 @@ export const StudentQuerySchema = z.object({
   program: z.string().max(120).trim().optional(),
   level: z.coerce.number().int().optional(),
   academicSession: z.string().max(20).trim().optional(),
-  studentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER']).optional(),
+  studentType: z.enum(['UNDERGRADUATE', 'POSTGRADUATE', 'PART_TIME', 'JUPEB', 'OTHER', 'TOP_UP']).optional(),
+  studentCategoryId: z.coerce.number().int().positive().optional(),
   accountStatus: z.enum(['ACTIVE', 'SUSPENDED', 'GRADUATED', 'WITHDRAWN']).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(25),
@@ -343,6 +370,8 @@ const STUDENT_SELECT = {
   academicSession: true,
   studentType: true,
   entryMode: true,
+  studentCategoryId: true,
+  studentCategory: { select: { id: true, name: true, code: true, isActive: true } },
   admissionYear: true,
   graduationYear: true,
   phoneNumber: true,
@@ -417,10 +446,11 @@ export class StudentService {
     }
 
     // ---- hierarchy resolution (programmeId → dept + college) ----------------
-    const [hierarchy, resolvedLevel, resolvedSession] = await Promise.all([
+    const [hierarchy, resolvedLevel, resolvedSession, resolvedCategory] = await Promise.all([
       resolveProgrammeContext(input),
       resolveLevelDisplay(input),
       resolveSessionDisplay(input),
+      resolveStudentCategoryInput(input),
     ]);
 
     // ---- defensive: if caller sent an id, it must resolve; otherwise 400 ----
@@ -461,7 +491,11 @@ export class StudentService {
     if (hierarchy.program !== undefined) createData.program = hierarchy.program ?? undefined;
     if (resolvedLevel !== undefined) createData.level = resolvedLevel ?? undefined;
     if (resolvedSession !== undefined) createData.academicSession = resolvedSession ?? undefined;
-    {
+    if (resolvedCategory) {
+      // Authoritative: the dynamic category drives the legacy enum mirror.
+      createData.studentCategory = { connect: { id: resolvedCategory.id } };
+      createData.studentType = mirrorStudentTypeForCategory(resolvedCategory.code);
+    } else {
       const nt = normalizeStudentType(input.studentType);
       if (nt !== undefined) createData.studentType = nt;
     }
@@ -617,6 +651,15 @@ export class StudentService {
 
     // ---- hierarchy resolution if any id-based field changed -------------
     const patchData: Prisma.UserUpdateInput = { ...(input as Prisma.UserUpdateInput) };
+    // Dynamic student category — authoritative over the legacy studentType mirror.
+    const resolvedCategory = await resolveStudentCategoryInput(input);
+    // Never leak the synthetic inputs (or the raw name string) into the patch.
+    delete (patchData as any).studentCategory;
+    delete (patchData as any).studentCategoryId;
+    if (resolvedCategory) {
+      patchData.studentCategory = { connect: { id: resolvedCategory.id } };
+      patchData.studentType = mirrorStudentTypeForCategory(resolvedCategory.code);
+    }
     {
       const nt = normalizeStudentType((patchData as any).studentType);
       if (nt !== undefined) (patchData as any).studentType = nt;
@@ -889,6 +932,7 @@ export class StudentService {
     if (filters.level !== undefined && filters.level !== null) where.level = filters.level;
     if (filters.academicSession) where.academicSession = { contains: filters.academicSession, mode: 'insensitive' };
     if (filters.studentType) where.studentType = filters.studentType;
+    if (filters.studentCategoryId) where.studentCategoryId = filters.studentCategoryId;
     if (filters.accountStatus) where.accountStatus = filters.accountStatus;
 
     if (q) {

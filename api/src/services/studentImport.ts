@@ -27,9 +27,10 @@ import { i18n } from '../i18n/en';
 import { generateImportReference } from '../utils/paystack';
 import { StudentService } from './student';
 import { validateHierarchy } from './academic';
-import { Prisma } from '@prisma/client';
-import { AdminNotificationService } from './adminNotification';
-import { SystemSettingsService } from './systemSettings';
+import { Prisma, EmailType } from '@prisma/client';
+import { loadStudentCategoryIndex, resolveFromIndex } from './studentCategory';
+import { buildCredentialsCsv } from './studentImportRunner';
+import { enqueueStudentImport } from '../queues/studentImportQueue';
 const JSON_DB_NULL = Prisma.JsonNull;
 // -----------------------------------------------------------------------------
 // Types
@@ -43,6 +44,7 @@ export type RowErrorCode =
   | 'INVALID_PHONE'
   | 'INVALID_LEVEL'
   | 'INVALID_YEAR'
+  | 'INVALID_STUDENT_CATEGORY'
   | 'DUP_WITHIN_FILE'
   | 'DUP_EXISTING_DB'
   | 'WEAK_PASSWORD'
@@ -62,6 +64,7 @@ export interface ValidRow {
 export interface UploadStage {
   uploadId: string;
   fileName: string;
+  filePath?: string;
   actorId: number;
   createdAt: Date;
   rawRecords: Record<string, any>[];
@@ -110,6 +113,9 @@ const COLUMN_ALIASES: Record<string, string> = {
   session: 'academicSession', 'academicsession': 'academicSession',
   academicsessionid: 'academicSessionId', 'sessionid': 'academicSessionId', 'session_id': 'academicSessionId', 'academicsession_id': 'academicSessionId',
   studenttype: 'studentType', 'typeofstudent': 'studentType',
+  studentcategory: 'studentCategory', 'student_category': 'studentCategory',
+  studentcategoryname: 'studentCategory', 'studentcategoryid': 'studentCategoryId',
+  student_category_id: 'studentCategoryId', category: 'studentCategory', 'categoryid': 'studentCategoryId',
   entrymode: 'entryMode', 'entry_mode': 'entryMode', 'modeofentry': 'entryMode',
   admissionyear: 'admissionYear', 'set': 'admissionYear',
   graduationyear: 'graduationYear',
@@ -209,12 +215,30 @@ const NG_PHONE_RE = /^[+\d][\d\s()-]{7,}$/; // lenient: starts with digit/plus, 
 
 type FileDupKey = `${'email' | 'matric'}::${string}`;
 
+/**
+ * The first non-empty raw category value on a row. Accepts the new dynamic
+ * columns (studentCategory / studentCategoryId) and the legacy `studentType`
+ * column, so existing spreadsheets keep working without change.
+ */
+function rawCategoryOf(r: Record<string, any>): any {
+  for (const v of [r.studentCategory, r.studentCategoryId, r.studentType]) {
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+  }
+  return undefined;
+}
+
 async function validateRows(rawRows: Record<string, any>[]) {
   const rows = rawRows.map(normalize);
   // Compute intersection-based missing check (strict): require each *required column key* to be present
   // as a header in the file (first row determines headers; if absent entirely → flag).
   const firstRowKeys = new Set(Object.keys(rows[0] ?? {}));
   const missingHeaders = REQUIRED_COLUMNS.filter((c) => !firstRowKeys.has(c));
+
+  // Dynamic student categories: load the (cached) index ONCE for the whole
+  // file so a 7,000-row upload performs a single category query, not 7,000.
+  // Only fetched when at least one row actually supplies a category value.
+  const needsCategoryIndex = rows.some((r) => rawCategoryOf(r) !== undefined);
+  const categoryIndex = needsCategoryIndex ? await loadStudentCategoryIndex() : null;
 
   const validRows: ValidRow[] = [];
   const problemRows: ProblemRow[] = [];
@@ -256,6 +280,31 @@ async function validateRows(rawRows: Record<string, any>[]) {
     }
     if (r.graduationYear !== undefined && r.graduationYear !== null && r.graduationYear !== '' && (Number.isNaN(Number(r.graduationYear)) || Number(r.graduationYear) < 1990 || Number(r.graduationYear) > 2100)) {
       errs.push({ code: 'INVALID_YEAR', field: 'graduationYear', message: `graduationYear must be a valid year 1990-2100` });
+    }
+
+    // Student category (dynamic, admin-managed). Previously an unrecognised
+    // value was silently coerced to OTHER — the exact bug this guards against.
+    // Now an unknown or deactivated category is a hard row error, and a valid
+    // one is stamped onto the row as `studentCategoryId` so the FK link is
+    // written at creation time (which also keeps the legacy enum mirror in step).
+    const rawCategory = rawCategoryOf(r);
+    if (rawCategory !== undefined) {
+      const hit = categoryIndex ? resolveFromIndex(categoryIndex, rawCategory) : null;
+      if (!hit) {
+        errs.push({
+          code: 'INVALID_STUDENT_CATEGORY',
+          field: 'studentCategory',
+          message: `unknown student category "${String(rawCategory)}". Add it under Students → Categories first, or use one of the existing categories`,
+        });
+      } else if (!hit.isActive) {
+        errs.push({
+          code: 'INVALID_STUDENT_CATEGORY',
+          field: 'studentCategory',
+          message: `student category "${hit.name}" is deactivated and cannot be used for new uploads`,
+        });
+      } else {
+        r.studentCategoryId = hit.id;
+      }
     }
 
     // New simplified bulk upload: if caller provides programmeId / levelId /
@@ -435,6 +484,7 @@ export class BulkStudentUploadService {
     const stage: UploadStage = {
       uploadId,
       fileName: opts.fileName,
+      filePath: opts.filePath,
       actorId: opts.actorId,
       createdAt: new Date(),
       rawRecords: raw,
@@ -496,12 +546,298 @@ export class BulkStudentUploadService {
     };
   }
 
+  /**
+   * Start a background student import run.
+   *
+   * Persists the audited StudentImport batch + an ImportRun with one ImportRow
+   * per uploaded record, then hands the actual row creation to the queued
+   * runner. Invalid/problem rows are pre-created as FAILED so run totals and
+   * progress are exact.
+   */
+  static async startImport(opts: {
+    uploadId: string;
+    actorId: number;
+    strategy: DuplicateStrategy;
+    ip?: string;
+    userAgent?: string;
+    sendCredentialEmails?: boolean;
+  }): Promise<{
+    importNumber: string;
+    strategy: DuplicateStrategy;
+    run: { importRunId: number; uuid: string; totalRows: number; status: 'PENDING'; sendCredentialEmails: boolean };
+    summary: { total: number; valid: number; invalid: number; duplicateWithinFile: number; duplicateExistingDb: number };
+  }> {
+    const stage = getStage(opts.uploadId);
+    if (!stage) throw new AppError('Upload session expired or not found. Re-upload the file.', 404);
+    if (stage.actorId !== opts.actorId) throw new AppError('You did not start this upload', 403);
+    if (!['SKIP', 'UPDATE', 'CANCEL'].includes(opts.strategy)) {
+      throw new AppError('Invalid duplicateStrategy. Use SKIP | UPDATE | CANCEL.', 400);
+    }
+    // CANCEL is short-circuited by the caller (controller / confirmImport) and
+    // must never reach the background runner.
+    if (opts.strategy === 'CANCEL') {
+      throw new AppError('Cannot start an import run with strategy CANCEL', 400);
+    }
+
+    const strategy: 'SKIP' | 'UPDATE' = opts.strategy;
+    const sendCredentialEmails = Boolean(opts.sendCredentialEmails);
+
+    const importBatch = await prisma.studentImport.create({
+      data: {
+        importNumber: opts.uploadId,
+        uploadedById: opts.actorId,
+        fileName: stage.fileName,
+        totalRecords: stage.rawRecords.length,
+        duplicateStrategy: strategy,
+        errorReport: { missingHeaders: stage.missingColumns } as any,
+      },
+      select: { id: true, importNumber: true },
+    });
+
+    const run = await prisma.importRun.create({
+      data: {
+        uuid: opts.uploadId,
+        fileName: stage.fileName,
+        filePath: stage.filePath ?? '',
+        createdById: opts.actorId,
+        totalRows: stage.rawRecords.length,
+        strategy,
+      },
+      select: { id: true, uuid: true, totalRows: true, status: true },
+    });
+
+    const buildRow = (
+      record: Record<string, any>,
+      rowNumber: number,
+      status: 'PENDING' | 'FAILED',
+      errorMessage: string | null,
+    ): Prisma.ImportRowCreateManyInput => ({
+      importRunId: run.id,
+      rowNumber,
+      firstName: String(record.firstName ?? ''),
+      lastName: String(record.lastName ?? ''),
+      email: (record.email ?? null) as string | null,
+      matricNumber: String(record.matricNumber ?? ''),
+      status,
+      errorMessage,
+      // Persist the full normalised record so the runner can rebuild the
+      // create input faithfully (including studentCategoryId).
+      payload: JSON.parse(JSON.stringify(record ?? {})) as Prisma.InputJsonValue,
+    });
+
+    // A row can appear in validRows, dbDuplicates AND problemRows. Build the
+    // map with validRows + dbDuplicates as PENDING first, then let problemRows
+    // override — EXCEPT a DUP_EXISTING_DB-only row, which must stay PENDING so
+    // the SKIP/UPDATE strategy is honoured by the runner.
+    const byRow = new Map<number, Prisma.ImportRowCreateManyInput>();
+    for (const vr of stage.validRows) byRow.set(vr.row, buildRow(vr.record, vr.row, 'PENDING', null));
+    for (const dup of stage.dbDuplicates) {
+      if (!byRow.has(dup.row)) byRow.set(dup.row, buildRow(dup.record, dup.row, 'PENDING', null));
+    }
+    for (const problem of stage.problemRows) {
+      const codes = problem.errors.map((e) => e.code);
+      const onlyDupExistingDb = codes.length > 0 && codes.every((c) => c === 'DUP_EXISTING_DB');
+      if (onlyDupExistingDb) continue;
+      const message = problem.errors.map((e) => `${e.code}: ${e.message}`).join(' | ');
+      byRow.set(problem.row, buildRow(problem.record, problem.row, 'FAILED', message.slice(0, 2000) || 'Invalid row'));
+    }
+
+    // Insert in 500-row slices so each INSERT statement stays small (7,000 rows
+    // is the target).
+    const rowData = [...byRow.values()];
+    for (let i = 0; i < rowData.length; i += 500) {
+      await prisma.importRow.createMany({ data: rowData.slice(i, i + 500), skipDuplicates: true });
+    }
+
+    await enqueueStudentImport({
+      importRunId: run.id,
+      strategy,
+      actorId: opts.actorId,
+      ip: opts.ip,
+      userAgent: opts.userAgent,
+      sendCredentialEmails,
+      studentImportId: importBatch.id,
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        action: i18n.auditActions.studentBulkImported,
+        entityType: 'STUDENT_IMPORT',
+        entityId: String(importBatch.id),
+        userId: opts.actorId,
+        oldValue: JSON_DB_NULL,
+        newValue: {
+          importNumber: importBatch.importNumber,
+          strategy,
+          queued: true,
+          totalRows: stage.rawRecords.length,
+          file: stage.fileName,
+        } as Prisma.InputJsonValue,
+        ipAddress: opts.ip,
+        userAgent: opts.userAgent,
+      },
+    });
+
+    // The run is now fully persisted in the DB — the in-memory stage is no
+    // longer needed.
+    _stages.delete(opts.uploadId);
+
+    return {
+      importNumber: importBatch.importNumber,
+      strategy,
+      run: {
+        importRunId: run.id,
+        uuid: run.uuid,
+        totalRows: run.totalRows,
+        status: 'PENDING' as const,
+        sendCredentialEmails,
+      },
+      summary: {
+        total: stage.rawRecords.length,
+        valid: stage.validRows.length,
+        invalid: stage.problemRows.length,
+        duplicateWithinFile: stage.withinFileDuplicates.length,
+        duplicateExistingDb: stage.dbDuplicates.length,
+      },
+    };
+  }
+
+  static async listRuns(opts: { page: number; pageSize: number }) {
+    const { page, pageSize } = opts;
+    const skip = (page - 1) * pageSize;
+    const [items, total] = await Promise.all([
+      prisma.importRun.findMany({
+        orderBy: { startedAt: 'desc' },
+        skip,
+        take: pageSize,
+        include: { _count: { select: { rows: true } } },
+      }),
+      prisma.importRun.count(),
+    ]);
+    return { items, total, page, pageSize };
+  }
+
+  static async getRun(uuid: string, actorId: number) {
+    const run = await prisma.importRun.findUnique({ where: { uuid } });
+    if (!run) throw new AppError('Import run not found', 404);
+    void actorId; // reading history is not restricted to the creator
+    const processedRows = run.successCount + run.failCount + run.skippedCount;
+    const percent = run.totalRows > 0 ? Math.min(100, Math.round((processedRows / run.totalRows) * 100)) : 100;
+    return {
+      ...run,
+      progress: {
+        totalRows: run.totalRows,
+        processedRows,
+        successCount: run.successCount,
+        failCount: run.failCount,
+        skippedCount: run.skippedCount,
+        percent,
+      },
+    };
+  }
+
+  static async listRunRows(
+    uuid: string,
+    opts: { page: number; pageSize: number; status?: 'PENDING' | 'SUCCESS' | 'FAILED' | 'SKIPPED' },
+  ) {
+    const run = await prisma.importRun.findUnique({ where: { uuid }, select: { id: true } });
+    if (!run) throw new AppError('Import run not found', 404);
+
+    const where: Prisma.ImportRowWhereInput = { importRunId: run.id };
+    if (opts.status) where.status = opts.status;
+
+    const skip = (opts.page - 1) * opts.pageSize;
+    const [items, total] = await Promise.all([
+      prisma.importRow.findMany({
+        where,
+        orderBy: { rowNumber: 'asc' },
+        skip,
+        take: opts.pageSize,
+        // Never select `payload` (the raw upload) or `temporaryPassword` here.
+        select: {
+          id: true,
+          importRunId: true,
+          rowNumber: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          matricNumber: true,
+          status: true,
+          errorMessage: true,
+          studentId: true,
+          passwordSent: true,
+        },
+      }),
+      prisma.importRow.count({ where }),
+    ]);
+    return { items, total, page: opts.page, pageSize: opts.pageSize };
+  }
+
+  static async buildCredentialsCsvForRun(uuid: string): Promise<{ fileName: string; csv: string }> {
+    const run = await prisma.importRun.findUnique({ where: { uuid }, select: { id: true } });
+    if (!run) throw new AppError('Import run not found', 404);
+
+    const rows = await prisma.importRow.findMany({
+      where: { importRunId: run.id, status: 'SUCCESS' },
+      orderBy: { rowNumber: 'asc' },
+      select: {
+        rowNumber: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        matricNumber: true,
+        temporaryPassword: true,
+        studentId: true,
+      },
+    });
+    return { fileName: `credentials-${uuid}.csv`, csv: buildCredentialsCsv(rows) };
+  }
+
+  /**
+   * Resend credentials for a single successfully-imported row, reusing the
+   * existing StudentService credential-resend mechanism.
+   */
+  static async resendCredentialsForRow(
+    rowId: number,
+    actorId: number,
+  ): Promise<{ jobId: string | null; queued: boolean; studentId: number }> {
+    const row = await prisma.importRow.findUnique({
+      where: { id: rowId },
+      select: { id: true, status: true, studentId: true },
+    });
+    if (!row) throw new AppError('Import row not found', 404);
+    if (row.status !== 'SUCCESS' || !row.studentId) {
+      throw new AppError('Credentials can only be resent for a successfully imported row', 400);
+    }
+
+    await StudentService.sendCredentialEmail(row.studentId, actorId, { forcePasswordReset: true });
+
+    const lastLog = await prisma.emailDeliveryLog.findFirst({
+      where: { recipientId: row.studentId, emailType: EmailType.STUDENT_CREDENTIALS },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, status: true },
+    });
+
+    return {
+      jobId: lastLog?.id ? String(lastLog.id) : null,
+      queued: true,
+      studentId: row.studentId,
+    };
+  }
+
+  /**
+   * @deprecated The import no longer runs synchronously inside this call. It
+   * now delegates to the background runner, so the numbers in the response are
+   * no longer final. Retained for backward compatibility; CANCEL still
+   * short-circuits exactly as before.
+   */
   static async confirmImport(opts: {
     uploadId: string;
     actorId: number;
     strategy: DuplicateStrategy;
     ip?: string;
     userAgent?: string;
+    sendCredentialEmails?: boolean;
   }) {
     const stage = getStage(opts.uploadId);
     if (!stage) throw new AppError('Upload session expired or not found. Re-upload the file.', 404);
@@ -519,122 +855,28 @@ export class BulkStudentUploadService {
       };
     }
 
-    const strategy: DuplicateStrategy = opts.strategy;
-    // Only process the rows that passed validation + didn't hit DB dups.
-    // For DB-dup rows, honor the strategy instead.
-    let createdCount = 0;
-    let updatedCount = 0;
-    let skippedCount = 0;
-    let failedCount = 0;
-    const perRowErrors: Array<{ row: number; message: string }> = [];
-
-    const importBatch = await prisma.studentImport.create({
-      data: {
-        importNumber: opts.uploadId,
-        uploadedById: opts.actorId,
-        fileName: stage.fileName,
-        totalRecords: stage.rawRecords.length,
-        duplicateStrategy: strategy,
-        errorReport: { missingHeaders: stage.missingColumns } as any,
-      },
-      select: { id: true, importNumber: true },
+    const started = await BulkStudentUploadService.startImport({
+      uploadId: opts.uploadId,
+      actorId: opts.actorId,
+      strategy: opts.strategy,
+      ip: opts.ip,
+      userAgent: opts.userAgent,
+      sendCredentialEmails: opts.sendCredentialEmails,
     });
-
-    // Pass 1: DB-dup rows — honor strategy.
-    for (const dup of stage.dbDuplicates) {
-      if (strategy === 'SKIP') {
-        skippedCount++;
-        continue;
-      }
-      if (!dup.existingUserId) { skippedCount++; continue; }
-      try {
-        // UPDATE: reuse student update without touching password unless present
-        const payload: Record<string, any> = { ...dup.record };
-        delete payload.password;
-        await StudentService.update(dup.existingUserId, payload, opts.actorId, {
-          ip: opts.ip, userAgent: opts.userAgent,
-        });
-        updatedCount++;
-      } catch (err) {
-        failedCount++;
-        perRowErrors.push({ row: dup.row, message: (err as Error).message });
-      }
-    }
-
-    // Pass 2: valid rows → create
-    for (const vr of stage.validRows) {
-      try {
-        const raw = vr.record as Record<string, any>;
-        const recognized = new Set<string>([
-          'email', 'firstName', 'middleName', 'lastName', 'matricNumber',
-          'admissionNumber', 'jambNumber', 'college', 'department', 'program',
-          'level', 'programmeId', 'levelId', 'academicSession', 'academicSessionId',
-          'studentType', 'entryMode', 'admissionYear', 'graduationYear',
-          'phoneNumber', 'address', 'password', 'accountStatus',
-        ]);
-        const payload: Record<string, any> = {};
-        for (const key of recognized) {
-          if (key in raw && raw[key] !== undefined) payload[key] = raw[key];
-        }
-        if (payload.password === undefined || payload.password === '') delete payload.password;
-        await StudentService.create(payload as any, opts.actorId, {
-          ip: opts.ip, userAgent: opts.userAgent, importId: importBatch.id,
-        });
-        createdCount++;
-      } catch (err) {
-        failedCount++;
-        perRowErrors.push({ row: vr.row, message: (err as Error).message });
-      }
-    }
-
-    // Update batch summary + audit
-    await prisma.studentImport.update({
-      where: { id: importBatch.id },
-      data: {
-        successfulRecords: createdCount + updatedCount,
-        failedRecords: failedCount,
-        duplicateRecords: strategy === 'SKIP' ? stage.dbDuplicates.length : 0,
-        errorReport: {
-          missingHeaders: stage.missingColumns,
-          failedRows: perRowErrors,
-        } as any,
-      },
-    });
-    await prisma.auditLog.create({
-      data: {
-        action: i18n.auditActions.studentBulkImported,
-        entityType: 'STUDENT_IMPORT',
-        entityId: String(importBatch.id),
-        userId: opts.actorId,
-        oldValue: JSON_DB_NULL,
-          newValue: { importNumber: importBatch.importNumber, strategy, created: createdCount, updated: updatedCount, skipped: skippedCount, failed: failedCount, file: stage.fileName } as Prisma.InputJsonValue,
-        ipAddress: opts.ip, userAgent: opts.userAgent,
-      },
-    });
-
-    try {
-      const problemRowCount = stage.problemRows.length;
-      const totalErrors = problemRowCount + failedCount;
-      const threshold = await SystemSettingsService.getImportErrorThreshold();
-      void AdminNotificationService.emitImportErrors(importBatch.id, totalErrors, threshold);
-    } catch (notifErr) {
-      console.warn('[studentImport:confirmImport] emitImportErrors failed:', (notifErr as Error)?.message);
-    }
-
-    // Tidy stage (no further previews/confirms possible).
-    _stages.delete(opts.uploadId);
 
     return {
-      importNumber: importBatch.importNumber,
-      strategy,
+      importNumber: started.importNumber,
+      strategy: started.strategy,
+      queued: true,
+      run: started.run,
       summary: {
-        total: stage.rawRecords.length,
-        created: createdCount,
-        updated: updatedCount,
-        skipped: skippedCount,
-        failed: failedCount,
-        dbDuplicatesResolved: stage.dbDuplicates.length,
-        perRowErrors,
+        total: started.summary.total,
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        failed: 0,
+        queued: true,
+        perRowErrors: [],
       },
     };
   }
