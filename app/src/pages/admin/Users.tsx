@@ -1,12 +1,17 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Pencil, Ban, Plus, Search, Key, Shield, Trash2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pencil, Ban, Plus, Search, Key, Shield, Trash2, ShieldCheck, AlertTriangle, Loader2, Lock, UserCog } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
 import ConfirmAction from '../../components/ConfirmAction';
 import Modal from '../../components/Modal';
 import { useAuth } from '../../context/AuthContext';
 import {
   usersApi,
+  permissionsApi,
   UserOut,
+  UserAccessOut,
+  UpdateUserAccessInput,
+  AccessMode,
+  PermissionOut,
   CreateUserInput,
   UpdateUserInput,
   ResetPasswordInput,
@@ -106,6 +111,565 @@ type UserFormState = {
   phoneNumber: string;
 };
 
+// ---------------------------------------------------------------------------
+// Access column + Manage Access (individual permissions / super-admin)
+// ---------------------------------------------------------------------------
+
+// Display order for known categories from the canonical backend catalogue.
+// Categories not listed are appended alphabetically — the list is intentionally
+// open so a new backend category appears without a frontend change.
+const CATEGORY_ORDER: string[] = [
+  'Dashboard', 'Students', 'Fees', 'Payments', 'Direct Billing', 'Receipts',
+  'Academic Structure', 'Reconciliation', 'Reports', 'Admin',
+];
+
+const buildCategoryList = (perms: Array<{ category?: string | null }>): string[] => {
+  const present = Array.from(new Set(perms.map((p) => p.category || 'Other')));
+  const known = CATEGORY_ORDER.filter((c) => present.includes(c));
+  const extra = present.filter((c) => !CATEGORY_ORDER.includes(c)).sort();
+  return [...known, ...extra];
+};
+
+const groupByCategory = <T extends { category?: string | null }>(perms: T[]): Map<string, T[]> => {
+  const map = new Map<string, T[]>();
+  perms.forEach((p) => {
+    const cat = p.category || 'Other';
+    if (!map.has(cat)) map.set(cat, []);
+    map.get(cat)!.push(p);
+  });
+  return map;
+};
+
+/** Human-readable summary of a user's access, used in the Access column. */
+const accessBadgeLabel = (u: UserOut): string => {
+  if (u.isSuperAdmin) return 'Super Admin';
+  if (u.accessMode === 'CUSTOM') {
+    const x = u.effectivePermissionCount ?? 0;
+    const y = u.rolePermissionCount ?? 0;
+    return `Custom · ${x} of ${y}`;
+  }
+  if (u.role === 'ADMIN') return 'Inherits Admin Role';
+  if (u.role === 'BURSARY') return 'Inherits Bursary Role';
+  return '—';
+};
+
+const AccessBadge: React.FC<{ user: UserOut }> = ({ user }) => {
+  if (user.isSuperAdmin) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800 ring-1 ring-inset ring-indigo-200">
+        <Lock className="h-3 w-3" /> Super Admin
+      </span>
+    );
+  }
+  if (user.accessMode === 'CUSTOM') {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200">
+        {accessBadgeLabel(user)}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 ring-1 ring-inset ring-gray-200">
+      {accessBadgeLabel(user)}
+    </span>
+  );
+};
+
+/**
+ * "Manage Access" modal — individual (per-user) permissions, deliberately kept
+ * SEPARATE from the role baseline editor on the Roles page (contract §3 items 6
+ * & 7). Shows the target's role, account status, access mode and permission
+ * counts; lets a caller switch between Inherit Role Access and Custom Access and,
+ * when CUSTOM, pick from ONLY the target role's available permissions grouped by
+ * canonical backend category. ZERO selected permissions is a valid, saveable
+ * configuration. Super-admin targets are shown as protected (no checkboxes).
+ */
+const ManageAccessModal: React.FC<{
+  target: UserOut | null;
+  viewerIsSuperAdmin: boolean;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}> = ({ target, viewerIsSuperAdmin, onClose, onSaved }) => {
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [access, setAccess] = useState<UserAccessOut | null>(null);
+  const [catalogue, setCatalogue] = useState<PermissionOut[]>([]);
+  const [mode, setMode] = useState<AccessMode>('INHERIT');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [origSelected, setOrigSelected] = useState<Set<string>>(new Set());
+  const [origMode, setOrigMode] = useState<AccessMode>('INHERIT');
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [superAdminBusy, setSuperAdminBusy] = useState(false);
+
+  useEffect(() => {
+    if (!target) return;
+    let alive = true;
+    setLoading(true);
+    setLoadError(null);
+    setAccess(null);
+    setError(null);
+    setConfirmOpen(false);
+    Promise.all([
+      usersApi.getAccess(target.id),
+      permissionsApi.list().catch(() => [] as PermissionOut[]),
+    ])
+      .then(([acc, perms]) => {
+        if (!alive) return;
+        setAccess(acc);
+        setCatalogue(perms);
+        setMode(acc.accessMode);
+        setOrigMode(acc.accessMode);
+        const s = new Set(acc.selectedPermissions ?? []);
+        setSelected(s);
+        setOrigSelected(new Set(s));
+      })
+      .catch((err: any) => {
+        if (!alive) return;
+        setLoadError(
+          err?.response?.data?.error ?? err?.response?.data?.message ?? err?.message ?? i18n.errors.generic,
+        );
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [target]);
+
+  const isProtected = !!access?.isProtected || !!target?.isSuperAdmin;
+
+  // ONLY the target role's available permissions (contract §3 item 6).
+  //  • BURSARY target → assignable (non-ADMIN-only) catalogue entries;
+  //  • ADMIN target   → the full catalogue (ADMIN role maximum = whole registry).
+  const availablePermissions = useMemo(() => {
+    if (!access) return [] as PermissionOut[];
+    if (access.user.role === 'ADMIN') return catalogue;
+    return catalogue.filter((p) => p.assignable !== false && p.adminOnly !== true);
+  }, [catalogue, access]);
+
+  const categories = useMemo(() => buildCategoryList(availablePermissions), [availablePermissions]);
+  const grouped = useMemo(() => groupByCategory(availablePermissions), [availablePermissions]);
+  const availableKeys = useMemo(
+    () => new Set(availablePermissions.map((p) => p.key)),
+    [availablePermissions],
+  );
+
+  const toggleCategoryAll = (cat: string, checked: boolean) => {
+    const keys = (grouped.get(cat) ?? []).map((p) => p.key);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) keys.forEach((k) => next.add(k));
+      else keys.forEach((k) => next.delete(k));
+      return next;
+    });
+  };
+
+  const togglePerm = (key: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const changes = useMemo(() => {
+    const added: string[] = [];
+    const removed: string[] = [];
+    selected.forEach((k) => {
+      if (!origSelected.has(k)) added.push(k);
+    });
+    origSelected.forEach((k) => {
+      if (!selected.has(k)) removed.push(k);
+    });
+    const modeChanged = mode !== origMode;
+    return { added, removed, hasChanges: modeChanged || added.length + removed.length > 0 };
+  }, [selected, origSelected, mode, origMode]);
+
+  const submit = async () => {
+    if (!target || !access) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      // Only target-role-available keys are ever submitted. An EMPTY array is a
+      // VALID explicit "zero permissions" configuration.
+      const permissionKeys = Array.from(selected).filter((k) => availableKeys.has(k));
+      const body: UpdateUserAccessInput =
+        mode === 'CUSTOM'
+          ? { accessMode: 'CUSTOM', permissionKeys }
+          : { accessMode: 'INHERIT' };
+      await usersApi.updateAccess(target.id, body);
+      setConfirmOpen(false);
+      onSaved(
+        mode === 'CUSTOM'
+          ? 'Individual access updated. The user must sign in again for the change to take effect.'
+          : 'Access reset to inherit the role baseline. The user must sign in again for the change to take effect.',
+      );
+    } catch (err: any) {
+      setError(
+        err?.response?.data?.error ?? err?.response?.data?.message ?? err?.message ?? i18n.errors.generic,
+      );
+      setSubmitting(false);
+    }
+  };
+
+  const setSuperAdmin = async (grant: boolean) => {
+    if (!target) return;
+    setSuperAdminBusy(true);
+    setError(null);
+    try {
+      await usersApi.setSuperAdmin(target.id, grant);
+      onSaved(grant ? 'Super administrator granted.' : 'Super administrator revoked.');
+    } catch (err: any) {
+      setError(
+        err?.response?.data?.error ?? err?.response?.data?.message ?? err?.message ?? i18n.errors.generic,
+      );
+      setSuperAdminBusy(false);
+    }
+  };
+
+  const name = target
+    ? `${target.firstName} ${target.middleName ? target.middleName + ' ' : ''}${target.lastName}`.trim()
+    : '';
+
+  return (
+    <Modal
+      isOpen={!!target}
+      onClose={() => !submitting && !superAdminBusy && onClose()}
+      title={`Manage Access: ${name}`}
+      size="lg"
+      footer={
+        isProtected ? (
+          <button
+            onClick={onClose}
+            className="px-6 py-2 rounded-lg bg-gray-700 hover:bg-gray-800 text-white text-sm font-semibold"
+          >
+            Close
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onClose}
+              disabled={submitting}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium text-sm disabled:opacity-50 rounded-lg hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => setConfirmOpen(true)}
+              disabled={submitting || loading || !!loadError || !changes.hasChanges}
+              title={!changes.hasChanges ? 'Make a change to enable saving' : ''}
+              className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Saving…
+                </>
+              ) : (
+                `Review & Save`
+              )}
+            </button>
+          </>
+        )
+      }
+    >
+      {loading && (
+        <div className="flex items-center gap-3 py-10 justify-center text-gray-500 text-sm">
+          <Loader2 className="h-5 w-5 animate-spin" /> Loading access…
+        </div>
+      )}
+
+      {!loading && loadError && (
+        <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+          <AlertTriangle className="h-5 w-5 shrink-0" />
+          <div>
+            <div className="font-semibold">Failed to load access</div>
+            <p className="mt-0.5">{loadError}</p>
+          </div>
+        </div>
+      )}
+
+      {!loading && !loadError && access && (
+        <div className="space-y-5">
+          {/* Target summary */}
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Full Name</div>
+              <div className="font-semibold text-gray-900">{name}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Email</div>
+              <div className="text-gray-800 break-all">{access.user.email}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Role</div>
+              <div className="text-gray-800">{access.user.role}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Account Status</div>
+              <ActivePill status={access.user.accountStatus} />
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Access Mode</div>
+              <div className="text-gray-800">
+                {access.accessMode === 'CUSTOM' ? 'Custom Access' : 'Inherits Role Access'}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Effective Permissions</div>
+              <div className="text-gray-800">
+                {access.effectivePermissionCount} of {access.rolePermissionCount} (role maximum)
+              </div>
+            </div>
+          </div>
+
+          {isProtected ? (
+            <div className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+              <ShieldCheck className="h-5 w-5 text-indigo-600 mt-0.5 shrink-0" />
+              <div className="text-sm text-indigo-900">
+                <div className="font-semibold">Protected Super Administrator</div>
+                <p className="mt-1 text-indigo-800">
+                  This account has protected full-system access and is not restricted by role or
+                  individual permission settings.
+                </p>
+                {viewerIsSuperAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setSuperAdmin(false)}
+                    disabled={superAdminBusy}
+                    className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-300 bg-white text-rose-700 hover:bg-rose-50 text-xs font-semibold disabled:opacity-50"
+                  >
+                    {superAdminBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserCog className="h-3.5 w-3.5" />}
+                    Revoke Super Admin
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-semibold text-gray-800">Access Mode</legend>
+                <label className="flex items-start gap-3 rounded-xl border border-gray-200 p-3 cursor-pointer hover:bg-gray-50">
+                  <input
+                    type="radio"
+                    name="access-mode"
+                    value="INHERIT"
+                    checked={mode === 'INHERIT'}
+                    onChange={() => setMode('INHERIT')}
+                    disabled={submitting}
+                    className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">Inherit Role Access</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      Hold the full {access.user.role} role baseline ({access.rolePermissionCount} permissions).
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-3 rounded-xl border border-gray-200 p-3 cursor-pointer hover:bg-gray-50">
+                  <input
+                    type="radio"
+                    name="access-mode"
+                    value="CUSTOM"
+                    checked={mode === 'CUSTOM'}
+                    onChange={() => setMode('CUSTOM')}
+                    disabled={submitting}
+                    className="mt-0.5 h-4 w-4 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">Custom Access</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      Hold ONLY the permissions you select from the {access.user.role} role's available set.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+
+              {mode === 'CUSTOM' && (
+                <div className="border-t border-gray-100 pt-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-sm font-semibold text-gray-800">
+                      Permissions ({selected.size}/{availablePermissions.length})
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setSelected(new Set(availablePermissions.map((p) => p.key)))}
+                        disabled={submitting}
+                        className="text-xs px-2.5 py-1 rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 font-medium"
+                      >
+                        Select All Available
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelected(new Set())}
+                        disabled={submitting}
+                        className="text-xs px-2.5 py-1 rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 font-medium"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  </div>
+
+                  {availablePermissions.length === 0 ? (
+                    <div className="rounded-xl border border-gray-100 bg-gray-50 p-6 text-center text-sm text-gray-500">
+                      No permissions are available for the {access.user.role} role.
+                    </div>
+                  ) : (
+                    <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
+                      {categories.map((cat) => {
+                        const catPerms = grouped.get(cat) ?? [];
+                        if (catPerms.length === 0) return null;
+                        const catChecked = catPerms.every((p) => selected.has(p.key));
+                        const catSome = catPerms.some((p) => selected.has(p.key));
+                        return (
+                          <div key={cat} className="border border-gray-100 rounded-xl overflow-hidden">
+                            <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50/70">
+                              <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={catChecked}
+                                  ref={(el) => {
+                                    if (el) el.indeterminate = !catChecked && catSome;
+                                  }}
+                                  onChange={(e) => toggleCategoryAll(cat, e.target.checked)}
+                                  disabled={submitting}
+                                  className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                />
+                                <span className="text-sm font-semibold text-gray-800">{cat}</span>
+                              </label>
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-white border border-gray-200 text-gray-600">
+                                {catPerms.filter((p) => selected.has(p.key)).length}/{catPerms.length}
+                              </span>
+                            </div>
+                            <div className="divide-y divide-gray-50">
+                              {catPerms.map((perm) => {
+                                const isChecked = selected.has(perm.key);
+                                const wasAdded = isChecked && !origSelected.has(perm.key);
+                                const wasRemoved = !isChecked && origSelected.has(perm.key);
+                                return (
+                                  <label
+                                    key={perm.key}
+                                    className={`flex items-start gap-3 px-4 py-3 cursor-pointer transition-colors ${submitting ? 'opacity-80' : 'hover:bg-gray-50'} ${wasAdded ? 'bg-emerald-50/60' : wasRemoved ? 'bg-rose-50/60' : ''}`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => togglePerm(perm.key)}
+                                      disabled={submitting}
+                                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                                    />
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-sm font-medium text-gray-900">{perm.name}</span>
+                                        {wasAdded && (
+                                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">ADDED</span>
+                                        )}
+                                        {wasRemoved && (
+                                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">REMOVED</span>
+                                        )}
+                                      </div>
+                                      <div className="font-mono text-xs text-gray-500 mt-0.5 inline-block px-1.5 py-0.5 bg-gray-100 rounded">
+                                        {perm.key}
+                                      </div>
+                                      {perm.description && (
+                                        <p className="text-xs text-gray-600 mt-1">{perm.description}</p>
+                                      )}
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {viewerIsSuperAdmin && access.user.role === 'ADMIN' && (
+                <div className="border-t border-gray-100 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => setSuperAdmin(true)}
+                    disabled={superAdminBusy}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-50 text-xs font-semibold disabled:opacity-50"
+                  >
+                    {superAdminBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                    Grant Super Admin
+                  </button>
+                  <p className="mt-1.5 text-xs text-gray-500">
+                    Grants protected full-system access (Super-Admin only).
+                  </p>
+                </div>
+              )}
+
+              {error && (
+                <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Confirmation step before applying individual access */}
+      <Modal
+        isOpen={confirmOpen}
+        onClose={() => !submitting && setConfirmOpen(false)}
+        title="Confirm access change"
+        footer={
+          <>
+            <button
+              onClick={() => setConfirmOpen(false)}
+              disabled={submitting}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium text-sm disabled:opacity-50 rounded-lg hover:bg-gray-50"
+            >
+              Back
+            </button>
+            <button
+              onClick={submit}
+              disabled={submitting}
+              className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50 inline-flex items-center gap-2"
+            >
+              {submitting ? <><Loader2 className="h-4 w-4 animate-spin" /> Saving…</> : 'Confirm & Save'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm text-gray-700">
+          <p>
+            You are about to update the individual access of{' '}
+            <span className="font-semibold">{name}</span>.
+          </p>
+          <div className="rounded-xl border border-gray-100 bg-gray-50 p-3 space-y-1">
+            <div><span className="font-semibold">Access mode:</span> {mode === 'CUSTOM' ? 'Custom Access' : 'Inherit Role Access'}</div>
+            {mode === 'CUSTOM' && (
+              <>
+                <div><span className="font-semibold">Permissions selected:</span> {selected.size}</div>
+                <div className="text-xs text-gray-600">
+                  Added: {changes.added.length} · Removed: {changes.removed.length}
+                </div>
+              </>
+            )}
+          </div>
+          {error && (
+            <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+      </Modal>
+    </Modal>
+  );
+};
+
 const UsersPage: React.FC = () => {
   const { user, logout } = useAuth();
   const brand = i18n.portals.admin.dashboardBrand;
@@ -164,6 +728,17 @@ const UsersPage: React.FC = () => {
     open: boolean;
     password: string;
   }>({ open: false, password: '' });
+
+  // Individual access management (contract §3 item 6). The backend is authoritative
+  // for whether the caller may change access; the flag below only controls UI affordances.
+  const [manageAccessTarget, setManageAccessTarget] = useState<UserOut | null>(null);
+  const viewerIsSuperAdmin = user?.role === 'ADMIN' && user?.isSuperAdmin === true;
+
+  // Contract D6: a NORMAL ADMIN may not manage the individual access of an
+  // ADMIN target (super-admin only). The backend enforces this authoritatively
+  // with a 403; this only suppresses an affordance that could never succeed.
+  const canManageAccessFor = (target: UserOut): boolean =>
+    viewerIsSuperAdmin || target.role !== 'ADMIN';
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -430,6 +1005,7 @@ const UsersPage: React.FC = () => {
                 <th className="px-3 py-3 text-left font-semibold text-gray-700">Name</th>
                 <th className="px-3 py-3 text-left font-semibold text-gray-700">Email</th>
                 <th className="px-3 py-3 text-left font-semibold text-gray-700">Role</th>
+                <th className="px-3 py-3 text-left font-semibold text-gray-700">Access</th>
                 <th className="px-3 py-3 text-left font-semibold text-gray-700">Account Status</th>
                 <th className="px-3 py-3 text-left font-semibold text-gray-700">College</th>
                 <th className="px-3 py-3 text-left font-semibold text-gray-700">Department</th>
@@ -441,14 +1017,14 @@ const UsersPage: React.FC = () => {
             <tbody className="divide-y divide-gray-100">
               {loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="px-4 py-12 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-12 text-center text-gray-500">
                     Loading…
                   </td>
                 </tr>
               )}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="px-4 py-12 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-12 text-center text-gray-500">
                     No users found.
                   </td>
                 </tr>
@@ -465,6 +1041,9 @@ const UsersPage: React.FC = () => {
                     <RoleChip role={u.role} />
                   </td>
                   <td className="px-3 py-3">
+                    <AccessBadge user={u} />
+                  </td>
+                  <td className="px-3 py-3">
                     <ActivePill status={u.accountStatus} />
                   </td>
                   <td className="px-3 py-3 text-gray-600">{u.college ?? '—'}</td>
@@ -475,6 +1054,15 @@ const UsersPage: React.FC = () => {
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center justify-end gap-1 text-xs">
+                      {canManageAccessFor(u) && (
+                        <button
+                          onClick={() => setManageAccessTarget(u)}
+                          className="inline-flex items-center gap-1 text-indigo-700 hover:text-indigo-900 px-2 py-1 rounded hover:bg-indigo-50"
+                          title="Manage access and permissions"
+                        >
+                          <UserCog className="h-3.5 w-3.5" /> Manage Access
+                        </button>
+                      )}
                       <button
                         onClick={() => openEdit(u)}
                         className="inline-flex items-center gap-1 text-blue-700 hover:text-blue-900 px-2 py-1 rounded hover:bg-blue-50"
@@ -741,6 +1329,17 @@ const UsersPage: React.FC = () => {
           {alert.message}
         </p>
       </Modal>
+
+      <ManageAccessModal
+        target={manageAccessTarget}
+        viewerIsSuperAdmin={viewerIsSuperAdmin}
+        onClose={() => setManageAccessTarget(null)}
+        onSaved={(message) => {
+          setManageAccessTarget(null);
+          setAlert({ isOpen: true, title: 'Access updated', message, type: 'success' });
+          load();
+        }}
+      />
     </div>
   );
 

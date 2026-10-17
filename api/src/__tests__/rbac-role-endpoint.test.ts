@@ -60,7 +60,7 @@ const mockPrisma: any = {
   user: {
     findUnique: jest.fn((args: any) => {
       const role = (args?.where?.id as any) === 9101 ? Role.ADMIN : args?.where?.id === 9102 ? Role.BURSARY : Role.STUDENT;
-      return Promise.resolve({ id: args.where.id, role, accountStatus: AccountStatus.ACTIVE });
+      return Promise.resolve({ id: args.where.id, role, accountStatus: AccountStatus.ACTIVE, isSuperAdmin: role === Role.ADMIN });
     }),
     findMany: jest.fn((args: any) => {
       if (args?.where?.role === Role.BURSARY) return Promise.resolve([{ id: 9102 }]);

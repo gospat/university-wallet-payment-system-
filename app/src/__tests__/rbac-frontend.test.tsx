@@ -59,7 +59,7 @@ vi.mock('../components/Modal', () => ({
 vi.mock('lucide-react', () => {
   const icons = [
     'Shield', 'Pencil', 'Eye', 'ChevronDown', 'ChevronRight', 'Loader2',
-    'CheckCircle2', 'AlertTriangle', 'Info', 'Lock', 'ShieldAlert', 'Search',
+    'CheckCircle2', 'AlertTriangle', 'Info', 'Lock', 'ShieldAlert', 'Search', 'UserCog',
   ];
   const out: any = {};
   icons.forEach((n) => { out[n] = () => null; });
@@ -161,13 +161,21 @@ afterEach(() => {
 });
 
 // ===========================================================================
-describe('hasPermission — empty array means ZERO permissions (brief §15)', () => {
-  const u = (role: string, permissions?: string[]) =>
-    ({ id: 1, email: 't@u.ng', firstName: 'T', lastName: 'U', role, permissions } as any);
+describe('hasPermission — empty array means ZERO permissions (brief §15; contract D1)', () => {
+  const u = (role: string, permissions?: string[], isSuperAdmin?: boolean) =>
+    ({ id: 1, email: 't@u.ng', firstName: 'T', lastName: 'U', role, permissions, isSuperAdmin } as any);
 
-  it('ADMIN always passes (protected super-administrator)', () => {
-    expect(hasPermission(u('ADMIN', []), 'ANYTHING')).toBe(true);
-    expect(hasPermission(u('ADMIN', undefined), 'ANYTHING')).toBe(true);
+  it('a PROTECTED SUPER ADMIN passes for any permission', () => {
+    expect(hasPermission(u('ADMIN', [], true), 'ANYTHING')).toBe(true);
+    expect(hasPermission(u('ADMIN', undefined, true), 'ANYTHING')).toBe(true);
+  });
+
+  it('a NORMAL ADMIN is evaluated against its permissions (no longer unrestricted)', () => {
+    // isSuperAdmin absent/false → the role short-circuit must NOT apply.
+    expect(hasPermission(u('ADMIN', []), 'ANYTHING')).toBe(false);
+    expect(hasPermission(u('ADMIN', undefined), 'ANYTHING')).toBe(false);
+    expect(hasPermission(u('ADMIN', ['VIEW_STUDENTS']), 'VIEW_STUDENTS')).toBe(true);
+    expect(hasPermission(u('ADMIN', ['VIEW_STUDENTS']), 'VIEW_PAYMENTS')).toBe(false);
   });
 
   it('an EMPTY permissions array never activates a fallback', () => {
@@ -200,8 +208,21 @@ describe('permission-aware routing (brief §12, §13)', () => {
     expect(container.textContent).toContain('secret');
   });
 
-  it('RequirePermission passes for ADMIN without any explicit permission', async () => {
+  it('RequirePermission passes for a PROTECTED SUPER ADMIN without any explicit permission', async () => {
+    currentUser = { role: 'ADMIN', isSuperAdmin: true, permissions: [] };
+    await render(<RequirePermission permission="VIEW_STUDENTS"><div>secret</div></RequirePermission>);
+    expect(container.textContent).toContain('secret');
+  });
+
+  it('RequirePermission DENIES a normal ADMIN with an empty permission set', async () => {
     currentUser = { role: 'ADMIN', permissions: [] };
+    await render(<RequirePermission permission="VIEW_STUDENTS"><div>secret</div></RequirePermission>);
+    expect(container.textContent).toContain('Access Denied');
+    expect(container.textContent).not.toContain('secret');
+  });
+
+  it('RequirePermission lets a normal ADMIN through when the permission IS granted', async () => {
+    currentUser = { role: 'ADMIN', permissions: ['VIEW_STUDENTS'] };
     await render(<RequirePermission permission="VIEW_STUDENTS"><div>secret</div></RequirePermission>);
     expect(container.textContent).toContain('secret');
   });
@@ -301,6 +322,41 @@ describe('Roles page — ADMIN protected, BURSARY configurable, STUDENT fixed (b
     await clickText('Clear');
     const modal = modalByTitle('Manage Permissions: BURSARY');
     expect(modal!.textContent).toContain('removed');
+  });
+
+  it('a NORMAL ADMIN sees the ADMIN baseline as read-only with a Super-Admin explanation', async () => {
+    await render(<RolesPage />);
+    // Only BURSARY is editable for a non-super-admin viewer.
+    const manage = Array.from(container.querySelectorAll('button')).filter(
+      (b) => (b.textContent || '').includes('Manage Permissions'),
+    );
+    expect(manage.length).toBe(1);
+    expect(container.textContent).toContain('requires a Super Administrator');
+  });
+
+  it('a SUPER ADMIN can edit the ADMIN role baseline (full registry)', async () => {
+    currentUser = { role: 'ADMIN', isSuperAdmin: true, permissions: [] };
+    await render(<RolesPage />);
+    // ADMIN + BURSARY both become editable for a Super Admin.
+    const manage = Array.from(container.querySelectorAll('button')).filter(
+      (b) => (b.textContent || '').includes('Manage Permissions'),
+    );
+    expect(manage.length).toBe(2);
+
+    await clickText('Manage Permissions'); // first card = ADMIN
+    const modal = modalByTitle('Manage Permissions: ADMIN');
+    expect(modal).not.toBeNull();
+    // The ADMIN role maximum is the FULL canonical registry (incl. adminOnly keys).
+    expect(modal!.textContent).toContain('REPORTS_SCHEDULE');
+    expect(modal!.textContent).toContain('ADMIN role maximum');
+  });
+
+  it('separates ROLE permissions from INDIVIDUAL user permissions and links to Manage Access', async () => {
+    await render(<RolesPage />);
+    expect(container.textContent).toContain('Role permissions');
+    expect(container.textContent).toContain('Individual user permissions');
+    expect(container.textContent).toContain('not a distinct role');
+    expect(container.querySelector('a[href="/admin/users"]')).not.toBeNull();
   });
 });
 

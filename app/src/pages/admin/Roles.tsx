@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Shield, Pencil, Eye, ChevronDown, ChevronRight, Loader2, CheckCircle2, AlertTriangle, Info, Lock } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Shield, Pencil, Eye, ChevronDown, ChevronRight, Loader2, CheckCircle2, AlertTriangle, Info, Lock, UserCog } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
 import Modal from '../../components/Modal';
 import { useAuth } from '../../context/AuthContext';
@@ -93,6 +94,9 @@ const RolesPage: React.FC = () => {
   const userText = i18n.portals.admin.dashboardGreeting(
     `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Admin'
   );
+  // Super Admin is an ACCOUNT-LEVEL FLAG on role=ADMIN, not a role (contract D1).
+  // Only a Super Admin may edit the ADMIN role baseline (contract D6 / §3 item 7).
+  const viewerIsSuperAdmin = user?.role === 'ADMIN' && user?.isSuperAdmin === true;
 
   const [roles, setRoles] = useState<RoleOut[]>([]);
   const [allPermissions, setAllPermissions] = useState<PermissionOut[]>([]);
@@ -142,6 +146,16 @@ const RolesPage: React.FC = () => {
   const groupedAssignable = useMemo(() => groupByCategory(assignablePermissions), [assignablePermissions]);
   const assignableCategories = useMemo(() => buildCategoryList(assignablePermissions), [assignablePermissions]);
 
+  // The editable permission source depends on WHICH role the modal targets
+  // (contract D4):
+  //   • BURSARY → only `assignable` keys (adminOnly/superAdminOnly are never BURSARY-).
+  //   • ADMIN   → the FULL canonical registry (the ADMIN role maximum), exactly as
+  //               the read-only view shows it.
+  const editIsAdminRole = modal.mode === 'edit' && modal.role?.role === 'ADMIN';
+  const editPerms = editIsAdminRole ? allPermissions : assignablePermissions;
+  const editGrouped = editIsAdminRole ? groupedAllPerms : groupedAssignable;
+  const editCategories = editIsAdminRole ? allCategories : assignableCategories;
+
   const toggleCat = (cat: string) => {
     setExpandedCats((prev) => {
       const next = new Set(prev);
@@ -162,7 +176,7 @@ const RolesPage: React.FC = () => {
     const now = new Set(role.permissions.map((p) => p.key));
     setSelectedPerms(now);
     setOrigPermsAtOpen(new Set(now));
-    setExpandedCats(new Set(assignableCategories));
+    setExpandedCats(new Set(role.role === 'ADMIN' ? allCategories : assignableCategories));
     setModal({ open: true, mode: 'edit', role });
   };
 
@@ -176,7 +190,7 @@ const RolesPage: React.FC = () => {
   };
 
   const toggleCategoryAll = (cat: string, checked: boolean) => {
-    const catKeys = (groupedAssignable.get(cat) ?? []).map((p) => p.key);
+    const catKeys = (editGrouped.get(cat) ?? []).map((p) => p.key);
     setSelectedPerms((prev) => {
       const next = new Set(prev);
       if (checked) catKeys.forEach((k) => next.add(k));
@@ -193,10 +207,11 @@ const RolesPage: React.FC = () => {
 
   const submitModal = async () => {
     if (!modal.role || modal.mode !== 'edit') return;
-    // Only assignable keys are ever submitted. An empty set is VALID and means
-    // "this role has zero permissions".
+    // Only keys belonging to the editable source for THIS role are ever submitted
+    // (ADMIN → full registry; BURSARY → assignable only). An empty set is VALID and
+    // means "this role has zero permissions".
     const permissionKeys = Array.from(selectedPerms).filter((k) =>
-      assignablePermissions.some((p) => p.key === k),
+      editPerms.some((p) => p.key === k),
     );
     setSubmitting(true);
     try {
@@ -254,6 +269,33 @@ const RolesPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Super Admin is a FLAG on the ADMIN role, not a role of its own, and role
+          permissions are a DIFFERENT concept from per-user individual permissions
+          (contract §3 item 7). Both are explained here and the individual flow is
+          linked rather than merged into the role editor. */}
+      <div className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 flex items-start gap-3">
+        <Info className="h-5 w-5 text-indigo-600 mt-0.5 shrink-0" />
+        <div className="text-sm text-indigo-900 space-y-2">
+          <p>
+            <span className="font-semibold">Super Administrator</span> is an account-level flag on the
+            ADMIN role — not a distinct role. A Super Administrator has unrestricted full-system
+            access, and the ADMIN role baseline can only be changed by a Super Administrator.
+          </p>
+          <p>
+            <span className="font-semibold">Role permissions</span> are the shared baseline applied to
+            every user holding that role (edited below for a configurable role).{' '}
+            <span className="font-semibold">Individual user permissions</span> override or narrow that
+            baseline for a single user (inherited vs. custom) and are not edited here.
+          </p>
+          <Link
+            to="/admin/users"
+            className="inline-flex items-center gap-1.5 font-semibold text-indigo-700 hover:text-indigo-900 underline underline-offset-2"
+          >
+            <UserCog className="h-4 w-4" /> Manage individual access from Users → Manage Access
+          </Link>
+        </div>
+      </div>
+
       {loading && roles.length === 0 && (
         <div className="bg-white border border-gray-200 rounded-2xl p-12 text-center text-gray-500">Loading…</div>
       )}
@@ -268,7 +310,7 @@ const RolesPage: React.FC = () => {
           const grouped = groupByCategory(role.permissions);
           const total = allPermissions.length || 1;
           const pct = Math.round((role.permissionsCount / total) * 100);
-          const canManage = role.modifiable === true;
+          const canManage = role.modifiable === true || (role.role === 'ADMIN' && viewerIsSuperAdmin);
           return (
             <div key={role.role} className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow">
               <div className="p-6 border-b border-gray-100">
@@ -302,21 +344,33 @@ const RolesPage: React.FC = () => {
                       />
                     </div>
                   </div>
-                  {canManage ? (
-                    <button
-                      onClick={() => openEdit(role)}
-                      className="inline-flex items-center gap-1.5 text-blue-700 hover:text-blue-900 px-3 py-1.5 rounded-lg hover:bg-blue-50 text-sm font-medium shrink-0 border border-transparent hover:border-blue-100 transition-colors"
-                    >
-                      <Pencil className="h-4 w-4" /> Manage Permissions
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => openView(role)}
-                      className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-sm font-medium shrink-0 border border-transparent hover:border-gray-200 transition-colors"
-                    >
-                      <Eye className="h-4 w-4" /> View Permissions
-                    </button>
-                  )}
+                  <div className="shrink-0 flex flex-col items-end gap-1.5">
+                    {canManage ? (
+                      <button
+                        onClick={() => openEdit(role)}
+                        className="inline-flex items-center gap-1.5 text-blue-700 hover:text-blue-900 px-3 py-1.5 rounded-lg hover:bg-blue-50 text-sm font-medium border border-transparent hover:border-blue-100 transition-colors"
+                      >
+                        <Pencil className="h-4 w-4" /> Manage Permissions
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => openView(role)}
+                        className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-sm font-medium border border-transparent hover:border-gray-200 transition-colors"
+                      >
+                        <Eye className="h-4 w-4" /> View Permissions
+                      </button>
+                    )}
+                    {role.role === 'ADMIN' && !canManage && (
+                      <span className="text-[11px] text-gray-500 max-w-[13rem] text-right leading-snug">
+                        Editing the ADMIN baseline requires a Super Administrator.
+                      </span>
+                    )}
+                    {role.role === 'STUDENT' && (
+                      <span className="text-[11px] text-gray-500 max-w-[13rem] text-right leading-snug">
+                        Fixed self-service role — not configurable.
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -477,12 +531,12 @@ const RolesPage: React.FC = () => {
             <div className="pt-2 border-t border-gray-100">
               <div className="flex items-center justify-between mb-3">
                 <div className="text-sm font-semibold text-gray-800">
-                  Permissions ({selectedPerms.size}/{assignablePermissions.length})
+                  Permissions ({selectedPerms.size}/{editPerms.length})
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   <button
                     type="button"
-                    onClick={() => setSelectedPerms(new Set(assignablePermissions.map((p) => p.key)))}
+                    onClick={() => setSelectedPerms(new Set(editPerms.map((p) => p.key)))}
                     disabled={submitting}
                     className="text-xs px-2.5 py-1 rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 font-medium transition-colors"
                   >
@@ -499,11 +553,13 @@ const RolesPage: React.FC = () => {
                 </div>
               </div>
               <p className="text-xs text-gray-500 mb-3">
-                ADMIN-only permissions are not listed here — they can never be granted to this role.
+                {editIsAdminRole
+                  ? 'This is the ADMIN role maximum (the full canonical registry). Removing a permission narrows the baseline for every ADMIN who inherits it.'
+                  : 'ADMIN-only permissions are not listed here — they can never be granted to this role.'}
               </p>
               <div className="space-y-3 max-h-[50vh] overflow-y-auto pr-1">
-                {assignableCategories.map((cat) => {
-                  const catPerms = groupedAssignable.get(cat) ?? [];
+                {editCategories.map((cat) => {
+                  const catPerms = editGrouped.get(cat) ?? [];
                   if (catPerms.length === 0) return null;
                   const catChecked = catPerms.every((p) => selectedPerms.has(p.key));
                   const catSomeChecked = catPerms.some((p) => selectedPerms.has(p.key));

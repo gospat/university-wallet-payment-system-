@@ -5,7 +5,11 @@ import prisma from '../config/database';
 import { Role, AccountStatus } from '@prisma/client';
 import { catchAsync } from '../utils/catchAsync';
 import { i18n } from '../i18n/en';
-import { PERMISSION_DEFS, isAdminOnlyPermission } from '../services/permissionSeed';
+import { isAdminOnlyPermission, isSuperAdminOnlyPermission } from '../services/permissionSeed';
+import {
+  isSuperAdmin,
+  resolveEffectivePermissionsForUser,
+} from '../services/permissionResolver';
 
 declare global {
   namespace Express {
@@ -13,6 +17,7 @@ declare global {
       user?: {
         id: number;
         role: Role;
+        isSuperAdmin: boolean;
         permissions?: string[];
       };
       cookies?: {
@@ -29,57 +34,22 @@ declare global {
 //   restrictTo(...roles) → HARD ROLE BOUNDARY (e.g. finance-only endpoints)
 //   requirePermission(k) → CAPABILITY authorization (per-permission)
 //
-//   ADMIN    → intentional SUPER ADMINISTRATOR (see isSuperAdmin): bypasses
-//              individual permission checks and always holds the full registry.
-//   BURSARY  → capability checks resolved LIVE from the authoritative
-//              RolePermission table (never from stale token claims).
-//   STUDENT  → role-specific student access.
+//   SUPER ADMIN → a user with role=ADMIN AND User.isSuperAdmin === true. It
+//                 bypasses individual permission checks and always holds the
+//                 full registry. A plain role=ADMIN account that is NOT flagged
+//                 is NOT a super administrator.
+//   ADMIN       → staff administrator. Holds exactly its resolved capability set.
+//   BURSARY     → capability checks resolved LIVE from the authoritative
+//                 RolePermission / UserPermission tables (never stale token claims).
+//   STUDENT     → role-specific student access.
 //
-// The ADMIN bypass is INTENTIONAL, CENTRALISED here and covered by tests.
+// The super-admin bypass is INTENTIONAL, CENTRALISED here and covered by tests.
 // Do not duplicate it elsewhere.
 // ---------------------------------------------------------------------------
 
-const SUPER_ADMIN_ROLE: Role = Role.ADMIN;
-
-/** ADMIN is the protected super-administrator; its bypass is intentional. */
-export function isSuperAdmin(role: Role | undefined | null): boolean {
-  return role === SUPER_ADMIN_ROLE;
-}
-
-const ROLE_PERMS_CACHE_TTL_MS = 1000;
-const rolePermsCache = new Map<string, { ts: number; perms: string[] }>();
-let lastRolePermissionDBWriteAt = 0;
-
-/**
- * Invalidate the live role-permission cache. Called after any write to
- * RolePermission (role update endpoint, permission seeding) so that a REMOVED
- * permission stops working immediately on the next request — no stale window
- * within this process.
- */
-export function bumpRolePermsVersion() {
-  lastRolePermissionDBWriteAt = Date.now();
-  rolePermsCache.clear();
-}
-
-async function resolveRolePermissionsLive(role: Role, fallback: string[]): Promise<string[]> {
-  const now = Date.now();
-  const cached = rolePermsCache.get(role);
-  const forceRefresh = now - lastRolePermissionDBWriteAt < 50;
-  if (!forceRefresh && cached && now - cached.ts < ROLE_PERMS_CACHE_TTL_MS) {
-    return cached.perms;
-  }
-  try {
-    const rows = await prisma.rolePermission.findMany({
-      where: { role },
-      select: { permission: { select: { key: true } } },
-    });
-    const perms = rows.map((r) => r.permission.key);
-    rolePermsCache.set(role, { ts: now, perms });
-    return perms;
-  } catch {
-    return fallback;
-  }
-}
+// Single authoritative resolver owns the cache/versioning. Re-exported here so
+// existing importers (`../middlewares/auth`) keep working unchanged.
+export { isSuperAdmin, bumpRolePermsVersion } from '../services/permissionResolver';
 
 export const protect = catchAsync(
   async (req: Request, res: Response, next: NextFunction) => {
@@ -115,7 +85,7 @@ export const protect = catchAsync(
 
     const currentUser = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, role: true, accountStatus: true },
+      select: { id: true, role: true, accountStatus: true, isSuperAdmin: true },
     });
 
     if (!currentUser) {
@@ -131,24 +101,26 @@ export const protect = catchAsync(
       );
     }
 
-    const decodedPermissions = Array.isArray((decoded as any).permissions)
-      ? ((decoded as any).permissions as string[])
-      : [];
-
     const role = currentUser.role as Role;
-    let effectivePermissions: string[];
-    if (isSuperAdmin(role)) {
-      // Intentional super-admin: ADMIN always holds the full canonical registry.
-      effectivePermissions = PERMISSION_DEFS.map((p) => p.key);
-    } else {
-      // BURSARY (and any other configurable role): resolve LIVE from the
-      // authoritative RolePermission table, ignoring stale token claims.
-      effectivePermissions = await resolveRolePermissionsLive(role, decodedPermissions);
-    }
+    const superAdmin = isSuperAdmin({
+      id: currentUser.id,
+      role,
+      isSuperAdmin: (currentUser as any).isSuperAdmin === true,
+    });
+
+    // LIVE authorization. JWT permission claims are DELIBERATELY ignored: a
+    // forged/stale token can never widen access. On any resolver failure the
+    // effective set collapses to [] (fail closed).
+    const effectivePermissions = await resolveEffectivePermissionsForUser({
+      id: currentUser.id,
+      role,
+      isSuperAdmin: superAdmin,
+    });
 
     req.user = {
       id: currentUser.id,
       role,
+      isSuperAdmin: superAdmin,
       permissions: effectivePermissions,
     };
     next();
@@ -165,12 +137,23 @@ export const restrictTo = (...roles: Role[]) => {
 };
 
 /**
+ * SUPER-ADMIN guard. Only a flag-aware super administrator (role === ADMIN AND
+ * User.isSuperAdmin === true) passes. Used for the most privileged mutations.
+ */
+export const requireSuperAdmin = (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user || !isSuperAdmin(req.user)) {
+    return next(new AppError(i18n.errors.auth.notPermitted, 403));
+  }
+  next();
+};
+
+/**
  * CAPABILITY authorization.
  *
- * - ADMIN (super-admin): intentional bypass.
- * - ADMIN-only capabilities (Layer 4 defence-in-depth): enforced as ADMIN-only
- *   here, so a forged/legacy RolePermission row can never grant a sensitive
- *   capability to a non-ADMIN role.
+ * - flag-aware SUPER ADMIN: intentional bypass.
+ * - ADMIN-only / super-admin-only capability (Layer 4 defence-in-depth):
+ *   enforced here, so a forged/legacy RolePermission or UserPermission row can
+ *   never grant a sensitive capability to a non-super-admin.
  * - Otherwise: the requested key must be present in the caller's live
  *   permissions.
  */
@@ -180,12 +163,19 @@ export const requirePermission = (permKey: string) => {
     if (!user) {
       return next(new AppError(i18n.errors.auth.notPermitted, 403));
     }
-    if (isSuperAdmin(user.role)) {
+    if (isSuperAdmin(user)) {
       return next();
     }
-    // Layer 4: never let a non-ADMIN reach an ADMIN-only capability, even if an
-    // invalid RolePermission row exists for it.
-    if (isAdminOnlyPermission(permKey)) {
+    // Layer 4a — SUPER-ADMIN-ONLY capability: never reachable by a normal ADMIN
+    // or BURSARY, even if a forged RolePermission / UserPermission row exists.
+    if (isSuperAdminOnlyPermission(permKey)) {
+      return next(new AppError(i18n.errors.auth.notPermitted, 403));
+    }
+    // Layer 4b — ADMIN-only capability: never reachable by a NON-ADMIN role, even
+    // if a forged row exists. A normal ADMIN (role === ADMIN, not flagged) that
+    // holds the capability in its effective set (INHERIT or CUSTOM subset) MAY
+    // exercise it — normal ADMIN is a configurable administrative role.
+    if (isAdminOnlyPermission(permKey) && user.role !== Role.ADMIN) {
       return next(new AppError(i18n.errors.auth.notPermitted, 403));
     }
     const perms = user.permissions;

@@ -58,6 +58,7 @@ const BursaryGenericReport = React.lazy(() => import('./pages/bursary/GenericRep
 const BursaryStudentStatementPage = React.lazy(() => import('./pages/bursary/StudentStatementPage'));
 const BursaryReconciliationExceptionsPage = React.lazy(() => import('./pages/bursary/ReconciliationExceptionsPage'));
 const BursaryReconciliationDashboard = React.lazy(() => import('./pages/bursary/ReconciliationDashboard').then(m => ({ default: m.BursaryReconciliationDashboard })));
+const AdminReconciliationDashboard = React.lazy(() => import('./pages/bursary/ReconciliationDashboard').then(m => ({ default: m.AdminReconciliationDashboard })));
 const BursaryExportCentre = React.lazy(() => import('./pages/bursary/ExportCentre'));
 const BursaryScheduledReports = React.lazy(() => import('./pages/bursary/ScheduledReports'));
 // STAFF SELF-SERVICE — shared My Profile page for ADMIN + BURSARY (role from useAuth)
@@ -415,50 +416,68 @@ const App: React.FC = () => {
           </Route>
 
           <Route element={<PrivateRoute roles={['ADMIN']} />}>
-            <Route path="/admin/dashboard" element={<Suspense fallback={<PageLoader />}><AdminDashboard /></Suspense>} />
-            <Route path="/admin/students" element={<Suspense fallback={<PageLoader />}><AdminStudentsWrapped /></Suspense>} />
-            <Route path="/admin/fees" element={<Suspense fallback={<PageLoader />}><AdminFeesWrapped /></Suspense>} />
-            <Route path="/admin/fees/:tab" element={<Suspense fallback={<PageLoader />}><AdminFeesWrapped /></Suspense>} />
-            <Route path="/admin/bills/create" element={<Suspense fallback={<PageLoader />}><AdminCreateBillWrapped /></Suspense>} />
-            <Route path="/admin/refunds" element={<Suspense fallback={<PageLoader />}><AdminRefunds /></Suspense>} />
-            <Route path="/admin/audit-logs" element={<Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense>} />
-            <Route path="/admin/users" element={<Suspense fallback={<PageLoader />}><UsersPage /></Suspense>} />
-            <Route path="/admin/roles" element={<Suspense fallback={<PageLoader />}><RolesPage /></Suspense>} />
-            <Route path="/admin/permissions" element={<Suspense fallback={<PageLoader />}><PermissionsPage /></Suspense>} />
-            <Route path="/admin/settings" element={<Suspense fallback={<PageLoader />}><SystemSettingsPage /></Suspense>} />
-            <Route path="/admin/payment-config" element={<Suspense fallback={<PageLoader />}><PaymentConfigPage /></Suspense>} />
+            {/* Every /admin/* operational route mirrors its BURSARY twin's
+                permission guard (contract §3 item 4). A NORMAL ADMIN is now
+                restricted by its effective permissions; only a protected super
+                administrator passes every guard. The backend re-enforces each
+                permission — this guard is UX, not the security boundary. */}
+            <Route path="/admin/dashboard" element={<RequirePermission permission="VIEW_DASHBOARD"><Suspense fallback={<PageLoader />}><AdminDashboard /></Suspense></RequirePermission>} />
+            <Route path="/admin/students" element={<RequirePermission permission="VIEW_STUDENTS"><Suspense fallback={<PageLoader />}><AdminStudentsWrapped /></Suspense></RequirePermission>} />
+            <Route path="/admin/fees" element={<RequireAnyPermission permissions={['VIEW_BILL_CATEGORIES', 'VIEW_BILLS_CATALOGUE', 'EDIT_FEE', 'BULK_UPLOAD_FEES', 'ASSIGN_FEES']}><Suspense fallback={<PageLoader />}><AdminFeesWrapped /></Suspense></RequireAnyPermission>} />
+            <Route path="/admin/fees/:tab" element={<RequireAnyPermission permissions={['VIEW_BILL_CATEGORIES', 'VIEW_BILLS_CATALOGUE', 'EDIT_FEE', 'BULK_UPLOAD_FEES', 'ASSIGN_FEES']}><Suspense fallback={<PageLoader />}><AdminFeesWrapped /></Suspense></RequireAnyPermission>} />
+            <Route path="/admin/bills/create" element={<RequirePermission permission="CREATE_FEE"><Suspense fallback={<PageLoader />}><AdminCreateBillWrapped /></Suspense></RequirePermission>} />
+            <Route path="/admin/refunds" element={<RequirePermission permission="PROCESS_REFUND"><Suspense fallback={<PageLoader />}><AdminRefunds /></Suspense></RequirePermission>} />
+            <Route path="/admin/audit-logs" element={<RequirePermission permission="AUDIT_LOGS_VIEW_FULL"><Suspense fallback={<PageLoader />}><AdminAuditLogs /></Suspense></RequirePermission>} />
+            <Route path="/admin/users" element={<RequirePermission permission="MANAGE_USERS"><Suspense fallback={<PageLoader />}><UsersPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/roles" element={<RequirePermission permission="MANAGE_ROLES"><Suspense fallback={<PageLoader />}><RolesPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/permissions" element={<RequirePermission permission="MANAGE_ROLES"><Suspense fallback={<PageLoader />}><PermissionsPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/settings" element={<RequirePermission permission="SYSTEM_SETTINGS"><Suspense fallback={<PageLoader />}><SystemSettingsPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/payment-config" element={<RequirePermission permission="PAYSTACK_CONFIG"><Suspense fallback={<PageLoader />}><PaymentConfigPage /></Suspense></RequirePermission>} />
 
-            <Route path="/admin/academic/faculties" element={<Suspense fallback={<PageLoader />}><FacultiesPage /></Suspense>} />
-            <Route path="/admin/academic/departments" element={<Suspense fallback={<PageLoader />}><DepartmentsPage /></Suspense>} />
-            <Route path="/admin/academic/programmes" element={<Suspense fallback={<PageLoader />}><ProgrammesPage /></Suspense>} />
-            <Route path="/admin/academic/student-categories" element={<Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense>} />
+            <Route path="/admin/academic/faculties" element={<RequirePermission permission="VIEW_COLLEGES"><Suspense fallback={<PageLoader />}><FacultiesPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/academic/departments" element={<RequirePermission permission="VIEW_DEPARTMENTS"><Suspense fallback={<PageLoader />}><DepartmentsPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/academic/programmes" element={<RequirePermission permission="VIEW_PROGRAMMES"><Suspense fallback={<PageLoader />}><ProgrammesPage /></Suspense></RequirePermission>} />
+            <Route path="/admin/academic/student-categories" element={<RequirePermission permission="VIEW_STUDENTS"><Suspense fallback={<PageLoader />}><StudentCategoriesPage /></Suspense></RequirePermission>} />
 
-            <Route path="/admin/payments" element={<Suspense fallback={<PageLoader />}><AdminPaymentsWrapped /></Suspense>} />
-            <Route path="/admin/receipts" element={<Suspense fallback={<PageLoader />}><AdminReceiptsWrapped /></Suspense>} />
-            <Route path="/admin/reports/daily" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/daily" title="Daily Reports" subtitle="Daily transaction summaries" />
-            } />
-            <Route path="/admin/reports/monthly" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/monthly" title="Monthly Reports" subtitle="Monthly financial summaries" />
-            } />
-            <Route path="/admin/reports/fee" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/fee" title="Fee Reports" subtitle="Fee structure analysis" />
-            } />
-            <Route path="/admin/reports/faculty" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/faculty" title="College Reports" subtitle="College-level reporting" />
-            } />
-            <Route path="/admin/reports/department" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/department" title="Department Reports" subtitle="Department-level reporting" />
-            } />
-            <Route path="/admin/reports/programme" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/programme" title="Programme Reports" subtitle="Programme-level reporting" />
-            } />
-            <Route path="/admin/reports/student" element={
-              <PlaceholderPage role="ADMIN" activePath="/admin/reports/student" title="Student Reports" subtitle="Per-student reporting" />
-            } />
+            <Route path="/admin/payments" element={<RequirePermission permission="VIEW_PAYMENTS"><Suspense fallback={<PageLoader />}><AdminPaymentsWrapped /></Suspense></RequirePermission>} />
+            <Route path="/admin/receipts" element={<RequirePermission permission="VIEW_RECEIPTS"><Suspense fallback={<PageLoader />}><AdminReceiptsWrapped /></Suspense></RequirePermission>} />
 
-            <Route path="/admin/direct-billing" element={<Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense>} />
-            <Route path="/admin/direct-billing/:tab" element={<Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense>} />
+            {/* ADMIN reconciliation + reports — REUSE the exact same real
+                components as BURSARY with role="ADMIN" and /admin/... activePath.
+                No report/reconciliation logic is duplicated or recalculated. */}
+            <Route path="/admin/reports/centre" element={
+              <RequireAnyPermission permissionPrefix={REPORTS_VIEW_PERMISSION_PREFIX}><Suspense fallback={<PageLoader />}><BursaryReportsCentre role="ADMIN" activePath="/admin/reports/centre" /></Suspense></RequireAnyPermission>
+            } />
+            <Route path="/admin/reports/view/:reportKey" element={
+              <RequireAnyPermission permissionPrefix={REPORTS_VIEW_PERMISSION_PREFIX}><Suspense fallback={<PageLoader />}><AdminGenericReportWrapped /></Suspense></RequireAnyPermission>
+            } />
+            <Route path="/admin/reports/student-statement" element={
+              <RequirePermission permission="REPORTS_VIEW_STUDENT_STATEMENT"><Suspense fallback={<PageLoader />}><BursaryStudentStatementPage role="ADMIN" activePath="/admin/reports/student-statement" /></Suspense></RequirePermission>
+            } />
+            <Route path="/admin/reports/exceptions" element={
+              <RequirePermission permission="REPORTS_VIEW_RECONCILIATION"><Suspense fallback={<PageLoader />}><BursaryReconciliationExceptionsPage role="ADMIN" activePath="/admin/reports/exceptions" /></Suspense></RequirePermission>
+            } />
+            <Route path="/admin/reports/export-centre" element={
+              <RequirePermission permission="REPORTS_EXPORT_EXCEL"><Suspense fallback={<PageLoader />}><BursaryExportCentre role="ADMIN" activePath="/admin/reports/export-centre" /></Suspense></RequirePermission>
+            } />
+            <Route path="/admin/reports/scheduled" element={
+              <RequirePermission permission="REPORTS_SCHEDULE"><Suspense fallback={<PageLoader />}><BursaryScheduledReports role="ADMIN" activePath="/admin/reports/scheduled" /></Suspense></RequirePermission>
+            } />
+            <Route path="/admin/reconciliation" element={
+              <RequirePermission permission="VIEW_RECONCILIATION"><Suspense fallback={<PageLoader />}><AdminReconciliationDashboard /></Suspense></RequirePermission>
+            } />
+            {/* Backward compat: obsolete placeholder ADMIN report routes redirect
+                to the corresponding real report key (mirrors the BURSARY redirects). */}
+            <Route path="/admin/reports/daily" element={<Navigate to="/admin/reports/view/daily-collections" replace />} />
+            <Route path="/admin/reports/monthly" element={<Navigate to="/admin/reports/view/monthly-collections" replace />} />
+            <Route path="/admin/reports/fee" element={<Navigate to="/admin/reports/view/revenue-by-bill" replace />} />
+            <Route path="/admin/reports/faculty" element={<Navigate to="/admin/reports/view/hierarchical-revenue" replace />} />
+            <Route path="/admin/reports/department" element={<Navigate to="/admin/reports/view/hierarchical-revenue" replace />} />
+            <Route path="/admin/reports/programme" element={<Navigate to="/admin/reports/view/hierarchical-revenue" replace />} />
+            <Route path="/admin/reports/student" element={<Navigate to="/admin/reports/student-statement" replace />} />
+
+            <Route path="/admin/direct-billing" element={<RequireAnyPermission permissions={['DIRECT_BILL_STUDENT', 'VIEW_DIRECT_BILLS_LOG']}><Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense></RequireAnyPermission>} />
+            <Route path="/admin/direct-billing/:tab" element={<RequireAnyPermission permissions={['DIRECT_BILL_STUDENT', 'VIEW_DIRECT_BILLS_LOG']}><Suspense fallback={<PageLoader />}><AdminDirectBillingWrapped /></Suspense></RequireAnyPermission>} />
             {/* Self-service My Profile — personal account capability, NOT an RBAC
                 operational permission. Role-protected for ADMIN only. */}
             <Route path="/admin/profile" element={<Suspense fallback={<PageLoader />}><StaffProfilePage /></Suspense>} />
@@ -600,11 +619,16 @@ const ReceiptsWrappedBase: React.FC<{ role: 'ADMIN' | 'BURSARY' }> = ({ role }) 
 const AdminReceiptsWrapped: React.FC = () => <ReceiptsWrappedBase role="ADMIN" />;
 const BursaryReceiptsWrapped: React.FC = () => <ReceiptsWrappedBase role="BURSARY" />;
 
-// STAGE 5 — Bursary Generic Report wrapper (receives role+activePath, renders own PortalShell)
-const BursaryGenericReportWrapped: React.FC = () => {
+// STAGE 5 — Generic Report wrapper (receives role + activePath, renders its own
+// PortalShell). Shared by the BURSARY and ADMIN report routes so the report logic
+// lives in exactly ONE place (contract §3 item 4: reuse, never re-implement).
+const GenericReportWrapped: React.FC<{ role: 'ADMIN' | 'BURSARY' }> = ({ role }) => {
   const location = useLocation();
-  return <BursaryGenericReport role="BURSARY" activePath={location.pathname} />;
+  return <BursaryGenericReport role={role} activePath={location.pathname} />;
 };
+
+const BursaryGenericReportWrapped: React.FC = () => <GenericReportWrapped role="BURSARY" />;
+const AdminGenericReportWrapped: React.FC = () => <GenericReportWrapped role="ADMIN" />;
 
 const StudentMyReceiptsWrapped: React.FC = () => {
   const { user, logout } = useAuth();

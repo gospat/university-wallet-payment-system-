@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { getDashboardStats, addStudent } from '../controllers/admin';
-import { protect, restrictTo, requirePermission, bumpRolePermsVersion } from '../middlewares/auth';
+import { protect, restrictTo, requirePermission, requireSuperAdmin, bumpRolePermsVersion } from '../middlewares/auth';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
 import { validateBody, validateParams, validateQuery } from '../middlewares/validate';
@@ -16,15 +16,22 @@ import {
   resendImportRowCredentials,
   stageStudentUpload,
 } from '../controllers/bulkUpload';
-import { Role, Prisma, AccountStatus, PaymentGateway, EmailType, EmailDeliveryStatus } from '@prisma/client';
+import { Role, Prisma, AccountStatus, PaymentGateway, EmailType, EmailDeliveryStatus, AccessMode } from '@prisma/client';
 import prisma from '../config/database';
+import { AppError } from '../utils/AppError';
 import { RefundService } from '../services/refund';
 import { adminListRefunds, adminApproveRefund, adminRejectRefund } from '../controllers/refunds';
 import { catchAsync } from '../utils/catchAsync';
 import { AdminSearchService } from '../services/search';
 import { SystemSettingsService } from '../services/systemSettings';
 import { AdminNotificationService } from '../services/adminNotification';
-import { PERMISSION_CATALOGUE, isAdminOnlyPermission } from '../services/permissionSeed';
+import { PERMISSION_CATALOGUE, isAdminOnlyPermission, isSuperAdminOnlyPermission } from '../services/permissionSeed';
+import {
+  getUserAccess,
+  getRolePermissions,
+  isSuperAdmin,
+  type UserAccessDescriptor,
+} from '../services/permissionResolver';
 import { buildBranding } from '../utils/branding';
 import bcrypt from 'bcrypt';
 import { reqIp, reqUa } from '../utils/http';
@@ -456,10 +463,22 @@ const USER_SELECT = {
   phoneNumber: true,
   address: true,
   role: true,
+  isSuperAdmin: true,
   accountStatus: true,
   lastLoginAt: true,
   createdAt: true,
   updatedAt: true,
+} as const;
+
+/** USER_SELECT + the individual-access mode (used by the users list/access UI). */
+const USER_LIST_SELECT = {
+  ...USER_SELECT,
+  permissionProfile: {
+    select: {
+      accessMode: true,
+      permissions: { select: { permission: { select: { key: true } } } },
+    },
+  },
 } as const;
 
 const UserListQuery = z.object({
@@ -498,7 +517,7 @@ router.get(
     const [items, total] = await Promise.all([
       prisma.user.findMany({
         where,
-        select: USER_SELECT as any,
+        select: USER_LIST_SELECT as any,
         skip,
         take: pageSize,
         orderBy: { createdAt: 'desc' },
@@ -506,9 +525,38 @@ router.get(
       prisma.user.count({ where }),
     ]);
     const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    // Surface the individual-access mode + permission counts inline (§19/§20) and
+    // drop the nested relation object. The role baseline is resolved LIVE (1s
+    // cache) so "X of Y" always reflects the authoritative maximum for the role,
+    // and a super admin is always reported at full registry width.
+    const baselineCache = new Map<string, string[]>();
+    const baselineFor = async (r: Role): Promise<string[]> => {
+      if (!baselineCache.has(r)) baselineCache.set(r, await getRolePermissions(r));
+      return baselineCache.get(r)!;
+    };
+    const itemsOut: any[] = [];
+    for (const u of items as any[]) {
+      const { permissionProfile, ...rest } = u;
+      const accessMode: AccessMode = permissionProfile?.accessMode ?? AccessMode.INHERIT;
+      const rolePerms = await baselineFor(rest.role as Role);
+      const rolePermissionCount = rolePerms.length;
+      let effectivePermissionCount: number;
+      if (isSuperAdmin({ id: rest.id, role: rest.role, isSuperAdmin: rest.isSuperAdmin })) {
+        effectivePermissionCount = PERMISSION_CATALOGUE.length;
+      } else if (accessMode === AccessMode.CUSTOM) {
+        const baseSet = new Set(rolePerms);
+        const selected: string[] = ((permissionProfile?.permissions ?? []) as any[])
+          .map((p) => p?.permission?.key)
+          .filter((k: unknown): k is string => typeof k === 'string');
+        effectivePermissionCount = selected.filter((k) => baseSet.has(k)).length;
+      } else {
+        effectivePermissionCount = rolePermissionCount;
+      }
+      itemsOut.push({ ...rest, accessMode, rolePermissionCount, effectivePermissionCount });
+    }
     res.status(200).json({
       status: 'success',
-      data: { items, total, page, pageSize, pageCount },
+      data: { items: itemsOut, total, page, pageSize, pageCount },
     });
   }),
 );
@@ -602,37 +650,80 @@ router.patch(
   catchAsync(async (req: any, res) => {
     const { id } = req.params as z.infer<typeof UserIdParam>;
     const body = req.body as z.infer<typeof UpdateUserSchema>;
-    const existing = await prisma.user.findUnique({ where: { id } });
-    if (!existing) {
+
+    // D10 — the read → validate → write sequence runs in ONE transaction so a
+    // concurrent demotion cannot slip past the final-super-admin invariant.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, role: true, isSuperAdmin: true, accountStatus: true },
+      });
+      if (!existing) return { kind: 'notFound' as const };
+
+      const updateData: Prisma.UserUpdateInput = {};
+      if (body.firstName !== undefined) updateData.firstName = body.firstName;
+      if (body.middleName !== undefined) updateData.middleName = body.middleName ?? undefined;
+      if (body.lastName !== undefined) updateData.lastName = body.lastName;
+      if (body.matricNumber !== undefined) updateData.matricNumber = body.matricNumber ?? undefined;
+      if (body.role !== undefined) updateData.role = body.role;
+      if (body.accountStatus !== undefined) updateData.accountStatus = body.accountStatus;
+      if (body.phoneNumber !== undefined) updateData.phoneNumber = body.phoneNumber ?? undefined;
+
+      // D1 — a non-ADMIN role can never retain the protected super-admin flag.
+      // If the role moves away from ADMIN, clear isSuperAdmin in the SAME write.
+      const resultingRole = body.role ?? existing.role;
+      const forcedSuperAdminOff = resultingRole !== Role.ADMIN && existing.isSuperAdmin === true;
+      if (forcedSuperAdminOff) updateData.isSuperAdmin = false;
+
+      if (Object.keys(updateData).length === 0) return { kind: 'unchanged' as const };
+
+      // D7 — the FINAL active super administrator must never be demoted,
+      // suspended or converted away from ADMIN.
+      const wasActiveSuperAdmin =
+        existing.role === Role.ADMIN &&
+        existing.isSuperAdmin === true &&
+        existing.accountStatus === AccountStatus.ACTIVE;
+      const resultingAccountStatus = body.accountStatus ?? existing.accountStatus;
+      const stillActiveSuperAdmin =
+        resultingRole === Role.ADMIN &&
+        !forcedSuperAdminOff &&
+        existing.isSuperAdmin === true &&
+        resultingAccountStatus === AccountStatus.ACTIVE;
+      if (wasActiveSuperAdmin && !stillActiveSuperAdmin) {
+        const others = await countActiveSuperAdmins(tx, id);
+        if (others === 0) return { kind: 'finalSuperAdmin' as const };
+      }
+
+      const updated = await tx.user.update({
+        where: { id },
+        data: updateData,
+        select: USER_SELECT as any,
+      });
+      return { kind: 'updated' as const, updated, changedFields: Object.keys(updateData) };
+    });
+
+    if (outcome.kind === 'notFound') {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
-    const updateData: Prisma.UserUpdateInput = {};
-    if (body.firstName !== undefined) updateData.firstName = body.firstName;
-    if (body.middleName !== undefined) updateData.middleName = body.middleName ?? undefined;
-    if (body.lastName !== undefined) updateData.lastName = body.lastName;
-    if (body.matricNumber !== undefined) updateData.matricNumber = body.matricNumber ?? undefined;
-    if (body.role !== undefined) updateData.role = body.role;
-    if (body.accountStatus !== undefined) updateData.accountStatus = body.accountStatus;
-    if (body.phoneNumber !== undefined) updateData.phoneNumber = body.phoneNumber ?? undefined;
-
-    if (Object.keys(updateData).length === 0) {
+    if (outcome.kind === 'finalSuperAdmin') {
+      return res.status(409).json({
+        status: 'fail',
+        code: 'FINAL_SUPER_ADMIN',
+        error: 'Cannot demote, suspend or change the role of the final active Super Administrator. Grant the flag to another active administrator first.',
+      });
+    }
+    if (outcome.kind === 'unchanged') {
       const user = await prisma.user.findUnique({ where: { id }, select: USER_SELECT as any });
       return res.status(200).json({ status: 'success', data: user });
     }
 
-    const updated = await prisma.user.update({
-      where: { id },
-      data: updateData,
-      select: USER_SELECT as any,
-    });
-    const changedFields = Object.keys(updateData);
     await writeAudit(req, {
       action: 'UPDATE_USER',
       entityType: 'USER',
       entityId: id,
-      details: { changedFields },
+      details: { changedFields: outcome.changedFields },
     });
-    res.status(200).json({ status: 'success', data: updated });
+    res.status(200).json({ status: 'success', data: outcome.updated });
   }),
 );
 
@@ -642,11 +733,31 @@ router.post(
   validateParams(UserIdParam),
   catchAsync(async (req: any, res) => {
     const { id } = req.params as z.infer<typeof UserIdParam>;
-    const existing = await prisma.user.findUnique({ where: { id }, select: { id: true, accountStatus: true } });
+    const existing = await prisma.user.findUnique({
+      where: { id },
+      select: { id: true, role: true, isSuperAdmin: true, accountStatus: true },
+    });
     if (!existing) {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
     const newStatus = existing.accountStatus === AccountStatus.ACTIVE ? AccountStatus.SUSPENDED : AccountStatus.ACTIVE;
+
+    // D7 — the final ACTIVE super administrator must never be suspended.
+    const isActiveSuperAdmin =
+      existing.role === Role.ADMIN &&
+      existing.isSuperAdmin === true &&
+      existing.accountStatus === AccountStatus.ACTIVE;
+    if (isActiveSuperAdmin && newStatus !== AccountStatus.ACTIVE) {
+      const others = await countActiveSuperAdmins(prisma as any, id);
+      if (others === 0) {
+        return res.status(409).json({
+          status: 'fail',
+          code: 'FINAL_SUPER_ADMIN',
+          error: 'Cannot suspend the final active Super Administrator. Grant the flag to another active administrator first.',
+        });
+      }
+    }
+
     const updated = await prisma.user.update({
       where: { id },
       data: { accountStatus: newStatus },
@@ -728,6 +839,66 @@ router.post(
 // ---------------------------------------------------------------------------
 const PROTECTED_SUPER_ADMIN_IDS = new Set<number>([1, 2, 48]);
 
+/**
+ * D7 — the final-active-super-admin invariant. Counts users that are
+ * simultaneously role=ADMIN, isSuperAdmin=true and ACTIVE, optionally excluding
+ * one id. Callers pass their transaction client so the count and the mutating
+ * write share ONE transaction and concurrent changes cannot both observe a safe
+ * "2 remaining" result.
+ */
+async function countActiveSuperAdmins(tx: any, excludeId?: number): Promise<number> {
+  return tx.user.count({
+    where: {
+      role: Role.ADMIN,
+      isSuperAdmin: true,
+      accountStatus: AccountStatus.ACTIVE,
+      ...(excludeId !== undefined ? { id: { not: excludeId } } : {}),
+    },
+  });
+}
+
+/**
+ * Build the canonical UserAccessOut payload (contract §2/§27) consumed by the
+ * frontend access editor: identity + access mode + the role baseline + the raw
+ * saved selection + the EFFECTIVE (restrict-only) intersection.
+ */
+function buildUserAccessOut(
+  user: {
+    id: number;
+    email: string;
+    firstName: string;
+    middleName?: string | null;
+    lastName: string;
+    role: Role;
+    accountStatus: AccountStatus;
+    isSuperAdmin: boolean;
+  },
+  access: UserAccessDescriptor,
+) {
+  const rolePermissions = [...access.rolePermissionKeys];
+  const selectedPermissions = [...access.customPermissionKeys];
+  const effectivePermissions = [...access.effectivePermissionKeys];
+  return {
+    user: {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      middleName: user.middleName ?? null,
+      lastName: user.lastName,
+      role: user.role,
+      accountStatus: user.accountStatus,
+      isSuperAdmin: user.isSuperAdmin,
+    },
+    accessMode: access.accessMode,
+    rolePermissions,
+    rolePermissionCount: rolePermissions.length,
+    selectedPermissions,
+    effectivePermissions,
+    effectivePermissionCount: effectivePermissions.length,
+    isProtected: PROTECTED_SUPER_ADMIN_IDS.has(user.id),
+  };
+}
+
 async function hasFinancialRecordsForStudent(userId: number): Promise<{
   any: boolean;
   invoices: number;
@@ -780,7 +951,15 @@ router.delete(
 
     const existing = await prisma.user.findUnique({
       where: { id },
-      select: { id: true, email: true, role: true, firstName: true, lastName: true },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        firstName: true,
+        lastName: true,
+        isSuperAdmin: true,
+        accountStatus: true,
+      },
     });
     if (!existing) {
       return res.status(404).json({ status: 'fail', error: 'User not found' });
@@ -793,6 +972,22 @@ router.delete(
         error: 'Cannot delete protected system account (primary admin / bursary bootstrap accounts)',
         code: 'PROTECTED_ACCOUNT',
       });
+    }
+
+    // Gate 2b — D7: the FINAL active super administrator must never be deleted.
+    if (
+      existing.role === Role.ADMIN &&
+      existing.isSuperAdmin === true &&
+      existing.accountStatus === AccountStatus.ACTIVE
+    ) {
+      const others = await countActiveSuperAdmins(prisma as any, id);
+      if (others === 0) {
+        return res.status(409).json({
+          status: 'fail',
+          code: 'FINAL_SUPER_ADMIN',
+          error: 'Cannot delete the final active Super Administrator. Grant the flag to another active administrator first.',
+        });
+      }
     }
 
     // Gate 3 — student financial integrity
@@ -855,6 +1050,330 @@ router.delete(
         deletedUserId: id,
       },
     });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// HIERARCHICAL STAFF ACCESS — individual permission overlay (§2/§8/§14/§27)
+//   GET   /admin/users/:id/access       read the resolved access configuration
+//   PATCH /admin/users/:id/access       set INHERIT/CUSTOM (+ permissionKeys)
+//   POST  /admin/users/:id/super-admin  grant/revoke the protected super-admin
+//
+// Invariants enforced here (server-authoritative):
+//   · Individual access RESTRICTS only — granted keys must be a subset of the
+//     role maximum (ADMIN baseline / BURSARY baseline) and of the ACTOR's own
+//     effective permissions. It can never widen capability.
+//   · ADMIN-only capabilities are never assignable to a BURSARY user; the
+//     super-administrator-only capability is never delegable to anyone.
+//   · A CUSTOM selection with ZERO keys is a VALID explicit zero.
+// ---------------------------------------------------------------------------
+
+const USER_ACCESS_USER_SELECT = {
+  id: true,
+  email: true,
+  firstName: true,
+  middleName: true,
+  lastName: true,
+  role: true,
+  accountStatus: true,
+  isSuperAdmin: true,
+} as const;
+
+router.get(
+  '/users/:id/access',
+  requirePermission('MANAGE_USERS'),
+  validateParams(UserIdParam),
+  catchAsync(async (req: any, res) => {
+    const { id } = req.params as z.infer<typeof UserIdParam>;
+    const user = await prisma.user.findUnique({
+      where: { id },
+      select: USER_ACCESS_USER_SELECT as any,
+    });
+    if (!user) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    const target = user as any;
+    // An administrator's individual access is Super-Admin-only: a normal
+    // (non-flagged) admin must never inspect a peer administrator's capability.
+    if (target.role === Role.ADMIN && !isSuperAdmin(req.user)) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: "Only a Super Administrator may view an administrator's individual access.",
+      });
+    }
+    const access = await getUserAccess(id);
+    if (!access) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    res.status(200).json({ status: 'success', data: buildUserAccessOut(target, access) });
+  }),
+);
+
+const UpdateUserAccessSchema = z
+  .object({
+    accessMode: z.enum([AccessMode.INHERIT, AccessMode.CUSTOM]),
+    // Required for CUSTOM (an EMPTY array is a valid explicit zero). Ignored
+    // for INHERIT.
+    permissionKeys: z.array(z.string().trim().min(1).max(64)).max(200).optional(),
+  })
+  .strict();
+
+router.patch(
+  '/users/:id/access',
+  requirePermission('MANAGE_USERS'),
+  validateParams(UserIdParam),
+  validateBody(UpdateUserAccessSchema),
+  catchAsync(async (req: any, res) => {
+    const { id } = req.params as z.infer<typeof UserIdParam>;
+    const { accessMode, permissionKeys } = req.body as z.infer<typeof UpdateUserAccessSchema>;
+    const actor = req.user as { id: number; role: Role; isSuperAdmin: boolean; permissions?: string[] };
+    const actorIsSuperAdmin = isSuperAdmin(actor);
+
+    const target = await prisma.user.findUnique({
+      where: { id },
+      select: USER_ACCESS_USER_SELECT as any,
+    });
+    if (!target) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    const t = target as any;
+
+    // Individual access applies to STAFF only — a STUDENT never has a profile.
+    if (t.role === Role.STUDENT) {
+      return res.status(400).json({
+        status: 'fail',
+        code: 'NOT_STAFF',
+        error: 'Individual access configuration applies to ADMIN and BURSARY users only.',
+      });
+    }
+
+    if (t.role === Role.ADMIN && !actorIsSuperAdmin) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: "Only a Super Administrator may change an administrator's individual access.",
+      });
+    }
+
+    const targetIsSuperAdmin = isSuperAdmin({ id: t.id, role: t.role, isSuperAdmin: t.isSuperAdmin });
+    if (targetIsSuperAdmin && accessMode === AccessMode.CUSTOM && !actorIsSuperAdmin) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: 'Only a Super Administrator may configure individual access for a Super Administrator.',
+      });
+    }
+
+    const baselineSet = new Set(await getRolePermissions(t.role as Role));
+
+    let normalizedKeys: string[] = [];
+    let permRows: { id: number; key: string }[] = [];
+    if (accessMode === AccessMode.CUSTOM) {
+      if (permissionKeys === undefined) {
+        return res.status(400).json({
+          status: 'fail',
+          code: 'PERMISSION_KEYS_REQUIRED',
+          error:
+            'permissionKeys is required when accessMode is CUSTOM (an empty array is a valid explicit zero).',
+        });
+      }
+      normalizedKeys = Array.from(new Set(permissionKeys.map((k) => k.trim())));
+
+      // Super-administrator-only capabilities are never delegable to anyone.
+      const superOnlyRequested = normalizedKeys.filter((k) => isSuperAdminOnlyPermission(k));
+      if (superOnlyRequested.length > 0) {
+        return res.status(400).json({
+          status: 'fail',
+          code: 'SUPER_ADMIN_ONLY_PERMISSION',
+          error: `Super-Administrator-only permission keys cannot be delegated: ${superOnlyRequested.join(', ')}`,
+        });
+      }
+      // ADMIN-only capabilities can never belong to a BURSARY user.
+      if (t.role !== Role.ADMIN) {
+        const adminOnlyRequested = normalizedKeys.filter((k) => isAdminOnlyPermission(k));
+        if (adminOnlyRequested.length > 0) {
+          return res.status(400).json({
+            status: 'fail',
+            code: 'ADMIN_ONLY_PERMISSION',
+            error: `ADMIN-only permission keys cannot be assigned to a ${t.role} user: ${adminOnlyRequested.join(', ')}`,
+          });
+        }
+      }
+
+      // Resolve canonical permission rows (unknown keys → 400).
+      if (normalizedKeys.length > 0) {
+        const found = await prisma.permission.findMany({
+          where: { key: { in: normalizedKeys } },
+          select: { id: true, key: true },
+        });
+        const foundSet = new Set(found.map((p) => p.key));
+        const missing = normalizedKeys.filter((k) => !foundSet.has(k));
+        if (missing.length > 0) {
+          return res.status(400).json({
+            status: 'fail',
+            code: 'UNKNOWN_PERMISSION',
+            error: `Unknown permission keys: ${missing.join(', ')}`,
+          });
+        }
+        permRows = found;
+      }
+
+      // Individual access can only RESTRICT the role maximum — never exceed it.
+      const outsideBaseline = normalizedKeys.filter((k) => !baselineSet.has(k));
+      if (outsideBaseline.length > 0) {
+        return res.status(400).json({
+          status: 'fail',
+          code: 'OUT_OF_ROLE_SCOPE',
+          error: `Permission keys outside the ${t.role} role maximum cannot be granted: ${outsideBaseline.join(', ')}`,
+        });
+      }
+      // A delegator may only hand out capabilities it itself holds.
+      if (!actorIsSuperAdmin) {
+        const actorPerms = new Set(Array.isArray(actor.permissions) ? actor.permissions : []);
+        const notHeld = normalizedKeys.filter((k) => !actorPerms.has(k));
+        if (notHeld.length > 0) {
+          return res.status(403).json({
+            status: 'fail',
+            code: 'EXCEEDS_ACTOR_PERMISSIONS',
+            error: `You cannot grant permissions you do not hold: ${notHeld.join(', ')}`,
+          });
+        }
+      }
+    }
+
+    // Diff against the CURRENT stored configuration so a no-op save never logs a
+    // misleading change entry.
+    const before = await getUserAccess(id);
+    if (!before) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    const beforeSelected = new Set(before.customPermissionKeys);
+    const afterSelected = new Set(permRows.map((p) => p.key));
+    const modeChanged = before.accessMode !== accessMode;
+    const selectionChanged =
+      accessMode === AccessMode.CUSTOM &&
+      (beforeSelected.size !== afterSelected.size ||
+        [...afterSelected].some((k) => !beforeSelected.has(k)));
+    const hasDiff = modeChanged || selectionChanged;
+
+    if (hasDiff) {
+      await prisma.$transaction(async (tx) => {
+        const profile = await tx.userPermissionProfile.upsert({
+          where: { userId: id },
+          create: { userId: id, accessMode, updatedById: actor.id },
+          update: { accessMode, updatedById: actor.id },
+        });
+        await tx.userPermission.deleteMany({ where: { profileId: profile.id } });
+        if (accessMode === AccessMode.CUSTOM && permRows.length > 0) {
+          await tx.userPermission.createMany({
+            data: permRows.map((p) => ({ profileId: profile.id, permissionId: p.id })),
+            skipDuplicates: true,
+          });
+        }
+        // Individual access is resolved LIVE per request, so only the target's
+        // EXISTING sessions need clearing — never any other user's.
+        await tx.refreshToken.updateMany({
+          where: { userId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      });
+
+      await writeAudit(req, {
+        action: modeChanged ? 'USER_ACCESS_MODE_CHANGED' : 'USER_PERMISSIONS_UPDATED',
+        entityType: 'USER',
+        entityId: id,
+        details: {
+          previousAccessMode: before.accessMode,
+          accessMode,
+          before: before.customPermissionKeys,
+          after: [...afterSelected],
+          role: t.role,
+        },
+      });
+    }
+
+    const after = await getUserAccess(id);
+    if (!after) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    res.status(200).json({ status: 'success', data: buildUserAccessOut(t, after) });
+  }),
+);
+
+const SetSuperAdminSchema = z.object({ grant: z.boolean() }).strict();
+
+router.post(
+  '/users/:id/super-admin',
+  requireSuperAdmin,
+  validateParams(UserIdParam),
+  validateBody(SetSuperAdminSchema),
+  catchAsync(async (req: any, res) => {
+    const { id } = req.params as z.infer<typeof UserIdParam>;
+    const { grant } = req.body as z.infer<typeof SetSuperAdminSchema>;
+    const actor = req.user as { id: number };
+
+    const target = await prisma.user.findUnique({
+      where: { id },
+      select: USER_ACCESS_USER_SELECT as any,
+    });
+    if (!target) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    const t = target as any;
+
+    if (grant && t.role !== Role.ADMIN) {
+      return res.status(400).json({
+        status: 'fail',
+        code: 'TARGET_NOT_ADMIN',
+        error: 'Only a user whose role is ADMIN can be granted the Super Administrator flag.',
+      });
+    }
+
+    const currentFlag = t.isSuperAdmin === true;
+    if (currentFlag !== grant) {
+      // D7 — the FINAL active super administrator must never lose the flag.
+      if (
+        !grant &&
+        t.accountStatus === AccountStatus.ACTIVE
+      ) {
+        const others = await countActiveSuperAdmins(prisma as any, id);
+        if (others === 0) {
+          return res.status(409).json({
+            status: 'fail',
+            code: 'FINAL_SUPER_ADMIN',
+            error: 'Cannot revoke the Super Administrator flag from the final active Super Administrator.',
+          });
+        }
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.user.update({ where: { id }, data: { isSuperAdmin: grant } });
+        // Force the target to re-authenticate so its new capability set is
+        // resolved fresh from the database on the next request.
+        await tx.refreshToken.updateMany({
+          where: { userId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      });
+
+      await writeAudit(req, {
+        action: grant ? 'SUPER_ADMIN_GRANTED' : 'SUPER_ADMIN_REVOKED',
+        entityType: 'USER',
+        entityId: id,
+        details: { email: t.email, role: t.role, changedBy: actor.id },
+      });
+    }
+
+    const fresh = await prisma.user.findUnique({
+      where: { id },
+      select: USER_ACCESS_USER_SELECT as any,
+    });
+    const access = await getUserAccess(id);
+    if (!fresh || !access) {
+      return res.status(404).json({ status: 'fail', message: 'User not found' });
+    }
+    res.status(200).json({ status: 'success', data: buildUserAccessOut(fresh as any, access) });
   }),
 );
 
@@ -1194,6 +1713,9 @@ router.get(
       category: def.category,
       description: def.description,
       adminOnly: def.adminOnly,
+      // D4 — a capability reserved to a FLAG-AWARE Super Administrator is never
+      // delegable to any other user (not even a normal ADMIN).
+      superAdminOnly: def.superAdminOnly,
       assignable: def.assignable,
       roles_assigned: byPermKey.get(def.key) ?? [],
     }));

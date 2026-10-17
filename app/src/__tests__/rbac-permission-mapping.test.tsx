@@ -70,8 +70,8 @@ import {
 } from '../components/PrivateRoute';
 import PortalShell from '../components/PortalShell';
 
-const u = (role: 'ADMIN' | 'BURSARY' | 'STUDENT', permissions?: string[]) =>
-  ({ id: 1, email: 't@u.ng', firstName: 'T', lastName: 'U', role, permissions } as any);
+const u = (role: 'ADMIN' | 'BURSARY' | 'STUDENT', permissions?: string[], isSuperAdmin?: boolean) =>
+  ({ id: 1, email: 't@u.ng', firstName: 'T', lastName: 'U', role, permissions, isSuperAdmin } as any);
 
 // ---------------------------------------------------------------------------
 let container: HTMLDivElement;
@@ -150,8 +150,14 @@ describe('hasAnyPermission + REPORTS_VIEW_PERMISSION_PREFIX (prefix rule)', () =
     expect(hasAnyPermission(null, undefined, REPORTS_VIEW_PERMISSION_PREFIX)).toBe(false);
   });
 
-  it('ADMIN always passes', () => {
-    expect(hasAnyPermission(u('ADMIN', []), undefined, REPORTS_VIEW_PERMISSION_PREFIX)).toBe(true);
+  it('a PROTECTED SUPER ADMIN always passes', () => {
+    expect(hasAnyPermission(u('ADMIN', [], true), undefined, REPORTS_VIEW_PERMISSION_PREFIX)).toBe(true);
+  });
+
+  it('a NORMAL ADMIN with no report-view key is DENIED (no ADMIN short-circuit)', () => {
+    expect(hasAnyPermission(u('ADMIN', []), undefined, REPORTS_VIEW_PERMISSION_PREFIX)).toBe(false);
+    expect(hasAnyPermission(u('ADMIN', ['VIEW_PAYMENTS']), undefined, REPORTS_VIEW_PERMISSION_PREFIX)).toBe(false);
+    expect(hasAnyPermission(u('ADMIN', ['REPORTS_VIEW_REVENUE']), undefined, REPORTS_VIEW_PERMISSION_PREFIX)).toBe(true);
   });
 });
 
@@ -185,8 +191,8 @@ describe('A. Student Statement guard uses REPORTS_VIEW_STUDENT_STATEMENT', () =>
     expect(container.textContent).not.toContain('statement-body');
   });
 
-  it('ADMIN passes', async () => {
-    currentUser = u('ADMIN', []);
+  it('a PROTECTED SUPER ADMIN passes', async () => {
+    currentUser = u('ADMIN', [], true);
     await renderGuarded();
     expect(container.textContent).toContain('statement-body');
   });
@@ -229,10 +235,17 @@ describe('B/C/D/G/H. RequireAnyPermission gates Reports Centre entry', () => {
     expect(container.textContent).toContain('Access Denied');
   });
 
-  it('G. ADMIN passes', async () => {
-    currentUser = u('ADMIN', []);
+  it('G. a PROTECTED SUPER ADMIN passes', async () => {
+    currentUser = u('ADMIN', [], true);
     await renderCentre();
     expect(container.textContent).toContain('centre-body');
+  });
+
+  it('G2. a NORMAL ADMIN with no report-view key is DENIED entry', async () => {
+    currentUser = u('ADMIN', []);
+    await renderCentre();
+    expect(container.textContent).toContain('Access Denied');
+    expect(container.textContent).not.toContain('centre-body');
   });
 });
 
@@ -291,13 +304,29 @@ describe('A/B/C/D/G/H. Sidebar visibility matches the route permission', () => {
     expect(container.textContent).toContain('Profile');
   });
 
-  it('G. ADMIN sidebar is unrestricted even with no explicit permissions', async () => {
+  it('G. a PROTECTED SUPER ADMIN sidebar is unrestricted even with no explicit permissions', async () => {
+    currentUser = u('ADMIN', [], true);
     await renderShell('ADMIN', []);
     expect(href('/admin/dashboard')).toBeTruthy();
     expect(href('/admin/students')).toBeTruthy();
     expect(href('/admin/payments')).toBeTruthy();
     expect(href('/admin/roles')).toBeTruthy();
+    expect(href('/admin/reconciliation')).toBeTruthy();
+    expect(href('/admin/reports/centre')).toBeTruthy();
     expect(container.textContent).not.toContain('No menu items available');
+  });
+
+  it('G2. a NORMAL ADMIN with an EMPTY permission set sees ONLY MY ACCOUNT → Profile', async () => {
+    currentUser = u('ADMIN', []);
+    await renderShell('ADMIN', []);
+    expect(href('/admin/dashboard')).toBeNull();
+    expect(href('/admin/students')).toBeNull();
+    expect(href('/admin/payments')).toBeNull();
+    expect(href('/admin/roles')).toBeNull();
+    expect(href('/admin/reconciliation')).toBeNull();
+    // Profile is a personal capability, never permission-gated.
+    expect(href('/admin/profile')).toBeTruthy();
+    expect(container.textContent).toContain('MY ACCOUNT');
   });
 });
 
@@ -408,7 +437,10 @@ describe('F/H. Static route contract — every /bursary/* route is guarded', () 
   });
 
   it('A. sidebar Student Statement item uses REPORTS_VIEW_STUDENT_STATEMENT', () => {
-    const i = SHELL_SRC.indexOf("to: '/bursary/reports/student-statement'");
+    // The Reconciliation group is defined ONCE with a `${prefix}/reports/...`
+    // template (`prefix` = /admin or /bursary) so BOTH portals expose the same
+    // real surface. Match the template form, not the old literal /bursary path.
+    const i = SHELL_SRC.indexOf('${prefix}/reports/student-statement');
     expect(i).toBeGreaterThan(-1);
     const block = SHELL_SRC.slice(i, i + 220);
     expect(block).toContain("requiresPermission: 'REPORTS_VIEW_STUDENT_STATEMENT'");
@@ -416,7 +448,7 @@ describe('F/H. Static route contract — every /bursary/* route is guarded', () 
   });
 
   it('B/C/D. sidebar Reports Centre item uses the any-REPORTS_VIEW_* prefix', () => {
-    const i = SHELL_SRC.indexOf("to: '/bursary/reports/centre'");
+    const i = SHELL_SRC.indexOf('${prefix}/reports/centre');
     expect(i).toBeGreaterThan(-1);
     const block = SHELL_SRC.slice(i, i + 220);
     expect(block).toContain('anyPermissionPrefix: REPORTS_VIEW_PERMISSION_PREFIX');

@@ -23,6 +23,14 @@ export interface PermissionDefinition {
   description?: string;
   /** true = ADMIN-only; never assignable to a configurable role (BURSARY). */
   adminOnly?: boolean;
+  /**
+   * true = only a FLAG-AWARE SUPER ADMINISTRATOR may exercise this capability
+   * (role === ADMIN AND User.isSuperAdmin === true). A plain role=ADMIN account
+   * that is NOT flagged as super admin must never reach it. `superAdminOnly`
+   * implies `adminOnly` (the key is therefore never BURSARY-assignable and is
+   * still covered by the Layer-4 ADMIN-only runtime guard).
+   */
+  superAdminOnly?: boolean;
 }
 
 export const PERMISSION_DEFS: PermissionDefinition[] = [
@@ -31,7 +39,7 @@ export const PERMISSION_DEFS: PermissionDefinition[] = [
   { key: 'VIEW_USERS', name: 'View Users', category: 'Admin' },
   { key: 'MANAGE_USERS', name: 'Manage Users', category: 'Admin', adminOnly: true },
   { key: 'VIEW_ROLES', name: 'View Roles', category: 'Admin' },
-  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin', adminOnly: true },
+  { key: 'MANAGE_ROLES', name: 'Manage Roles & Permissions', category: 'Admin', adminOnly: true, superAdminOnly: true },
   { key: 'IMPERSONATE_USERS', name: 'Impersonate Users', category: 'Admin', adminOnly: true },
   { key: 'VIEW_STUDENTS', name: 'View Students', category: 'Students' },
   { key: 'CREATE_STUDENT', name: 'Create Student', category: 'Students' },
@@ -124,6 +132,35 @@ export function isAdminOnlyPermission(key: string): boolean {
   return ADMIN_ONLY_SENSITIVE_KEYS.has(key);
 }
 
+/**
+ * SINGLE authoritative SUPER-ADMIN-only permission definition.
+ * Derived INLINE from PERMISSION_DEFS (`superAdminOnly: true`). These keys may
+ * only be exercised by a FLAG-AWARE super administrator (role === ADMIN AND
+ * User.isSuperAdmin === true). superAdminOnly ⊆ adminOnly by construction — a
+ * guard below fails loudly at module load if that invariant is ever broken.
+ */
+export const SUPER_ADMIN_ONLY_PERMISSION_KEYS: readonly string[] = PERMISSION_DEFS
+  .filter((p) => p.superAdminOnly === true)
+  .map((p) => p.key);
+
+export const SUPER_ADMIN_ONLY_SENSITIVE_KEYS: ReadonlySet<string> = new Set(
+  SUPER_ADMIN_ONLY_PERMISSION_KEYS,
+);
+
+export function isSuperAdminOnlyPermission(key: string): boolean {
+  return SUPER_ADMIN_ONLY_SENSITIVE_KEYS.has(key);
+}
+
+// Invariant guard: every super-admin-only key MUST also be ADMIN-only, otherwise
+// the Layer-4 runtime guard (which only consults ADMIN_ONLY) could be bypassed.
+for (const k of SUPER_ADMIN_ONLY_PERMISSION_KEYS) {
+  if (!ADMIN_ONLY_SENSITIVE_KEYS.has(k)) {
+    throw new Error(
+      `[permissionSeed] superAdminOnly key must also be adminOnly: ${k}`,
+    );
+  }
+}
+
 /** Registry entry shape exposed by GET /admin/permissions (canonical catalogue). */
 export interface PermissionCatalogueEntry {
   key: string;
@@ -131,6 +168,8 @@ export interface PermissionCatalogueEntry {
   category: string;
   description: string | null;
   adminOnly: boolean;
+  /** true = only a FLAG-AWARE super administrator may exercise this capability. */
+  superAdminOnly: boolean;
   /** false for ADMIN-only capabilities — they are never assignable to BURSARY. */
   assignable: boolean;
 }
@@ -146,6 +185,7 @@ export const PERMISSION_CATALOGUE: readonly PermissionCatalogueEntry[] = PERMISS
   category: p.category,
   description: p.description ?? null,
   adminOnly: p.adminOnly === true,
+  superAdminOnly: p.superAdminOnly === true,
   assignable: p.adminOnly !== true,
 }));
 

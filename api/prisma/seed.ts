@@ -17,6 +17,7 @@ async function main() {
       firstName: 'Super',
       lastName: 'Admin',
       role: Role.ADMIN,
+      isSuperAdmin: true,
     },
   });
   console.log(`Created Admin: ${admin.email}`);

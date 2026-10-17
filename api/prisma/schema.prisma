@@ -16,6 +16,11 @@ enum Role {
   BURSARY
 }
 
+enum AccessMode {
+  INHERIT
+  CUSTOM
+}
+
 enum AccountStatus {
   ACTIVE
   SUSPENDED
@@ -217,6 +222,7 @@ model User {
   phoneNumber         String?
   address             String?
   role                Role           @default(STUDENT)
+  isSuperAdmin        Boolean        @default(false)
   accountStatus       AccountStatus  @default(ACTIVE)
   lastLoginAt         DateTime?
   failedLoginAttempts Int            @default(0)
@@ -251,11 +257,14 @@ model User {
   scheduledReportsPaused ScheduledReport[] @relation("ScheduledReportPauser")
   studentCategory      StudentCategory? @relation("StudentCategoryMembers", fields: [studentCategoryId], references: [id], onDelete: Restrict)
   studentCategoriesCreated StudentCategory[] @relation("StudentCategoryCreator")
+  permissionProfile   UserPermissionProfile? @relation("UserPermissionProfile")
+  permissionProfileUpdates UserPermissionProfile[] @relation("UserPermissionProfileUpdatedBy")
 
   @@index([accountStatus])
   @@index([college, department, program, level])
   @@index([academicSession])
   @@index([role])
+  @@index([role, isSuperAdmin])
   @@index([studentCategoryId])
   @@map("users")
 }
@@ -711,6 +720,7 @@ model Permission {
   category        String?        @db.VarChar(40)
   createdAt       DateTime       @default(now())
   rolePermissions RolePermission[]
+  userPermissions UserPermission[]
 }
 
 model RolePermission {
@@ -720,6 +730,39 @@ model RolePermission {
   permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
   createdAt    DateTime   @default(now())
   @@unique([role, permissionId])
+}
+
+// HIERARCHICAL STAFF ACCESS (contract D2). Per-user, normalized individual
+// access overlay on top of the role baseline. A row absent OR accessMode
+// INHERIT means "inherit the role permissions"; accessMode CUSTOM with zero
+// UserPermission rows is a VALID explicit zero and must never be conflated
+// with INHERIT. No profile is ever created for a STUDENT.
+model UserPermissionProfile {
+  id          Int           @id @default(autoincrement())
+  userId      Int           @unique
+  accessMode  AccessMode    @default(INHERIT)
+  updatedById Int?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  user        User          @relation("UserPermissionProfile", fields: [userId], references: [id], onDelete: Cascade)
+  updatedBy   User?         @relation("UserPermissionProfileUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  permissions UserPermission[]
+
+  @@index([accessMode])
+  @@map("user_permission_profiles")
+}
+
+model UserPermission {
+  id           Int                   @id @default(autoincrement())
+  profileId    Int
+  permissionId Int
+  createdAt    DateTime              @default(now())
+  profile      UserPermissionProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  permission   Permission            @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, permissionId])
+  @@index([permissionId])
+  @@map("user_permissions")
 }
 
 model AdminNotification {

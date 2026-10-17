@@ -23,8 +23,60 @@ export interface UserOut {
   role: 'ADMIN' | 'BURSARY' | 'STUDENT';
   accountStatus: 'ACTIVE' | 'SUSPENDED' | 'GRADUATED' | 'WITHDRAWN';
   lastLoginAt?: string | null;
+  /**
+   * PROTECTED SUPER ADMINISTRATOR flag (contract D1). Present on the list row so
+   * the Access column can distinguish a protected super admin from a normal ADMIN.
+   */
+  isSuperAdmin?: boolean;
+  /** Individual access mode; INHERIT (role baseline) or CUSTOM (selected subset). */
+  accessMode?: AccessMode;
+  /** Size of the target role's maximum permission set (denominator of "X of Y"). */
+  rolePermissionCount?: number;
+  /** Size of the user's EFFECTIVE (resolved) permission set. */
+  effectivePermissionCount?: number;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/** Individual access mode (contract D2). */
+export type AccessMode = 'INHERIT' | 'CUSTOM';
+
+export interface UserAccessUserOut {
+  id: number;
+  email: string;
+  firstName: string;
+  middleName?: string | null;
+  lastName: string;
+  role: 'ADMIN' | 'BURSARY' | 'STUDENT';
+  accountStatus: 'ACTIVE' | 'SUSPENDED' | 'GRADUATED' | 'WITHDRAWN';
+  isSuperAdmin: boolean;
+}
+
+/**
+ * GET /admin/users/:id/access response (contract §2 item 2). The backend is the
+ * single authority: `effectivePermissions` is the resolved set (role-base ∩
+ * selected for CUSTOM; the whole role baseline for INHERIT; the full registry
+ * for a super admin). `selectedPermissions` may legitimately be EMPTY.
+ */
+export interface UserAccessOut {
+  user: UserAccessUserOut;
+  accessMode: AccessMode;
+  rolePermissions: string[];
+  rolePermissionCount: number;
+  selectedPermissions: string[];
+  effectivePermissions: string[];
+  effectivePermissionCount: number;
+  isProtected: boolean;
+}
+
+/**
+ * PATCH /admin/users/:id/access body (contract §2 item 3). `permissionKeys` is
+ * required when accessMode is CUSTOM and may be an EMPTY array (an explicit
+ * "zero permissions" configuration). It is ignored when accessMode is INHERIT.
+ */
+export interface UpdateUserAccessInput {
+  accessMode: AccessMode;
+  permissionKeys?: string[];
 }
 
 export interface RolePermissionOut {
@@ -55,6 +107,11 @@ export interface PermissionOut {
   adminOnly: boolean;
   /** false for ADMIN-only capabilities — they cannot be granted to BURSARY. */
   assignable: boolean;
+  /**
+   * true = a Super-Admin authority (contract D4) — currently only MANAGE_ROLES.
+   * Additive field exposed by GET /admin/permissions.
+   */
+  superAdminOnly?: boolean;
   roles_assigned: string[];
 }
 
@@ -160,6 +217,19 @@ export const usersApi = {
     api.post<{ data: { message?: string; generatedPassword?: string } }>(`/admin/users/${id}/reset-password`, body).then(unwrapData<{ message?: string; generatedPassword?: string }>),
   remove: (id: number) =>
     api.delete(`/admin/users/${id}`).then((r: any) => unwrapData<any>(r) ?? r?.data ?? {}),
+  // --- Individual access / super-admin hierarchy (contract §3 item 5) ---------
+  /** GET /admin/users/:id/access — requires MANAGE_USERS; target ADMIN is super-admin only. */
+  getAccess: (id: number) =>
+    api.get<{ data: UserAccessOut }>(`/admin/users/${id}/access`).then(unwrapData<UserAccessOut>),
+  /**
+   * PATCH /admin/users/:id/access — set INHERIT or CUSTOM (with permissionKeys).
+   * An EMPTY permissionKeys array is a valid explicit "zero permissions" save.
+   */
+  updateAccess: (id: number, body: UpdateUserAccessInput) =>
+    api.patch<{ data: UserAccessOut }>(`/admin/users/${id}/access`, body).then(unwrapData<UserAccessOut>),
+  /** POST /admin/users/:id/super-admin — grant/revoke the protected super-admin flag (super-admin only). */
+  setSuperAdmin: (id: number, grant: boolean) =>
+    api.post<{ data: UserAccessOut }>(`/admin/users/${id}/super-admin`, { grant }).then(unwrapData<UserAccessOut>),
 };
 
 export interface RoleDiff { added: string[]; removed: string[]; }

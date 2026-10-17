@@ -26,6 +26,21 @@ interface User {
   accountStatus?: 'ACTIVE' | 'SUSPENDED' | 'GRADUATED' | 'WITHDRAWN';
   mustChangePassword?: boolean | null;
   lastLoginAt?: string | null;
+  /**
+   * PROTECTED SUPER ADMINISTRATOR flag (contract D1).
+   *
+   * Super Admin is a FLAG on `role === 'ADMIN'`, not a distinct Role. Only a
+   * session with `role === 'ADMIN' && isSuperAdmin === true` is unrestricted.
+   * A normal ADMIN (flag absent/false) is evaluated against its permissions
+   * array exactly like any other role.
+   */
+  isSuperAdmin?: boolean;
+  /**
+   * Individual access mode (contract D2). INHERIT (default) = the user holds
+   * the whole role baseline; CUSTOM = the user holds role-base ∩ selected keys.
+   * Purely informational on the client — the backend resolves the effective set.
+   */
+  accessMode?: 'INHERIT' | 'CUSTOM';
   permissions?: string[];
   createdAt?: string;
   updatedAt?: string;

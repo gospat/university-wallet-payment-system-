@@ -25,6 +25,7 @@ import {
   BarChart3,
 } from 'lucide-react';
 import { i18n } from '../i18n/en';
+import { useAuth } from '../context/AuthContext';
 import { searchAdmin, AdminSearchResponse, SearchStudentRow } from '../services/searchApi';
 import { REPORTS_VIEW_PERMISSION_PREFIX } from './PrivateRoute';
 
@@ -133,25 +134,27 @@ const isActive = (itemTo: string, activePath: string, exact?: boolean): boolean 
 const hasPermission = (
   requiresPermission: string | undefined,
   userPermissions?: string[],
-  role?: Role,
+  isSuperAdmin?: boolean,
 ): boolean => {
   if (!requiresPermission) return true;
 
-  // === DEFENSE-IN-DEPTH: ADMIN ROLE VISIBILITY = UNRESTRICTED =====================
-  // Admin is the super-user who assigns roles/permissions to everyone else.
-  // We must NEVER collapse the admin sidebar to only the 6 Administration nav items
-  // (Users/Roles/Permissions/Settings/PayConfig/AuditLogs) even if the JWT permissions
-  // claim is malformed, missing, or empty — that would lock Admin out of all
-  // operational pages (Dashboard, Students, Bills, Payments, Receipts, …), which is
-  // exactly the bug reported in the screenshot.
+  // === PROTECTED SUPER ADMINISTRATOR VISIBILITY ==================================
+  // Only a session with `role === 'ADMIN' && isSuperAdmin === true` is an
+  // unrestricted super administrator (contract D1). The flag is read from
+  // useAuth() inside PortalShell (`isSuperAdmin` parameter below).
   //
-  // Server-side Express requirePermission() middleware still enforces granular perms
-  // for the actual HTTP routes; this function ONLY controls frontend sidebar VISIBILITY.
-  // Admin sees all nav groups; backend still authorizes each request.
-  if (role === 'ADMIN') return true;
-  // ================================================================================
+  // A NORMAL ADMIN (flag absent/false) is evaluated against its permissions
+  // array exactly like BURSARY/STUDENT: it sees only the nav items its
+  // EFFECTIVE permissions grant. There is deliberately NO fallback/default
+  // permission list here — an empty array stays empty and hides the item.
+  //
+  // Server-side Express requirePermission() middleware still enforces granular
+  // perms for the actual HTTP routes; this function ONLY controls frontend
+  // sidebar VISIBILITY.
+  if (isSuperAdmin === true) return true;
+  // ===============================================================================
 
-  // Non-admin roles (BURSARY, STUDENT): strict array-based gate.
+  // Non-super-admin roles (ADMIN, BURSARY, STUDENT): strict array-based gate.
   // BURSARY_EXCLUDED keys (MANAGE_USERS, MANAGE_ROLES, PAYSTACK_CONFIG,
   // SYSTEM_SETTINGS, AUDIT_LOGS_VIEW_FULL, REPORTS_SCHEDULE) are never present in
   // the BURSARY rolePermissions seed table, so the array lookup will naturally
@@ -162,17 +165,17 @@ const hasPermission = (
 
 /**
  * Does the session own ANY permission with the given prefix?
- * ADMIN (super-administrator) always passes; an empty permission array never
- * does. Mirrors `hasPermission` above and is used only to decide sidebar
+ * A protected super administrator always passes; an empty permission array
+ * never does. Mirrors `hasPermission` above and is used only to decide sidebar
  * VISIBILITY for pages reachable through more than one capability.
  */
 const hasPermissionPrefix = (
   prefix: string | undefined,
   userPermissions?: string[],
-  role?: Role,
+  isSuperAdmin?: boolean,
 ): boolean => {
   if (!prefix) return true;
-  if (role === 'ADMIN') return true;
+  if (isSuperAdmin === true) return true;
   if (!userPermissions || userPermissions.length === 0) return false;
   return userPermissions.some((p) => p.startsWith(prefix));
 };
@@ -295,29 +298,30 @@ const buildAdminNav = (
     },
   ];
 
-  // BURSARY only: Reconciliation group is added last so it appears after
-  // the permission-selected items above. If admin grants VIEW_RECONCILIATION
-  // or REPORTS_*, these will appear. Otherwise hasPermission() hides them.
-  if (bursary) {
-    groups.push({
-      title: i18n.sidebar.groups.reconciliation,
-      headingIcon: Scale,
-      items: [
-        // Distinct reconciliation dashboard at /bursary/reconciliation — deliberately
-        // uses a different LABEL than the main operational "Dashboard" at
-        // /bursary/dashboard so the Bursary sidebar does NOT show two items both
-        // called "Dashboard". Two pages exist with different purposes (per App.tsx
-        // routes): general operational overview (Dashboard) vs reconciliation/settlement
-        // view (Reconciliation Overview).
-        { to: '/bursary/reconciliation', icon: Scale, label: 'Reconciliation Overview', sub: true, requiresPermission: 'VIEW_RECONCILIATION' },
-        { to: '/bursary/reports/centre', icon: BarChart3, label: 'Reports Centre', sub: true, anyPermissionPrefix: REPORTS_VIEW_PERMISSION_PREFIX },
-        { to: '/bursary/reports/exceptions', icon: Shield, label: 'Reconciliation Exceptions', sub: true, requiresPermission: 'REPORTS_VIEW_RECONCILIATION' },
-        { to: '/bursary/reports/student-statement', icon: Search, label: 'Student Statement', sub: true, requiresPermission: 'REPORTS_VIEW_STUDENT_STATEMENT' },
-        { to: '/bursary/reports/export-centre', icon: FileText, label: 'Export Centre', sub: true, requiresPermission: 'REPORTS_EXPORT_EXCEL' },
-        { to: '/bursary/reports/scheduled', icon: CreditCard, label: 'Scheduled Reports', sub: true, requiresPermission: 'REPORTS_SCHEDULE' },
-      ],
-    });
-  }
+  // Reconciliation group — added for BOTH ADMIN and BURSARY so the ADMIN portal
+  // exposes the SAME real reconciliation/reports surface as the BURSARY portal,
+  // pointing at the `/admin/...` prefix (contract §3 item 3). If a session holds
+  // VIEW_RECONCILIATION / REPORTS_* (or is a protected super administrator),
+  // these appear; otherwise hasPermission() hides them. An EMPTY permission array
+  // hides every item here.
+  groups.push({
+    title: i18n.sidebar.groups.reconciliation,
+    headingIcon: Scale,
+    items: [
+      // Distinct reconciliation dashboard at `${prefix}/reconciliation` — deliberately
+      // uses a different LABEL than the main operational "Dashboard" at
+      // `${prefix}/dashboard` so the sidebar does NOT show two items both
+      // called "Dashboard". Two pages exist with different purposes (per App.tsx
+      // routes): general operational overview (Dashboard) vs reconciliation/settlement
+      // view (Reconciliation Overview).
+      { to: `${prefix}/reconciliation`, icon: Scale, label: 'Reconciliation Overview', sub: true, requiresPermission: 'VIEW_RECONCILIATION' },
+      { to: `${prefix}/reports/centre`, icon: BarChart3, label: 'Reports Centre', sub: true, anyPermissionPrefix: REPORTS_VIEW_PERMISSION_PREFIX },
+      { to: `${prefix}/reports/exceptions`, icon: Shield, label: 'Reconciliation Exceptions', sub: true, requiresPermission: 'REPORTS_VIEW_RECONCILIATION' },
+      { to: `${prefix}/reports/student-statement`, icon: Search, label: 'Student Statement', sub: true, requiresPermission: 'REPORTS_VIEW_STUDENT_STATEMENT' },
+      { to: `${prefix}/reports/export-centre`, icon: FileText, label: 'Export Centre', sub: true, requiresPermission: 'REPORTS_EXPORT_EXCEL' },
+      { to: `${prefix}/reports/scheduled`, icon: CreditCard, label: 'Scheduled Reports', sub: true, requiresPermission: 'REPORTS_SCHEDULE' },
+    ],
+  });
 
   // ADMIN only: Administration group (sensitive user/role/config management).
   // BURSARY never has these perms (BURSARY_EXCLUDED set in permissionSeed.ts
@@ -461,6 +465,12 @@ const PortalShell: React.FC<PortalShellProps> = ({
   children,
 }) => {
   const navigate = useNavigate();
+  // Read the protected super-administrator flag from the session rather than
+  // requiring every caller page to pass a new prop (contract §3 item 3). The
+  // flag is ONLY meaningful for `role === 'ADMIN'`; a BURSARY/STUDENT user can
+  // never be a super admin.
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === 'ADMIN' && user?.isSuperAdmin === true;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -491,12 +501,12 @@ const PortalShell: React.FC<PortalShellProps> = ({
           ...g,
           visibleItems: g.items.filter(
             (item) =>
-              hasPermission(item.requiresPermission, userPermissions, role) &&
-              hasPermissionPrefix(item.anyPermissionPrefix, userPermissions, role),
+              hasPermission(item.requiresPermission, userPermissions, isSuperAdmin) &&
+              hasPermissionPrefix(item.anyPermissionPrefix, userPermissions, isSuperAdmin),
           ),
         }))
         .filter((g) => g.visibleItems.length > 0),
-    [navGroups, userPermissions, role],
+    [navGroups, userPermissions, isSuperAdmin],
   );
 
   const logoutItem: NavItem = {

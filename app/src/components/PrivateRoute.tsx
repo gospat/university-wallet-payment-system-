@@ -10,9 +10,10 @@ interface PrivateRouteProps {
    * Capability required to view the route (e.g. 'VIEW_STUDENTS').
    *
    * Role-only guards are not sufficient for the configurable BURSARY role, so a
-   * route may additionally require a permission. ADMIN is the protected
-   * super-administrator and always passes. The backend still enforces the same
-   * permission — this guard is UX, not security.
+   * route may additionally require a permission. A PROTECTED SUPER ADMINISTRATOR
+   * (`role === 'ADMIN' && isSuperAdmin === true`) always passes; a NORMAL ADMIN
+   * is evaluated against its permissions array like any other role. The backend
+   * still enforces the same permission — this guard is UX, not security.
    */
   permission?: string;
 }
@@ -117,20 +118,34 @@ const PrivateRoute: React.FC<PrivateRouteProps> = ({ roles, permission }) => {
 };
 
 /**
+ * Is this session the PROTECTED SUPER ADMINISTRATOR?
+ *
+ * Contract D1: Super Admin is a FLAG on `role === 'ADMIN'`, not a distinct Role.
+ * Only `role === 'ADMIN' && isSuperAdmin === true` is unrestricted. A NORMAL
+ * ADMIN (flag absent/false) holds only what its effective permissions grant.
+ * A BURSARY/STUDENT user can never be a super admin.
+ */
+export function hasSuperAdminAccess(user: SessionUser | null | undefined): boolean {
+  return !!user && user.role === 'ADMIN' && user.isSuperAdmin === true;
+}
+
+/**
  * Does the session hold `permission`?
- * ADMIN is the protected super-administrator and always passes.
- * An EMPTY permissions array means "zero permissions" — it never grants access.
+ * A PROTECTED SUPER ADMINISTRATOR always passes; every other session (including
+ * a normal ADMIN) is evaluated against its permissions array. An EMPTY
+ * permissions array means "zero permissions" — it never grants access.
  */
 export function hasPermission(user: SessionUser | null | undefined, permission: string): boolean {
   if (!user) return false;
-  if (user.role === 'ADMIN') return true;
+  if (hasSuperAdminAccess(user)) return true;
   return Array.isArray(user.permissions) && user.permissions.includes(permission);
 }
 
 /**
  * Permission-aware route/element guard for the configurable BURSARY role.
  * Renders `children` when the session holds `permission`, otherwise the same
- * "Access Denied" screen used by PrivateRoute. ADMIN always passes.
+ * "Access Denied" screen used by PrivateRoute. A protected super administrator
+ * always passes.
  */
 export const RequirePermission: React.FC<{ permission: string; children: React.ReactNode }> = ({
   permission,
@@ -157,8 +172,9 @@ export const REPORTS_VIEW_PERMISSION_PREFIX = 'REPORTS_VIEW_';
 
 /**
  * Does the session hold ANY of `permissions`, or any permission beginning with
- * `permissionPrefix`? ADMIN (the protected super-administrator) always passes;
- * an EMPTY permissions array means "zero permissions" and never grants access.
+ * `permissionPrefix`? A PROTECTED SUPER ADMINISTRATOR always passes; every other
+ * session (including a normal ADMIN) is evaluated against its permissions array.
+ * An EMPTY permissions array means "zero permissions" and never grants access.
  *
  * Used where a single page is legitimately reachable through more than one
  * capability (e.g. the Reports Centre and the Bills workspace) — the backend
@@ -170,7 +186,7 @@ export function hasAnyPermission(
   permissionPrefix?: string,
 ): boolean {
   if (!user) return false;
-  if (user.role === 'ADMIN') return true;
+  if (hasSuperAdminAccess(user)) return true;
   const owned = user.permissions;
   if (!Array.isArray(owned) || owned.length === 0) return false;
   if (permissions && permissions.some((p) => owned.includes(p))) return true;
@@ -180,7 +196,8 @@ export function hasAnyPermission(
 
 /**
  * Permission-aware route/element guard that renders `children` when the session
- * holds AT LEAST ONE of the supplied capabilities. ADMIN always passes.
+ * holds AT LEAST ONE of the supplied capabilities. A protected super
+ * administrator always passes.
  * Renders the same "Access Denied" screen as PrivateRoute otherwise.
  */
 export const RequireAnyPermission: React.FC<{

@@ -19,11 +19,11 @@ import { Role, AccountStatus } from '@prisma/client';
 // (live permission resolution) are used by the middlewares under test.
 // ---------------------------------------------------------------------------
 const mockState: {
-  users: Record<number, { id: number; role: Role; accountStatus: AccountStatus }>;
+  users: Record<number, { id: number; role: Role; accountStatus: AccountStatus; isSuperAdmin?: boolean }>;
   rolePerms: Record<string, string[]>;
 } = {
   users: {
-    9001: { id: 9001, role: Role.ADMIN, accountStatus: AccountStatus.ACTIVE },
+    9001: { id: 9001, role: Role.ADMIN, accountStatus: AccountStatus.ACTIVE, isSuperAdmin: true },
     9002: { id: 9002, role: Role.BURSARY, accountStatus: AccountStatus.ACTIVE },
     9003: { id: 9003, role: Role.STUDENT, accountStatus: AccountStatus.ACTIVE },
   },

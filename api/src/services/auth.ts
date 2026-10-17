@@ -4,7 +4,7 @@ import { Role, AccountStatus } from '@prisma/client';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { randomHex } from '../utils/security';
-import { PERMISSION_DEFS } from './permissionSeed';
+import { resolveEffectivePermissionsForUser } from './permissionResolver';
 import { i18n } from '../i18n/en';
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
@@ -46,25 +46,6 @@ const signRefreshToken = (userId: number, jti: string) => {
   );
 };
 
-/**
- * Canonical permission resolution for a role (login / refresh / me).
- *
- * ADMIN is the protected super-administrator and ALWAYS receives the full
- * canonical registry — never a possibly-incomplete RolePermission snapshot.
- * BURSARY (and any future configurable role) resolves LIVE from the
- * authoritative RolePermission table, so an intentional zero-permission role
- * yields `[]`. STUDENT is enforced by role boundary, not by permission keys.
- */
-async function resolvePermissionsForRole(role: Role | null | undefined): Promise<string[]> {
-  if (!role) return [];
-  if (role === Role.ADMIN) return PERMISSION_DEFS.map((p) => p.key);
-  const rows = await prisma.rolePermission.findMany({
-    where: { role },
-    select: { permission: { select: { key: true } } },
-  });
-  return rows.map((r) => r.permission.key);
-}
-
 const safeUserSelect = {
   id: true,
   email: true,
@@ -72,6 +53,7 @@ const safeUserSelect = {
   middleName: true,
   lastName: true,
   role: true,
+  isSuperAdmin: true,
   matricNumber: true,
   college: true,
   department: true,
@@ -169,7 +151,11 @@ export class AuthService {
       throw new AppError('This account is no longer active.', 403);
     }
 
-    const permissions: string[] = await resolvePermissionsForRole(user.role);
+    const permissions: string[] = await resolveEffectivePermissionsForUser({
+      id: user.id,
+      role: user.role,
+      isSuperAdmin: (user as any).isSuperAdmin === true,
+    });
 
     const result = await prisma.$transaction(async (tx) => {
       await tx.refreshToken.update({
@@ -495,7 +481,11 @@ export class AuthService {
     });
     if (!user) throw new AppError(i18n.errors.auth.userNotFound, 404);
 
-    const permissions: string[] = await resolvePermissionsForRole(user.role);
+    const permissions: string[] = await resolveEffectivePermissionsForUser({
+      id: user.id,
+      role: user.role,
+      isSuperAdmin: (user as any).isSuperAdmin === true,
+    });
 
     await prisma.auditLog
       .create({
@@ -533,7 +523,11 @@ export class AuthService {
     if (user.accountStatus !== AccountStatus.ACTIVE) {
       throw new AppError('This account is no longer active.', 403);
     }
-    const permissions: string[] = await resolvePermissionsForRole(user.role);
+    const permissions: string[] = await resolveEffectivePermissionsForUser({
+      id: user.id,
+      role: user.role,
+      isSuperAdmin: (user as any).isSuperAdmin === true,
+    });
     return { ...user, permissions };
   }
 
