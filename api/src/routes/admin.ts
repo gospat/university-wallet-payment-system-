@@ -944,11 +944,7 @@ router.post(
  * subsequent count then observes the latest committed state, so the count and
  * the mutating write can never interleave down to zero.
  */
-async function assertSuperAdminInvariant(
-  tx: any,
-  targetId: number,
-): Promise<'ok' | 'finalSuperAdmin'> {
-  // 1. Serialise on the ACTIVE Super Administrator set.
+async function lockActiveSuperAdminSet(tx: any): Promise<void> {
   await tx.$queryRaw`
     SELECT id FROM users
     WHERE role = ${Role.ADMIN}
@@ -956,6 +952,14 @@ async function assertSuperAdminInvariant(
       AND accountStatus = ${AccountStatus.ACTIVE}
     FOR UPDATE
   `;
+}
+
+async function assertSuperAdminInvariant(
+  tx: any,
+  targetId: number,
+): Promise<'ok' | 'finalSuperAdmin'> {
+  // 1. Serialise on the ACTIVE Super Administrator set.
+  await lockActiveSuperAdminSet(tx);
   // 2. Count the ACTIVE Super Admins that would REMAIN after the mutation.
   const remaining = await tx.user.count({
     where: {
@@ -1015,7 +1019,10 @@ function buildUserAccessOut(
   };
 }
 
-async function hasFinancialRecordsForStudent(userId: number): Promise<{
+async function hasFinancialRecordsForStudent(
+  userId: number,
+  client: any = prisma,
+): Promise<{
   any: boolean;
   invoices: number;
   receipts: number;
@@ -1034,15 +1041,15 @@ async function hasFinancialRecordsForStudent(userId: number): Promise<{
     feeAssignments,
     ledgerEntries,
   ] = await Promise.all([
-    prisma.invoice.count({ where: { studentId: userId } }),
-    prisma.receipt.count({ where: { studentId: userId } }),
-    prisma.transaction.count({ where: { userId } }),
-    prisma.refund.count({ where: { requestedById: userId } }),
-    prisma.refund.count({
+    client.invoice.count({ where: { studentId: userId } }),
+    client.receipt.count({ where: { studentId: userId } }),
+    client.transaction.count({ where: { userId } }),
+    client.refund.count({ where: { requestedById: userId } }),
+    client.refund.count({
       where: { originalTransaction: { userId } },
     }),
-    prisma.feeAssignment.count({ where: { targetStudentId: userId } }),
-    prisma.generalLedger.count({ where: { userId } }),
+    client.feeAssignment.count({ where: { targetStudentId: userId } }),
+    client.generalLedger.count({ where: { userId } }),
   ] as const);
   return {
     any:
@@ -1056,6 +1063,46 @@ async function hasFinancialRecordsForStudent(userId: number): Promise<{
     feeAssignments,
     ledgerEntries,
   };
+}
+
+/** Human-readable breakdown of the financial records blocking a student delete. */
+function buildFinancialBreakdown(fin: {
+  invoices: number;
+  receipts: number;
+  transactions: number;
+  refundsAsRequester: number;
+  refundsViaTransactions: number;
+  feeAssignments: number;
+  ledgerEntries: number;
+}): string[] {
+  const counts: string[] = [];
+  if (fin.invoices > 0) counts.push(`${fin.invoices} invoice(s)`);
+  if (fin.receipts > 0) counts.push(`${fin.receipts} receipt(s)`);
+  if (fin.transactions > 0) counts.push(`${fin.transactions} transaction(s)`);
+  if (fin.refundsAsRequester > 0 || fin.refundsViaTransactions > 0) {
+    counts.push(`${fin.refundsAsRequester + fin.refundsViaTransactions} refund record(s)`);
+  }
+  if (fin.feeAssignments > 0) counts.push(`${fin.feeAssignments} direct-bill assignment(s)`);
+  if (fin.ledgerEntries > 0) counts.push(`${fin.ledgerEntries} ledger entry/entries`);
+  return counts;
+}
+
+/**
+ * The single 409 response for the student financial-record deletion gate,
+ * shared by the early (pre-transaction) check and the authoritative
+ * (locked, in-transaction) gate so the two can never drift.
+ */
+function respondStudentHasFinancialRecords(
+  res: any,
+  fin: Awaited<ReturnType<typeof hasFinancialRecordsForStudent>>,
+) {
+  return res.status(409).json({
+    status: 'fail',
+    error:
+      'Cannot delete student with existing financial records. Use accountStatus=SUSPENDED/GRADUATED instead.',
+    code: 'STUDENT_HAS_FINANCIAL_RECORDS',
+    breakdown: buildFinancialBreakdown(fin),
+  });
 }
 
 router.delete(
@@ -1081,37 +1128,38 @@ router.delete(
       return res.status(404).json({ status: 'fail', error: 'User not found' });
     }
 
-    // Gate 2 — student financial integrity (read-only business gate)
+    // Gate 2 (EARLY OPTIMISATION) — student financial integrity. This read is
+    // OUTSIDE the transaction and therefore NON-AUTHORITATIVE: it exists only to
+    // fail fast for the common case. The authoritative gate is re-evaluated
+    // INSIDE the transaction from the LOCKED target state (Gate B below), so a
+    // concurrent role change can never bypass it.
     if (existing.role === Role.STUDENT) {
       const fin = await hasFinancialRecordsForStudent(id);
-      if (fin.any) {
-        const counts: string[] = [];
-        if (fin.invoices > 0) counts.push(`${fin.invoices} invoice(s)`);
-        if (fin.receipts > 0) counts.push(`${fin.receipts} receipt(s)`);
-        if (fin.transactions > 0) counts.push(`${fin.transactions} transaction(s)`);
-        if (fin.refundsAsRequester > 0 || fin.refundsViaTransactions > 0) {
-          counts.push(`${fin.refundsAsRequester + fin.refundsViaTransactions} refund record(s)`);
-        }
-        if (fin.feeAssignments > 0) counts.push(`${fin.feeAssignments} direct-bill assignment(s)`);
-        if (fin.ledgerEntries > 0) counts.push(`${fin.ledgerEntries} ledger entry/entries`);
-        return res.status(409).json({
-          status: 'fail',
-          error: 'Cannot delete student with existing financial records. Use accountStatus=SUSPENDED/GRADUATED instead.',
-          code: 'STUDENT_HAS_FINANCIAL_RECORDS',
-          breakdown: counts,
-        });
-      }
+      if (fin.any) return respondStudentHasFinancialRecords(res, fin);
     }
 
-    // Gate 3 — the final-active-super-admin invariant + session/audit cleanup +
-    // the user deletion all run in ONE transaction, and the target is RE-READ
-    // INSIDE it. The invariant decision is therefore derived from the CURRENT
-    // committed state — never from the pre-transaction read above, which can be
-    // stale (TOCTOU: the target's role / flag / status may change between the
-    // outer read and the delete, e.g. a non-super-admin promoted to an ACTIVE
-    // Super Administrator in that window must NOT slip past the invariant).
+    // Gate 3 — the final-active-super-admin invariant, the authoritative student
+    // financial gate, session/audit cleanup and the deletion all run in ONE
+    // transaction while the target row is held under a pessimistic MySQL/InnoDB
+    // row lock (SELECT … FOR UPDATE).
+    //
+    // LOCK ORDERING (single consistent order across ALL invariant-affecting
+    // mutations): the ACTIVE Super Administrator SET is locked FIRST, then the
+    // TARGET row. Every other path (role change, deactivate, super-admin grant or
+    // revocation) likewise takes the set lock — via assertSuperAdminInvariant —
+    // BEFORE it takes the target row's write lock, so a delete can never form the
+    // row→set / set→row cycle that would deadlock InnoDB.
     const outcome = await prisma.$transaction(async (tx) => {
-      // Authoritative read — the ONLY source for the invariant decision below.
+      // 1. Lock the ACTIVE super-admin SET (consistent ordering, see above).
+      await lockActiveSuperAdminSet(tx);
+
+      // 2. Lock the TARGET row (SELECT … FOR UPDATE) and read its AUTHORITATIVE
+      //    state while that lock is held. A concurrent transaction that tries to
+      //    change this row's role / flag / status blocks here until we commit, so
+      //    the gates below and the delete act on state that cannot change under us.
+      await tx.$queryRaw`
+        SELECT id FROM users WHERE id = ${id} FOR UPDATE
+      `;
       const target = await tx.user.findUnique({
         where: { id },
         select: {
@@ -1126,14 +1174,26 @@ router.delete(
       });
       if (!target) return { kind: 'notFound' as const };
 
+      // Gate A — from the LOCKED state: an ACTIVE Super Administrator must never
+      // be the last one deleted.
       const isActiveSuperAdmin =
         target.role === Role.ADMIN &&
         target.isSuperAdmin === true &&
         target.accountStatus === AccountStatus.ACTIVE;
-
       if (isActiveSuperAdmin) {
         const invariant = await assertSuperAdminInvariant(tx, id);
         if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
+      }
+
+      // Gate B — the AUTHORITATIVE student financial gate, derived from the
+      // LOCKED role. A target that IS (or has just BECOME) a STUDENT under the
+      // lock can never be deleted while read-only financial records reference it.
+      // The pre-transaction check above is only an optimisation and cannot be the
+      // final word. All queries are READ-ONLY — no payment / receipt /
+      // transaction / refund / ledger record is ever modified.
+      if (target.role === Role.STUDENT) {
+        const fin = await hasFinancialRecordsForStudent(id, tx);
+        if (fin.any) return { kind: 'studentHasFinancialRecords' as const, fin };
       }
 
       // Preserve audit history (don't DELETE audit rows) — just detach userId
@@ -1154,6 +1214,9 @@ router.delete(
 
     if (outcome.kind === 'notFound') {
       return res.status(404).json({ status: 'fail', error: 'User not found' });
+    }
+    if (outcome.kind === 'studentHasFinancialRecords') {
+      return respondStudentHasFinancialRecords(res, outcome.fin);
     }
     if (outcome.kind === 'finalSuperAdmin') {
       return res.status(409).json({

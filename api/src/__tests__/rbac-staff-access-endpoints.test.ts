@@ -47,6 +47,14 @@ const state: {
   profiles: Record<number, Profile>;
   revoked: Array<Record<string, any>>;
   nextProfileId: number;
+  financial: {
+    invoices: number;
+    receipts: number;
+    transactions: number;
+    refunds: number;
+    feeAssignments: number;
+    ledgerEntries: number;
+  };
 } = {
   users: {},
   rolePerms: {},
@@ -54,6 +62,7 @@ const state: {
   profiles: {},
   revoked: [],
   nextProfileId: 5000,
+  financial: { invoices: 0, receipts: 0, transactions: 0, refunds: 0, feeAssignments: 0, ledgerEntries: 0 },
 };
 
 const db: any = {
@@ -167,11 +176,20 @@ const db: any = {
     }),
     updateMany: jest.fn(() => Promise.resolve({ count: 0 })),
   },
-  // `assertSuperAdminInvariant` acquires a pessimistic range lock with
-  // `SELECT … FOR UPDATE` inside the transaction. A mocked Prisma cannot express
-  // an InnoDB row lock, so the `$transaction` wrapper below SERIALISES
-  // transactions — the observable guarantee the lock provides (see the harness
-  // comment). The query itself resolves as a no-op.
+  // READ-ONLY financial-record counts consulted by the (authoritative) student
+  // financial-record deletion gate. Never mutated by the endpoint.
+  invoice: { count: jest.fn(() => Promise.resolve(state.financial.invoices)) },
+  receipt: { count: jest.fn(() => Promise.resolve(state.financial.receipts)) },
+  transaction: { count: jest.fn(() => Promise.resolve(state.financial.transactions)) },
+  refund: { count: jest.fn(() => Promise.resolve(state.financial.refunds)) },
+  feeAssignment: { count: jest.fn(() => Promise.resolve(state.financial.feeAssignments)) },
+  generalLedger: { count: jest.fn(() => Promise.resolve(state.financial.ledgerEntries)) },
+  // The DELETE path acquires TWO pessimistic locks inside its transaction — the
+  // ACTIVE super-admin SET range lock and the TARGET-row `SELECT … FOR UPDATE`.
+  // A mocked Prisma cannot express an InnoDB row lock, so the `$transaction`
+  // wrapper below SERIALISES transactions — the observable guarantee those locks
+  // provide (see the harness comment). Each query resolves as a no-op, but the
+  // calls are recorded so a test can assert LOCK ORDERING (set before row).
   $queryRaw: jest.fn(() => Promise.resolve([])),
 };
 
@@ -301,6 +319,7 @@ beforeEach(() => {
   state.profiles = {};
   state.revoked = [];
   state.nextProfileId = 5000;
+  state.financial = { invoices: 0, receipts: 0, transactions: 0, refunds: 0, feeAssignments: 0, ledgerEntries: 0 };
   txTail = Promise.resolve();
   jest.clearAllMocks();
   bumpRolePermsVersion();
@@ -750,6 +769,89 @@ describe('DELETE /admin/users/:id — invariant from the TRANSACTIONAL target re
     let reads = 0;
     try {
       const count = withTargetStates([
+        { role: Role.BURSARY, isSuperAdmin: false },
+        { role: Role.ADMIN, isSuperAdmin: true, accountStatus: AccountStatus.ACTIVE },
+      ]);
+      const res = await request(app).delete(`${API}/admin/users/9005`).set(actor);
+      reads = count();
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('FINAL_SUPER_ADMIN');
+      expect(state.users[9005]).toBeDefined(); // NOT deleted
+    } finally {
+      db.user.findUnique.mockImplementation(defaultUserFindUnique);
+    }
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ===========================================================================
+// FINAL DELETE CONCURRENCY HARDENING — the target row is locked
+// (SELECT … FOR UPDATE) BEFORE the authoritative gates are evaluated, so a
+// state change racing the delete is observed under the lock. Proves the
+// final-active-super-admin invariant and the student financial gate cannot be
+// bypassed, and that locks are taken in ONE consistent order (SET → ROW).
+// ===========================================================================
+describe('DELETE /admin/users/:id — LOCKED target state cannot be bypassed', () => {
+  const actor = NORMAL_ADMIN;
+
+  /** Per-call overrides for the 9005 target read (outer read, then locked read). */
+  const withStates = (states: Array<Record<string, any>>) => {
+    let reads = 0;
+    db.user.findUnique.mockImplementation((args: any) => {
+      const id = args?.where?.id;
+      if (id === 9005) {
+        const s = states[Math.min(reads, states.length - 1)];
+        reads += 1;
+        return Promise.resolve({ ...state.users[9005], ...s });
+      }
+      return Promise.resolve(state.users[id] ? { ...state.users[id] } : null);
+    });
+    return () => reads;
+  };
+
+  it('acquires the SET lock BEFORE the TARGET-row lock (one consistent lock order)', async () => {
+    setUser(9005, Role.BURSARY);
+    const res = await request(app).delete(`${API}/admin/users/9005`).set(actor);
+    expect(res.status).toBe(200);
+
+    const sql = (db.$queryRaw as jest.Mock).mock.calls.map((c: any[]) => String(c[0]));
+    const setLock = sql.findIndex((s) => s.includes('role ='));
+    const rowLock = sql.findIndex((s) => s.includes('WHERE id ='));
+    expect(setLock).toBeGreaterThanOrEqual(0);
+    expect(rowLock).toBeGreaterThanOrEqual(0);
+    // SET first, ROW second — the single order shared by every other
+    // invariant-affecting mutation, so no row→set / set→row deadlock cycle.
+    expect(setLock).toBeLessThan(rowLock);
+  });
+
+  it('a target that becomes a STUDENT with financial records under the lock cannot be deleted → 409', async () => {
+    // Outer read: a plain BURSARY ⇒ the early (non-authoritative) gate is skipped.
+    setUser(9005, Role.BURSARY);
+    // Locked read: STUDENT WITH financial records ⇒ the authoritative gate must stop it.
+    state.financial = { invoices: 2, receipts: 1, transactions: 0, refunds: 0, feeAssignments: 0, ledgerEntries: 0 };
+
+    let reads = 0;
+    try {
+      const count = withStates([{ role: Role.BURSARY }, { role: Role.STUDENT }]);
+      const res = await request(app).delete(`${API}/admin/users/9005`).set(actor);
+      reads = count();
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('STUDENT_HAS_FINANCIAL_RECORDS');
+      expect(res.body.breakdown.join(' ')).toMatch(/2 invoice/);
+      expect(state.users[9005]).toBeDefined(); // NOT deleted — the gate held
+    } finally {
+      db.user.findUnique.mockImplementation(defaultUserFindUnique);
+    }
+    expect(reads).toBeGreaterThanOrEqual(2); // re-read under the lock inside the tx
+  });
+
+  it('a target that becomes the SOLE ACTIVE super admin under the lock cannot be deleted → 409', async () => {
+    setUser(9001, Role.ADMIN, { isSuperAdmin: false }); // no other protected admin
+    setUser(9005, Role.BURSARY); // outer read: plain BURSARY ⇒ invariant apparently N/A
+
+    let reads = 0;
+    try {
+      const count = withStates([
         { role: Role.BURSARY, isSuperAdmin: false },
         { role: Role.ADMIN, isSuperAdmin: true, accountStatus: AccountStatus.ACTIVE },
       ]);
