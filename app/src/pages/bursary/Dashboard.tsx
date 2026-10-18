@@ -27,6 +27,7 @@ import Modal from '../../components/Modal';
 import PortalShell from '../../components/PortalShell';
 import { i18n } from '../../i18n/en';
 import { useLocation } from 'react-router-dom';
+import { lagosDateOnly, shiftDateOnly } from '../../utils/lagosDate';
 
 const naira = (v: string | number) => {
   const n = Number(v);
@@ -201,12 +202,13 @@ const BursaryDashboard: React.FC = () => {
     navCounters().then(setNavCounts);
   }, []);
 
-  const defaultFrom = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 29);
-    return d.toISOString().slice(0, 10);
-  }, []);
-  const defaultTo = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  // Default window = the last 30 days by the Africa/Lagos calendar. Deriving
+  // these from the UTC calendar (toISOString) can be one day behind Lagos
+  // between 00:00 and 00:59 WAT, so the dates are computed explicitly in the
+  // Lagos zone. They remain date-only `YYYY-MM-DD` values — the API owns the
+  // business-day window.
+  const defaultTo = useMemo(() => lagosDateOnly(), []);
+  const defaultFrom = useMemo(() => shiftDateOnly(lagosDateOnly(), -29), []);
 
   const [filters, setFilters] = useState<Filters>({ dateFrom: defaultFrom, dateTo: defaultTo, groupBy: 'day' });
 

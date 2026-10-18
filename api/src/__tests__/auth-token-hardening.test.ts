@@ -13,11 +13,19 @@ jest.mock('../config/database', () => {
   const bcryptMock: any = jest.requireActual('bcrypt');
   const users: Record<number, any> = {};
   const perms: Record<string, string[]> = {};
-  const addUser = (id: number, role: any, email: string, password: string, accountStatus: any = 'ACTIVE') => {
+  const addUser = (
+    id: number,
+    role: any,
+    email: string,
+    password: string,
+    accountStatus: any = 'ACTIVE',
+    isSuperAdmin = false,
+  ) => {
     users[id] = {
       id,
       email,
       role,
+      isSuperAdmin,
       password: bcryptMock.hashSync(password, 4),
       firstName: `${role}_first`,
       lastName: `${role}_last`,
@@ -41,7 +49,10 @@ jest.mock('../config/database', () => {
   };
   const Role = { ADMIN: 'ADMIN', BURSARY: 'BURSARY', STUDENT: 'STUDENT' } as const;
   const AccountStatus = { ACTIVE: 'ACTIVE', SUSPENDED: 'SUSPENDED', WITHDRAWN: 'WITHDRAWN', GRADUATED: 'GRADUATED' } as const;
-  addUser(2001, Role.ADMIN, 'admin@university.edu.ng', 'admin123');
+  // User 2001 is a FLAG-AWARE Super Administrator (role=ADMIN + isSuperAdmin=true):
+  // the canonical full-access principal that intentionally bypasses per-permission
+  // checks. A bare role=ADMIN would NOT be a super admin under the current model.
+  addUser(2001, Role.ADMIN, 'admin@university.edu.ng', 'admin123', 'ACTIVE', true);
   addUser(2002, Role.BURSARY, 'finance@university.edu.ng', 'bursary123');
   addUser(2003, Role.STUDENT, 'student1@university.edu.ng', 'student123');
   perms.BURSARY = ['VIEW_PAYMENTS', 'VIEW_STUDENTS', 'GENERATE_RECEIPT'];
@@ -83,6 +94,16 @@ jest.mock('../config/database', () => {
       },
       auditLog: {
         create: jest.fn(() => Promise.resolve({ id: 1 })),
+      },
+      // RBAC baseline sentinel: PRESENT ⇒ marker 'initialized' ⇒ a stored zero-row
+      // ADMIN role baseline is honoured literally (no full-registry escalation).
+      counter: {
+        findUnique: jest.fn(() => Promise.resolve({ id: 1 })),
+      },
+      // Individual access profile: genuine null ⇒ 'absent' ⇒ INHERIT the role
+      // baseline (never the fail-closed 'error' branch).
+      userPermissionProfile: {
+        findUnique: jest.fn(() => Promise.resolve(null)),
       },
       $transaction: jest.fn((fn: any) =>
         Promise.resolve(

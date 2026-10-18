@@ -285,3 +285,26 @@ describe('Bursary dashboard — one consistent window for summary / trend / cate
     expect(t).toContain('PAY-END-OF-DAY');
   });
 });
+
+describe('Bursary dashboard — default window follows the Africa/Lagos calendar', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('defaults To/From to the Lagos day, not the lagging UTC day, just after Lagos midnight', async () => {
+    // 23:30 UTC on 2026-10-14 == 00:30 WAT on 2026-10-15. The UTC default would
+    // pick 2026-10-14 and be a day behind.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-14T23:30:00Z'));
+
+    render();
+    await flush();
+
+    const url = apiGetMock.mock.calls
+      .map((c) => String(c[0]))
+      .find((u) => u.startsWith('/bursary/dashboard/summary'))!;
+    expect(url).toContain('dateTo=2026-10-15');
+    expect(url).toContain('dateFrom=2026-09-16');
+    expect(url).not.toContain('dateTo=2026-10-14');
+  });
+});

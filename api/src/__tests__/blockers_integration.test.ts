@@ -33,11 +33,12 @@ jest.mock('../config/database', () => {
   const bcryptMock: any = jest.requireActual('bcrypt');
   const users: Record<number, any> = {};
   const perms: Record<string, string[]> = {};
-  const addUser = (id: number, role: any, email: string, password: string) => {
+  const addUser = (id: number, role: any, email: string, password: string, isSuperAdmin = false) => {
     users[id] = {
       id,
       email,
       role,
+      isSuperAdmin,
       password: bcryptMock.hashSync(password, 4),
       firstName: `${role}_first`,
       lastName: `${role}_last`,
@@ -54,7 +55,10 @@ jest.mock('../config/database', () => {
     };
   };
   const RoleEnum = { ADMIN: 'ADMIN', BURSARY: 'BURSARY', STUDENT: 'STUDENT' } as const;
-  addUser(2001, RoleEnum.ADMIN, 'admin+blocker@x.test', 'x');
+  // User 2001 is a FLAG-AWARE Super Administrator (role=ADMIN + isSuperAdmin=true):
+  // the canonical full-access principal that intentionally bypasses per-permission
+  // checks. A bare role=ADMIN would NOT be a super admin under the current model.
+  addUser(2001, RoleEnum.ADMIN, 'admin+blocker@x.test', 'x', true);
   addUser(2002, RoleEnum.BURSARY, 'bursary+blocker@x.test', 'x');
   addUser(2003, RoleEnum.STUDENT, 'student+blocker@x.test', 'x');
   perms.BURSARY = ['VIEW_PAYMENTS', 'VOID_INVOICES', 'VOID_TRANSACTIONS'];
@@ -354,6 +358,16 @@ jest.mock('../config/database', () => {
           audits.push(row);
           return Promise.resolve(row);
         }),
+      },
+      // RBAC baseline sentinel: PRESENT ⇒ marker 'initialized' ⇒ a stored zero-row
+      // ADMIN role baseline is honoured literally (no full-registry escalation).
+      counter: {
+        findUnique: jest.fn(() => Promise.resolve({ id: 1 })),
+      },
+      // Individual access profile: genuine null ⇒ 'absent' ⇒ INHERIT the role
+      // baseline (never the fail-closed 'error' branch).
+      userPermissionProfile: {
+        findUnique: jest.fn(() => Promise.resolve(null)),
       },
       // Expose test helpers to seed state via __testAPI
       $transaction: jest.fn(async (fn: any) => {
