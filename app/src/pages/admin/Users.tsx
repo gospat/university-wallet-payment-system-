@@ -221,7 +221,10 @@ const ManageAccessModal: React.FC<{
         setCatalogue(perms);
         setMode(acc.accessMode);
         setOrigMode(acc.accessMode);
-        const s = new Set(acc.selectedPermissions ?? []);
+        // Restrict-only: an existing CUSTOM selection is only ever shown/kept
+        // when it is WITHIN the target's current role maximum (rolePermissions).
+        const roleKeys = new Set(acc.rolePermissions ?? []);
+        const s = new Set((acc.selectedPermissions ?? []).filter((k) => roleKeys.has(k)));
         setSelected(s);
         setOrigSelected(new Set(s));
       })
@@ -241,13 +244,16 @@ const ManageAccessModal: React.FC<{
 
   const isProtected = !!access?.isProtected || !!target?.isSuperAdmin;
 
-  // ONLY the target role's available permissions (contract §3 item 6).
-  //  • BURSARY target → assignable (non-ADMIN-only) catalogue entries;
-  //  • ADMIN target   → the full catalogue (ADMIN role maximum = whole registry).
+  // The target's ROLE MAXIMUM is the AUTHORITATIVE allow-list for Custom Access
+  // (contract §3 item 6; restrict-only). GET /admin/users/:id/access returns the
+  // live `rolePermissions` baseline; the global catalogue only supplies display
+  // metadata (name/category). Availability is NEVER derived from `adminOnly`,
+  // `assignable`, or the catalogue alone — so a BURSARY target exposes exactly
+  // its role baseline, and a normal ADMIN exactly ITS configured maximum.
   const availablePermissions = useMemo(() => {
     if (!access) return [] as PermissionOut[];
-    if (access.user.role === 'ADMIN') return catalogue;
-    return catalogue.filter((p) => p.assignable !== false && p.adminOnly !== true);
+    const allowed = new Set(access.rolePermissions ?? []);
+    return catalogue.filter((p) => allowed.has(p.key));
   }, [catalogue, access]);
 
   const categories = useMemo(() => buildCategoryList(availablePermissions), [availablePermissions]);

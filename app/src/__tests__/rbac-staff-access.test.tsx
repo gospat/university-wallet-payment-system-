@@ -391,3 +391,198 @@ describe('Manage Access modal (contract §3 item 6)', () => {
     expect(save.disabled).toBe(true);
   });
 });
+
+// ===========================================================================
+// ROLE-MAXIMUM FILTER — regression suite (restrict-only Custom Access).
+// A defect made the picker derive the available set from the GLOBAL catalogue
+// (assignable !== false && adminOnly !== true), so a BURSARY target with a role
+// maximum of 39 displayed "Permissions (0/64)". The ROLE MAXIMUM (the live
+// `rolePermissions` returned by GET /admin/users/:id/access) is the ONLY
+// allow-list; the catalogue supplies display metadata only.
+// ===========================================================================
+describe('Custom Access is bounded by the target ROLE MAXIMUM (restrict-only)', () => {
+  const mkPerm = (n: number, adminOnly: boolean) => {
+    const key = `P${String(n).padStart(3, '0')}`;
+    return {
+      key,
+      name: key,
+      category: n % 2 === 0 ? 'Dashboard' : 'Students',
+      description: null,
+      adminOnly,
+      assignable: !adminOnly,
+      roles_assigned: [] as string[],
+    };
+  };
+  // 64-permission canonical catalogue (P051..P064 are ADMIN-only, i.e. not
+  // assignable to a configurable role).
+  const CATALOGUE = Array.from({ length: 64 }, (_, i) => mkPerm(i + 1, i + 1 > 50));
+  const BURSARY_MAX = CATALOGUE.slice(0, 39).map((p) => p.key); // 39
+  const ADMIN_MAX = CATALOGUE.slice(0, 50).map((p) => p.key); // 50 — NOT the whole catalogue
+  // Keys inside the catalogue but OUTSIDE the respective role maximum.
+  const OUT_OF_BURSARY = ['P040', 'P050', 'P064'];
+  const OUT_OF_ADMIN = ['P051', 'P060', 'P064'];
+
+  const ROW = (
+    id: number,
+    firstName: string,
+    lastName: string,
+    email: string,
+    role: 'ADMIN' | 'BURSARY',
+    isSuperAdmin: boolean,
+    roleMax: number,
+  ) => ({
+    id,
+    firstName,
+    lastName,
+    email,
+    role,
+    accountStatus: 'ACTIVE',
+    isSuperAdmin,
+    accessMode: 'INHERIT',
+    rolePermissionCount: roleMax,
+    effectivePermissionCount: roleMax,
+  });
+
+  const accessOut = (
+    id: number,
+    firstName: string,
+    lastName: string,
+    email: string,
+    role: 'ADMIN' | 'BURSARY',
+    isSuperAdmin: boolean,
+    rolePermissions: string[],
+  ) => ({
+    user: { id, email, firstName, lastName, role, accountStatus: 'ACTIVE', isSuperAdmin },
+    accessMode: 'INHERIT',
+    rolePermissions,
+    rolePermissionCount: rolePermissions.length,
+    selectedPermissions: [],
+    effectivePermissions: rolePermissions,
+    effectivePermissionCount: rolePermissions.length,
+    isProtected: isSuperAdmin,
+  });
+
+  // Mutable so test 6 can shrink the role maximum between modal opens.
+  let bursaryRoleMax: string[];
+
+  beforeEach(() => {
+    currentUser = { id: 99, role: 'ADMIN', isSuperAdmin: true, permissions: [] };
+    bursaryRoleMax = [...BURSARY_MAX];
+    const rows = [
+      ROW(10, 'Burs', 'Max', 'burs-max@u.ng', 'BURSARY', false, 39),
+      ROW(11, 'Admin', 'Max', 'admin-max@u.ng', 'ADMIN', false, 50),
+      ROW(12, 'Super', 'Max', 'super-max@u.ng', 'ADMIN', true, 50),
+    ];
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/admin/users') {
+        return Promise.resolve({ data: { data: { items: rows, total: rows.length, page: 1, pageSize: 25, pageCount: 1 } } });
+      }
+      if (url === '/admin/permissions') return Promise.resolve({ data: { data: { items: CATALOGUE } } });
+      if (url === '/admin/users/10/access') {
+        return Promise.resolve({ data: { data: accessOut(10, 'Burs', 'Max', 'burs-max@u.ng', 'BURSARY', false, bursaryRoleMax) } });
+      }
+      if (url === '/admin/users/11/access') {
+        return Promise.resolve({ data: { data: accessOut(11, 'Admin', 'Max', 'admin-max@u.ng', 'ADMIN', false, ADMIN_MAX) } });
+      }
+      if (url === '/admin/users/12/access') {
+        return Promise.resolve({ data: { data: accessOut(12, 'Super', 'Max', 'super-max@u.ng', 'ADMIN', true, ADMIN_MAX) } });
+      }
+      return Promise.resolve({ data: { data: {} } });
+    });
+    apiPatch.mockResolvedValue({ data: { data: {} } });
+  });
+
+  it('1. BURSARY with a role maximum of 39 exposes exactly 39 available permissions', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('burs-max@u.ng', 'Manage Access');
+    const modal = modalByTitle('Manage Access: Burs Max');
+    expect(modal).not.toBeNull();
+    await setRadio(modal!, 'CUSTOM');
+    // Previously "Permissions (0/64)" — the global catalogue size.
+    expect(modal!.textContent).toContain('Permissions (0/39)');
+    expect(modal!.textContent).not.toContain('(0/64)');
+  });
+
+  it('2. no permission OUTSIDE rolePermissions appears and none can be selected', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('burs-max@u.ng', 'Manage Access');
+    const modal = modalByTitle('Manage Access: Burs Max');
+    await setRadio(modal!, 'CUSTOM');
+    OUT_OF_BURSARY.forEach((k) => expect(modal!.textContent).not.toContain(k));
+    // Select-everything still yields ONLY the role maximum.
+    await clickIn(modal!, /Select All Available/);
+    expect(modal!.textContent).toContain('Permissions (39/39)');
+  });
+
+  it('3. "Select All Available" selects exactly the role maximum', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('burs-max@u.ng', 'Manage Access');
+    const modal = modalByTitle('Manage Access: Burs Max');
+    await setRadio(modal!, 'CUSTOM');
+    await clickIn(modal!, /Select All Available/);
+    expect(modal!.textContent).toContain('Permissions (39/39)');
+
+    await clickIn(modal!, /Review & Save/);
+    const confirm = modalByTitle('Confirm access change');
+    expect(confirm).not.toBeNull();
+    await clickIn(confirm!, /Confirm & Save/);
+
+    const call = apiPatch.mock.calls.find((c) => c[0] === '/admin/users/10/access');
+    expect(call).toBeTruthy();
+    const keys = (call![1] as { permissionKeys: string[] }).permissionKeys;
+    expect(keys).toHaveLength(39);
+    expect(new Set(keys)).toEqual(new Set(BURSARY_MAX));
+  });
+
+  it('4. a ZERO-permission CUSTOM selection remains valid', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('burs-max@u.ng', 'Manage Access');
+    const modal = modalByTitle('Manage Access: Burs Max');
+    await setRadio(modal!, 'CUSTOM');
+    await clickIn(modal!, /Clear All/);
+    expect(modal!.textContent).toContain('Permissions (0/39)');
+
+    await clickIn(modal!, /Review & Save/);
+    const confirm = modalByTitle('Confirm access change');
+    await clickIn(confirm!, /Confirm & Save/);
+    expect(apiPatch).toHaveBeenCalledWith('/admin/users/10/access', { accessMode: 'CUSTOM', permissionKeys: [] });
+  });
+
+  it('5. a normal ADMIN uses its CONFIGURED ADMIN role maximum (not the whole catalogue)', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('admin-max@u.ng', 'Manage Access');
+    const modal = modalByTitle('Manage Access: Admin Max');
+    await setRadio(modal!, 'CUSTOM');
+    expect(modal!.textContent).toContain('Permissions (0/50)');
+    // Keys beyond the configured ADMIN maximum must NOT be offered.
+    OUT_OF_ADMIN.forEach((k) => expect(modal!.textContent).not.toContain(k));
+  });
+
+  it('6. changing a role maximum is reflected when Manage Access is reopened', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('burs-max@u.ng', 'Manage Access');
+    let modal = modalByTitle('Manage Access: Burs Max');
+    await setRadio(modal!, 'CUSTOM');
+    expect(modal!.textContent).toContain('Permissions (0/39)');
+
+    await clickIn(modal!, /Cancel/);
+    expect(modalByTitle('Manage Access: Burs Max')).toBeNull();
+
+    bursaryRoleMax = BURSARY_MAX.slice(0, 30); // role maximum shrinks
+    await clickRowAction('burs-max@u.ng', 'Manage Access');
+    modal = modalByTitle('Manage Access: Burs Max');
+    await setRadio(modal!, 'CUSTOM');
+    expect(modal!.textContent).toContain('Permissions (0/30)');
+  });
+
+  it('7. a protected Super Admin is unchanged (no Custom restriction UI)', async () => {
+    await render(<UsersPage />);
+    await clickRowAction('super-max@u.ng', 'Manage Access');
+    const modal = modalByTitle('Manage Access: Super Max');
+    expect(modal).not.toBeNull();
+    expect(modal!.textContent).toContain('Protected Super Administrator');
+    expect(modal!.querySelectorAll('input[type="checkbox"]').length).toBe(0);
+    expect(modal!.querySelectorAll('input[type="radio"]').length).toBe(0);
+    expect(modal!.textContent).not.toContain('Select All Available');
+  });
+});
