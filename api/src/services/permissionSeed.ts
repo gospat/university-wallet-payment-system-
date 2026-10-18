@@ -83,6 +83,7 @@ export const PERMISSION_DEFS: PermissionDefinition[] = [
   { key: 'VIEW_PROGRAMMES', name: 'View Programmes', category: 'Academic Structure' },
   { key: 'VIEW_LEVELS', name: 'View Levels', category: 'Academic Structure' },
   { key: 'VIEW_SESSIONS', name: 'View Academic Sessions', category: 'Academic Structure' },
+  { key: 'MANAGE_ACADEMIC_STRUCTURE', name: 'Manage Academic Structure', category: 'Academic Structure', adminOnly: true, description: 'Create / edit / delete colleges, departments, programmes, levels and academic sessions and their import templates.' },
   { key: 'VIEW_RECONCILIATION', name: 'View Reconciliation Dashboard', category: 'Reconciliation' },
   { key: 'VIEW_RECONCILIATION_REPORTS', name: 'View Reconciliation Reports', category: 'Reconciliation' },
   { key: 'RESOLVE_EXCEPTIONS', name: 'Resolve Reconciliation Exceptions', category: 'Reconciliation' },
@@ -94,6 +95,9 @@ export const PERMISSION_DEFS: PermissionDefinition[] = [
   { key: 'VIEW_SETTINGS', name: 'View Settings', category: 'Admin' },
   { key: 'MANAGE_SETTINGS', name: 'Manage Settings', category: 'Admin', adminOnly: true },
   { key: 'MANAGE_EMAIL_TEMPLATES', name: 'Manage Email Templates', category: 'Admin', adminOnly: true },
+  // Read-only observability of transactional email delivery. NOT admin-only:
+  // BURSARY may hold it (delivery-log PII is masked for non-ADMIN viewers).
+  { key: 'VIEW_EMAIL_DELIVERY_LOGS', name: 'View Email Delivery Logs', category: 'Admin' },
   { key: 'VIEW_QUEUES', name: 'View Background Queues', category: 'Admin' },
   { key: 'FLUSH_QUEUES', name: 'Flush Background Queues', category: 'Admin', adminOnly: true },
   { key: 'AUDIT_LOGS_VIEW_FULL', name: 'Audit Logs (Full)', category: 'Admin', adminOnly: true },
@@ -250,6 +254,23 @@ for (const k of BURSARY_RELEASE_UPGRADE_KEYS) {
  */
 export const RBAC_BURSARY_INIT_SENTINEL_ID = 'rbac_bursary_role_initialized_20261016';
 
+/**
+ * Explicit "ADMIN role has been initialized" marker (a Counter sentinel row).
+ *
+ * Makes the ADMIN baseline's initialization state DETERMINISTIC so the resolver
+ * (permissionResolver.getRolePermissions) can distinguish:
+ *   · marker ABSENT  → the ADMIN baseline was NEVER initialised (fresh install /
+ *                      pre-seed) → the canonical FULL-registry floor applies.
+ *   · marker PRESENT → the ADMIN baseline HAS been initialised at least once →
+ *                      a stored zero-row baseline is honoured literally and is
+ *                      NEVER silently converted into full access.
+ *
+ * Reuses the existing Counter table/sentinel pattern (see
+ * BURSARY_RELEASE_UPGRADE_SENTINEL_ID / RBAC_BURSARY_INIT_SENTINEL_ID) —
+ * therefore NO database migration.
+ */
+export const RBAC_ADMIN_INIT_SENTINEL_ID = 'rbac_admin_role_initialized_20261017';
+
 export async function seedPermissions() {
   // === Pre-sweep: DELETE any BURSARY RolePermission rows for keys in BURSARY_EXCLUDED
   // (idempotent cleanup — upsert-only below would otherwise preserve stale grants
@@ -393,6 +414,22 @@ export async function seedPermissions() {
   // user-configurable in this phase.
   // -------------------------------------------------------------------------
   await safeApplyDefaults(Role.ADMIN, ALL_PERMISSION_KEYS, 'full');
+
+  // Deterministic proof that the ADMIN baseline has been initialised at least
+  // once. Consumed by permissionResolver.getRolePermissions() so that a stored
+  // zero-row ADMIN baseline is never silently converted into full access.
+  try {
+    await prisma.counter.upsert({
+      where: { id: RBAC_ADMIN_INIT_SENTINEL_ID },
+      create: { id: RBAC_ADMIN_INIT_SENTINEL_ID, value: 1 },
+      update: {},
+    });
+  } catch (e) {
+    const msg = (e as Error)?.message ?? '';
+    if (!msg.toLowerCase().includes('counter') || !msg.toLowerCase().includes('exist')) {
+      console.warn('[seedPermissions] ADMIN init marker write note:', msg.slice(0, 180));
+    }
+  }
 
   const bursaryCount = existingCountByRole.get(Role.BURSARY) ?? 0;
 

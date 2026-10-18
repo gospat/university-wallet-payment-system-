@@ -26,7 +26,7 @@ import {
 } from '../controllers/feeBulkUpload';
 import { buildTwoSheetWorkbook } from '../utils/xlsxTemplate';
 import { csvLineSafe } from '../utils/security';
-import { assertCanManageTemplates } from '../utils/templateAuth';
+import { assertCanManageTemplates, sendTemplateAuthFailure } from '../utils/templateAuth';
 
 const router = express.Router();
 
@@ -36,9 +36,9 @@ const FRONTEND_URL_FEES = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 // --- Fees templates (ADMIN | BURSARY) ---
 router.get('/template.csv', catchAsync(async (req: Request, res: Response) => {
-  const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL_FEES });
+  const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], 'BULK_UPLOAD_FEES', { frontendUrl: FRONTEND_URL_FEES });
   if (!auth.ok) {
-    return res.status(401).type('text/html').send(auth.html!);
+    return sendTemplateAuthFailure(res, auth);
   }
   const BOM = '\uFEFF';
   const headers = [
@@ -104,9 +104,9 @@ router.get('/template.csv', catchAsync(async (req: Request, res: Response) => {
 }));
 
 router.get('/template.xlsx', catchAsync(async (req: Request, res: Response) => {
-  const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL_FEES });
+  const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], 'BULK_UPLOAD_FEES', { frontendUrl: FRONTEND_URL_FEES });
   if (!auth.ok) {
-    return res.status(401).type('text/html').send(auth.html!);
+    return sendTemplateAuthFailure(res, auth);
   }
   const templateHeader = [
     'feeCode',

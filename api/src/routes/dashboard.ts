@@ -43,7 +43,12 @@ router.get(
     }
 
     const roleU = role.toUpperCase();
-    if (roleU === 'ADMIN' || roleU === 'BURSARY') {
+    // Staff nav counters are an operational capability, not a bare role grant.
+    // A zero-permission ADMIN must not receive them (returns an empty payload
+    // rather than 403 so the shell nav simply renders no badges). A Super Admin
+    // holds the full registry and therefore always qualifies.
+    const perms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
+    if ((roleU === 'ADMIN' || roleU === 'BURSARY') && perms.includes('VIEW_DASHBOARD')) {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
       const todayEnd = new Date();

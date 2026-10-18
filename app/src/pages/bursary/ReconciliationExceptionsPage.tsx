@@ -22,8 +22,11 @@ type Preset = 'TODAY' | 'YESTERDAY' | 'THIS_WEEK' | 'THIS_MONTH' | 'LAST_MONTH' 
 
 export interface ExceptionsPageProps { role: Role; activePath: string; }
 
-const hasPerm = (p: string, perms?: string[], role?: Role) => {
-  if (role === 'ADMIN') return true;
+// Flag-aware capability check. Only a PROTECTED SUPER ADMIN
+// (`role === 'ADMIN' && isSuperAdmin === true`) bypasses; a NORMAL ADMIN is
+// evaluated against its effective permissions exactly like BURSARY.
+const hasPerm = (p: string, perms?: string[], isSuperAdmin?: boolean) => {
+  if (isSuperAdmin === true) return true;
   return perms?.includes(p) ?? false;
 };
 
@@ -67,6 +70,7 @@ const ExceptionsPage: React.FC<ExceptionsPageProps> = ({ role, activePath }) => 
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<{
@@ -158,7 +162,7 @@ const ExceptionsPage: React.FC<ExceptionsPageProps> = ({ role, activePath }) => 
     : i18n.portals.admin.dashboardGreeting(`${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Admin');
 
   const runExport = async (fmt: 'xlsx' | 'pdf') => {
-    if (!hasPerm(fmt === 'xlsx' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF', userPerms, role)) return;
+    if (!hasPerm(fmt === 'xlsx' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF', userPerms, isSuperAdmin)) return;
     try {
       setExporting(fmt);
       const body: any = { ...dateFilters };
@@ -218,7 +222,7 @@ const ExceptionsPage: React.FC<ExceptionsPageProps> = ({ role, activePath }) => 
           <button
             type="button"
             onClick={() => runExport('xlsx')}
-            disabled={!!exporting || !hasPerm('REPORTS_EXPORT_EXCEL', userPerms, role)}
+            disabled={!!exporting || !hasPerm('REPORTS_EXPORT_EXCEL', userPerms, isSuperAdmin)}
             className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold bg-emerald-700 hover:bg-emerald-800 text-white disabled:opacity-50"
           >
             {exporting === 'xlsx' ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
@@ -227,7 +231,7 @@ const ExceptionsPage: React.FC<ExceptionsPageProps> = ({ role, activePath }) => 
           <button
             type="button"
             onClick={() => runExport('pdf')}
-            disabled={!!exporting || !hasPerm('REPORTS_EXPORT_PDF', userPerms, role)}
+            disabled={!!exporting || !hasPerm('REPORTS_EXPORT_PDF', userPerms, isSuperAdmin)}
             className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold bg-rose-700 hover:bg-rose-800 text-white disabled:opacity-50"
           >
             {exporting === 'pdf' ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}

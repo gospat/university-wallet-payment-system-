@@ -1024,6 +1024,7 @@ const AssignmentWizardModal: React.FC<{
 // ---------------- Bulk Upload Wizard ----------------
 const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
   const t = adminFees.upload;
+  const { user } = useAuth();
   const [stageId, setStageId] = useState<string | null>(null);
   const [preview, setPreview] = useState<any>(null);
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -1032,7 +1033,12 @@ const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
   const [strategy, setStrategy] = useState<'SKIP' | 'UPDATE' | 'ERROR'>('SKIP');
   const [done, setDone] = useState<{ created: number; skipped: number; failed: number; } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const canImport = role === 'ADMIN' || role === 'BURSARY';
+  // Role boundary (staff) + the canonical BULK_UPLOAD_FEES capability. A NORMAL
+  // ADMIN without the capability is denied; only a PROTECTED SUPER ADMIN bypasses.
+  const perms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
+  const canImport =
+    (role === 'ADMIN' || role === 'BURSARY') && (isSuperAdmin || perms.includes('BULK_UPLOAD_FEES'));
 
   const onPickFile = async (file: File) => {
     setLoading(true); setErr(null);
@@ -1224,7 +1230,11 @@ const AdminFeesPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTe
   const location = useLocation();
   const params = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const canMutate = role === 'ADMIN';
+  // ADMIN role boundary + the canonical EDIT_FEE capability. A NORMAL ADMIN
+  // without EDIT_FEE cannot mutate; only a PROTECTED SUPER ADMIN bypasses.
+  const adminPerms = (user?.permissions as string[] | undefined) ?? [];
+  const adminIsSuper = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
+  const canMutate = role === 'ADMIN' && (adminIsSuper || adminPerms.includes('EDIT_FEE'));
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   void goBack;
   void dashboardTo;

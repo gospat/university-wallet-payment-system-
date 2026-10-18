@@ -17,8 +17,11 @@ import type { MatricStudentResp } from '../../services/adminFees';
 type Role = 'BURSARY' | 'ADMIN';
 export interface StudentStatementPageProps { role: Role; activePath: string; }
 
-const hasPerm = (p: string, perms?: string[], role?: Role) => {
-  if (role === 'ADMIN') return true;
+// Flag-aware capability check. Only a PROTECTED SUPER ADMIN
+// (`role === 'ADMIN' && isSuperAdmin === true`) bypasses; a NORMAL ADMIN is
+// evaluated against its effective permissions exactly like BURSARY.
+const hasPerm = (p: string, perms?: string[], isSuperAdmin?: boolean) => {
+  if (isSuperAdmin === true) return true;
   return perms?.includes(p) ?? false;
 };
 
@@ -50,6 +53,7 @@ const SUMMARY_METRICS: Array<{
 const StudentStatementPage: React.FC<StudentStatementPageProps> = ({ role, activePath }) => {
   const { user, logout } = useAuth();
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const [sp] = useSearchParams();
   const [matricInput, setMatricInput] = useState<string>(sp.get('matricNumber') ?? '');
@@ -102,7 +106,7 @@ const StudentStatementPage: React.FC<StudentStatementPageProps> = ({ role, activ
   const ledgerRows: any[] = data?.ledger ?? [];
 
   const runExport = async (fmt: 'xlsx' | 'pdf') => {
-    if (!hasPerm(fmt === 'xlsx' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF', userPerms, role)) return;
+    if (!hasPerm(fmt === 'xlsx' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF', userPerms, isSuperAdmin)) return;
     try {
       setExporting(fmt);
       const body: Record<string, any> = {};
@@ -172,9 +176,9 @@ const StudentStatementPage: React.FC<StudentStatementPageProps> = ({ role, activ
             <button
               type="button"
               onClick={() => runExport('xlsx')}
-              disabled={!data || !!exporting || !hasPerm('REPORTS_EXPORT_EXCEL', userPerms, role)}
+              disabled={!data || !!exporting || !hasPerm('REPORTS_EXPORT_EXCEL', userPerms, isSuperAdmin)}
               className="inline-flex items-center gap-2 px-3 py-2 text-sm font-semibold bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg disabled:opacity-50"
-              title={hasPerm('REPORTS_EXPORT_EXCEL', userPerms, role) ? 'Download Statement Excel' : 'Permission required: REPORTS_EXPORT_EXCEL'}
+              title={hasPerm('REPORTS_EXPORT_EXCEL', userPerms, isSuperAdmin) ? 'Download Statement Excel' : 'Permission required: REPORTS_EXPORT_EXCEL'}
             >
               {exporting === 'xlsx' ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
               Statement Excel
@@ -182,9 +186,9 @@ const StudentStatementPage: React.FC<StudentStatementPageProps> = ({ role, activ
             <button
               type="button"
               onClick={() => runExport('pdf')}
-              disabled={!data || !!exporting || !hasPerm('REPORTS_EXPORT_PDF', userPerms, role)}
+              disabled={!data || !!exporting || !hasPerm('REPORTS_EXPORT_PDF', userPerms, isSuperAdmin)}
               className="inline-flex items-center gap-2 px-3 py-2 text-sm font-semibold bg-rose-700 hover:bg-rose-800 text-white rounded-lg disabled:opacity-50"
-              title={hasPerm('REPORTS_EXPORT_PDF', userPerms, role) ? 'Download Statement PDF (includes Bursar signature block)' : 'Permission required: REPORTS_EXPORT_PDF'}
+              title={hasPerm('REPORTS_EXPORT_PDF', userPerms, isSuperAdmin) ? 'Download Statement PDF (includes Bursar signature block)' : 'Permission required: REPORTS_EXPORT_PDF'}
             >
               {exporting === 'pdf' ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
               Statement PDF

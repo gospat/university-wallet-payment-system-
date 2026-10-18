@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { getDashboardStats, addStudent } from '../controllers/admin';
 import { protect, restrictTo, requirePermission, requireSuperAdmin, bumpRolePermsVersion } from '../middlewares/auth';
 import { z } from 'zod';
@@ -30,6 +30,7 @@ import {
   getUserAccess,
   getRolePermissions,
   isSuperAdmin,
+  resolveEffectivePermissionsForUser,
   type UserAccessDescriptor,
 } from '../services/permissionResolver';
 import { buildBranding } from '../utils/branding';
@@ -55,10 +56,24 @@ import {
 const router = express.Router();
 
 // ============ TEMPLATE ROUTES (mounted BEFORE protect — inline auth with HTML fallback) ============
+//
+// These download endpoints are registered before the router-level protect()
+// because their frontend callers use a `?access_token=` query token (a
+// browser-navigation download cannot send an Authorization header). The inline
+// check therefore does the SAME work protect() would: authenticate, resolve the
+// caller's LIVE effective permissions, and authorise on capability — never on
+// the bare role. A normal (non-flagged) ADMIN without the capability is denied;
+// only a FLAG-AWARE super administrator bypasses the capability floor.
 
 const FRONTEND_URL_ADMIN = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-async function templateAuthCheckAdmin(req: Request, allowedRoles: string[]): Promise<{ ok: boolean; html?: string }> {
+type TemplateAuthResult = { ok: boolean; html?: string; forbidden?: boolean };
+
+async function templateAuthCheckAdmin(
+  req: Request,
+  allowedRoles: string[],
+  requiredPermission: string,
+): Promise<TemplateAuthResult> {
   let token: string | undefined;
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.slice(7);
@@ -67,29 +82,77 @@ async function templateAuthCheckAdmin(req: Request, allowedRoles: string[]): Pro
   }
   let userId: number | null = null;
   let userRole: string | null = null;
+  let userIsSuperAdmin = false;
+  let effectivePermissions: string[] = [];
   if (token) {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as any;
       if (typeof decoded?.id === 'number') {
-        const u = await prisma.user.findUnique({ where: { id: decoded.id }, select: { id: true, role: true, accountStatus: true } });
-        if (u && u.accountStatus === 'ACTIVE') { userId = u.id; userRole = u.role; }
+        const u = await prisma.user.findUnique({
+          where: { id: decoded.id },
+          select: { id: true, role: true, accountStatus: true, isSuperAdmin: true },
+        });
+        if (u && u.accountStatus === 'ACTIVE') {
+          userId = u.id;
+          userRole = u.role;
+          userIsSuperAdmin = u.role === Role.ADMIN && (u as any).isSuperAdmin === true;
+        }
       }
     } catch { /* ignore invalid token — fallback to html login link */ }
   }
-  if (!userId || !userRole || !allowedRoles.includes(userRole)) {
+
+  const loginHtml = () => {
     const redirect = encodeURIComponent(req.originalUrl);
-    const html = `<html><head><title>Login Required</title></head><body style="font-family:system-ui,-apple-system,sans-serif;padding:40px;max-width:600px;margin:auto"><h2 style="color:#b91c1c">Login Required</h2><p>Your session expired. Please <a href="${FRONTEND_URL_ADMIN}/login?redirect=${redirect}" style="color:#2563eb;font-weight:600">click here to log in</a>.</p></body></html>`;
-    return { ok: false, html };
+    return `<html><head><title>Login Required</title></head><body style="font-family:system-ui,-apple-system,sans-serif;padding:40px;max-width:600px;margin:auto"><h2 style="color:#b91c1c">Login Required</h2><p>Your session expired. Please <a href="${FRONTEND_URL_ADMIN}/login?redirect=${redirect}" style="color:#2563eb;font-weight:600">click here to log in</a>.</p></body></html>`;
+  };
+
+  if (!userId || !userRole || !allowedRoles.includes(userRole)) {
+    return { ok: false, html: loginHtml() };
   }
-  (req as any).user = { id: userId, role: userRole };
+
+  // Resolve the caller's LIVE capability set. The super-admin bypass is the SAME
+  // centralised rule used by requirePermission() — it is never duplicated as a
+  // bare `role === 'ADMIN'` shortcut.
+  if (!userIsSuperAdmin) {
+    effectivePermissions = await resolveEffectivePermissionsForUser({
+      id: userId,
+      role: userRole as Role,
+      isSuperAdmin: false,
+    });
+    if (!effectivePermissions.includes(requiredPermission)) {
+      return { ok: false, forbidden: true };
+    }
+  }
+
+  (req as any).user = {
+    id: userId,
+    role: userRole as Role,
+    isSuperAdmin: userIsSuperAdmin,
+    permissions: userIsSuperAdmin ? [] : effectivePermissions,
+  };
   return { ok: true };
 }
 
-// --- Students templates (ADMIN ONLY) ---
+/**
+ * Deny/redirect helper shared by the inline template routes. A permission
+ * failure is a 403 (JSON) — NOT a login redirect, which would be misleading.
+ */
+function sendTemplateAuthFailure(res: Response, auth: TemplateAuthResult) {
+  if (auth.forbidden) {
+    return res.status(403).json({
+      status: 'fail',
+      message: 'You do not have permission to download this template.',
+      code: 'PERMISSION_REQUIRED',
+    });
+  }
+  return res.status(401).type('text/html').send(auth.html!);
+}
+
+// --- Students templates (ADMIN role + BULK_UPLOAD_STUDENTS capability) ---
 router.get('/students/template.csv', catchAsync(async (req: Request, res: Response) => {
-  const auth = await templateAuthCheckAdmin(req, ['ADMIN']);
+  const auth = await templateAuthCheckAdmin(req, ['ADMIN'], 'BULK_UPLOAD_STUDENTS');
   if (!auth.ok) {
-    return res.status(401).type('text/html').send(auth.html!);
+    return sendTemplateAuthFailure(res, auth);
   }
   const UTF8_BOM = '\uFEFF';
   const header = [
@@ -141,9 +204,9 @@ router.get('/students/template.csv', catchAsync(async (req: Request, res: Respon
 }));
 
 router.get('/students/template.xlsx', catchAsync(async (req: Request, res: Response) => {
-  const auth = await templateAuthCheckAdmin(req, ['ADMIN']);
+  const auth = await templateAuthCheckAdmin(req, ['ADMIN'], 'BULK_UPLOAD_STUDENTS');
   if (!auth.ok) {
-    return res.status(401).type('text/html').send(auth.html!);
+    return sendTemplateAuthFailure(res, auth);
   }
   const templateHeader = [
     'firstName',
@@ -227,38 +290,45 @@ router.get('/students/template.xlsx', catchAsync(async (req: Request, res: Respo
 
 router.use(protect);
 
-// Selective access: Non-email endpoints remain ADMIN-only.
-// Email delivery log list/detail: ADMIN or BURSARY (PII is automatically masked per viewerRole).
-// Email template edit + resend credentials: ADMIN-only.
+// ---------------------------------------------------------------------------
+// ROLE BOUNDARY for the ADMIN router.
+//
+// This is a role boundary ONLY — it is NOT authorization for a normal,
+// non-flagged ADMIN. Every operational route below additionally enforces a
+// granular canonical permission via requirePermission(), so:
+//   · role=ADMIN && isSuperAdmin=true  → passes everything (centralised bypass)
+//   · normal ADMIN                      → passes only with its LIVE effective
+//                                         permission for that operation
+//   · BURSARY                           → admitted ONLY on the two read-only
+//                                         observability surfaces below, and still
+//                                         governed by its effective permissions
+//   · STUDENT                           → never admitted here
+//
+// Admission exceptions (still capability-checked per route):
+//   · GET /audit-logs*           → ADMIN or BURSARY
+//   · GET /email-delivery-logs*  → ADMIN or BURSARY (PII masked for non-ADMIN)
+// ---------------------------------------------------------------------------
 router.use((req, res, next) => {
+  const isAuditLogsRead = req.method === 'GET' && /^\/audit-logs(\/|$)/.test(req.path);
   const isEmailDeliveryLogRead =
-    req.method === 'GET' &&
-    (/^\/email-delivery-logs(\/|$)/.test(req.path));
-  const isEmailTemplate = /^\/email-templates(\/|$)/.test(req.path);
-  const isResendCredentials = /\/resend-credentials$/.test(req.path);
-  const isAuditLogsRead =
-    req.method === 'GET' && /^\/audit-logs(\/|$)/.test(req.path);
-  const role = String((req as any).user?.role || '');
-
-  if (isAuditLogsRead) {
-    const requireRole = role === 'ADMIN'
-      ? requirePermission('AUDIT_LOGS_VIEW_FULL')
-      : role === 'BURSARY'
-      ? requirePermission('AUDIT_LOGS_VIEW_LIMITED')
-      : restrictTo('ADMIN');
-    return requireRole(req, res, next);
+    req.method === 'GET' && /^\/email-delivery-logs(\/|$)/.test(req.path);
+  if (isAuditLogsRead || isEmailDeliveryLogRead) {
+    return restrictTo('ADMIN', 'BURSARY')(req, res, next);
   }
-  if (isEmailDeliveryLogRead) {
-    if (role === 'ADMIN' || role === 'BURSARY') return next();
-    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN or BURSARY role' });
-  }
-  if (isEmailTemplate || isResendCredentials) {
-    if (role === 'ADMIN') return next();
-    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN role' });
-  }
-  // Default: all other routes remain strict ADMIN-only
   return restrictTo('ADMIN')(req, res, next);
 });
+
+/**
+ * Audit-log read capability. FULL capability for an ADMIN-role caller, LIMITED
+ * capability for a BURSARY caller. The role boundary has already admitted
+ * ADMIN/BURSARY, so this ONLY adds the capability floor.
+ */
+const requireAuditLogRead = (req: Request, res: Response, next: NextFunction) => {
+  const role = String((req as any).user?.role || '');
+  if (role === Role.ADMIN) return requirePermission('AUDIT_LOGS_VIEW_FULL')(req, res, next);
+  if (role === Role.BURSARY) return requirePermission('AUDIT_LOGS_VIEW_LIMITED')(req, res, next);
+  return restrictTo('ADMIN')(req, res, next);
+};
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
@@ -292,7 +362,7 @@ async function writeAudit(
   }
 }
 
-router.get('/stats', getDashboardStats);
+router.get('/stats', requirePermission('VIEW_DASHBOARD'), getDashboardStats);
 router.post('/students', requirePermission('CREATE_STUDENT'), validateBody(CreateStudentSchema), addStudent);
 
 router.post('/students/upload', requirePermission('BULK_UPLOAD_STUDENTS'), stageStudentUpload);
@@ -353,7 +423,7 @@ const AuditLogsQuery = z.object({
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
 });
-router.get('/audit-logs', validateQuery(AuditLogsQuery), catchAsync(async (req: any, res) => {
+router.get('/audit-logs', requireAuditLogRead, validateQuery(AuditLogsQuery), catchAsync(async (req: any, res) => {
   const { page, limit, action, entity, entityId, userId, dateFrom, dateTo } = req.query as any;
   const where: any = {};
   if (action) where.action = action;
@@ -394,7 +464,7 @@ router.get('/audit-logs', validateQuery(AuditLogsQuery), catchAsync(async (req: 
   });
 }));
 
-router.get('/audit-logs/export.csv', validateQuery(AuditLogsQuery), catchAsync(async (req: any, res) => {
+router.get('/audit-logs/export.csv', requireAuditLogRead, validateQuery(AuditLogsQuery), catchAsync(async (req: any, res) => {
   const { action, entity, entityId, userId, dateFrom, dateTo, format } = req.query as any;
   const where: any = {};
   if (action) where.action = action;
@@ -1733,6 +1803,7 @@ const AdminSearchQuery = z.object({
 });
 router.get(
   '/search',
+  requirePermission('VIEW_DASHBOARD'),
   validateQuery(AdminSearchQuery),
   catchAsync(async (req: any, res) => {
     const { q, limit } = req.query as z.infer<typeof AdminSearchQuery>;
@@ -1887,6 +1958,7 @@ const NotifListQuery = z.object({
 });
 router.get(
   '/notifications',
+  requirePermission('VIEW_DASHBOARD'),
   validateQuery(NotifListQuery),
   catchAsync(async (req: any, res) => {
     const { read, page, limit } = req.query as z.infer<typeof NotifListQuery>;
@@ -1898,6 +1970,7 @@ router.get(
 const NotifIdParam = z.object({ id: z.coerce.number().int().positive() });
 router.post(
   '/notifications/:id/read',
+  requirePermission('VIEW_DASHBOARD'),
   validateParams(NotifIdParam),
   catchAsync(async (req: any, res) => {
     const { id } = req.params as z.infer<typeof NotifIdParam>;
@@ -2322,16 +2395,16 @@ const emailTypeValues: readonly string[] = Object.values(EmailType);
 const emailStatusValues: readonly string[] = Object.values(EmailDeliveryStatus);
 
 const TemplateKeyParam = z.object({ templateKey: z.string().min(1).max(100).trim() });
-// 1. GET template by key (ADMIN)
-router.get('/email-templates/:templateKey', validateParams(TemplateKeyParam), catchAsync(async (req: Request, res: Response) => {
+// 1. GET template by key (ADMIN role + MANAGE_EMAIL_TEMPLATES capability)
+router.get('/email-templates/:templateKey', requirePermission('MANAGE_EMAIL_TEMPLATES'), validateParams(TemplateKeyParam), catchAsync(async (req: Request, res: Response) => {
   const key = String((req.params as any).templateKey || '').trim();
   if (!key) return res.status(400).json({ status: 'fail', message: 'templateKey required' });
   const data = await EmailTemplateService.getByKey(key);
   res.json({ status: 'success', data });
 }));
 
-// 2. PATCH template by key (ADMIN)
-router.patch('/email-templates/:templateKey', validateParams(TemplateKeyParam), validateBody(EmailTemplateConfigPatchSchema), catchAsync(async (req: Request, res: Response) => {
+// 2. PATCH template by key (ADMIN role + MANAGE_EMAIL_TEMPLATES capability)
+router.patch('/email-templates/:templateKey', requirePermission('MANAGE_EMAIL_TEMPLATES'), validateParams(TemplateKeyParam), validateBody(EmailTemplateConfigPatchSchema), catchAsync(async (req: Request, res: Response) => {
   const key = String((req.params as any).templateKey || '').trim();
   if (!key) return res.status(400).json({ status: 'fail', message: 'templateKey required' });
   const actorId = Number((req as any).user?.id);
@@ -2370,23 +2443,6 @@ function stringifyBigintsDeep(v: any): any {
   return out;
 }
 
-// Middleware-like allow-list guard: specific email endpoints accessible to ADMIN *or* BURSARY
-// (must run before the global restrictTo('ADMIN'))
-function allowAdminOrBursary(req: Request, res: Response, next: any) {
-  const role = String((req as any).user?.role || '');
-  if (role !== 'ADMIN' && role !== 'BURSARY') {
-    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN or BURSARY role' });
-  }
-  next();
-}
-function allowAdminOnly(req: Request, res: Response, next: any) {
-  const role = String((req as any).user?.role || '');
-  if (role !== 'ADMIN') {
-    return res.status(403).json({ status: 'fail', message: 'Requires ADMIN role' });
-  }
-  next();
-}
-
 // Helpers for PII mask
 function maskEmail(emailLike: string): string {
   const s = String(emailLike || '');
@@ -2418,7 +2474,7 @@ function maskDeliveryLogRow(row: any, viewerRole: string) {
   return r;
 }
 
-// 3. GET delivery logs list (ADMIN; Bursary sees masked PII)
+// 3. GET delivery logs list (ADMIN|BURSARY role + VIEW_EMAIL_DELIVERY_LOGS; Bursary sees masked PII)
 const emailDeliveryLogsListSchema = z.object({
   page: z.coerce.number().int().min(1).max(1000000).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(25),
@@ -2428,7 +2484,7 @@ const emailDeliveryLogsListSchema = z.object({
   recipientId: z.coerce.number().int().optional(),
   studentImportId: z.coerce.number().int().optional(),
 });
-router.get('/email-delivery-logs', validateQuery(emailDeliveryLogsListSchema), catchAsync(async (req: Request, res: Response) => {
+router.get('/email-delivery-logs', requirePermission('VIEW_EMAIL_DELIVERY_LOGS'), validateQuery(emailDeliveryLogsListSchema), catchAsync(async (req: Request, res: Response) => {
   const q = (req.query as any);
   const page = Number(q.page) || 1;
   const pageSize = Math.min(200, Math.max(1, Number(q.pageSize) || 25));
@@ -2481,8 +2537,8 @@ router.get('/email-delivery-logs', validateQuery(emailDeliveryLogsListSchema), c
   });
 }));
 
-// 4. GET single delivery log detail (ADMIN; Bursary sees PII masked)
-router.get('/email-delivery-logs/:id', validateParams(z.object({ id: z.union([z.coerce.string().min(1), z.coerce.number().int().min(1)]) })), catchAsync(async (req: Request, res: Response) => {
+// 4. GET single delivery log detail (ADMIN|BURSARY role + VIEW_EMAIL_DELIVERY_LOGS; Bursary sees PII masked)
+router.get('/email-delivery-logs/:id', requirePermission('VIEW_EMAIL_DELIVERY_LOGS'), validateParams(z.object({ id: z.union([z.coerce.string().min(1), z.coerce.number().int().min(1)]) })), catchAsync(async (req: Request, res: Response) => {
   const rawId = (req.params as any).id;
   let id: bigint;
   try {
@@ -2504,8 +2560,8 @@ router.get('/email-delivery-logs/:id', validateParams(z.object({ id: z.union([z.
   res.json({ status: 'success', data: maskDeliveryLogRow(row, viewerRole) });
 }));
 
-// 5. POST resend credentials (ADMIN, 5/15m per target user per admin)
-router.post('/users/:id/resend-credentials', resendCredentialsLimiter, validateParams(z.object({ id: z.coerce.number().int().min(1) })), catchAsync(async (req: Request, res: Response) => {
+// 5. POST resend credentials (ADMIN role + RESEND_CREDENTIALS capability, 5/15m per target user per admin)
+router.post('/users/:id/resend-credentials', requirePermission('RESEND_CREDENTIALS'), resendCredentialsLimiter, validateParams(z.object({ id: z.coerce.number().int().min(1) })), catchAsync(async (req: Request, res: Response) => {
   const targetId = Number((req.params as any).id);
   const actorId = Number((req as any).user?.id);
   const ip = reqIp(req);

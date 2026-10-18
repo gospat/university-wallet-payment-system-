@@ -126,7 +126,10 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   // permissions derived from user.permissions (already loaded at protect() time)
   const userAny = user as any;
   const perms = Array.isArray(userAny?.permissions) ? (userAny.permissions as string[]) : [];
-  const canVerifyReceipt = perms.includes('VERIFY_RECEIPT') || perms.includes('GENERATE_RECEIPT') || role === 'ADMIN';
+  // Flag-aware: only a PROTECTED SUPER ADMIN bypasses the receipt-verification
+  // capability; a NORMAL ADMIN must actually hold VERIFY_RECEIPT/GENERATE_RECEIPT.
+  const isSuperAdmin = user?.role === 'ADMIN' && userAny?.isSuperAdmin === true;
+  const canVerifyReceipt = perms.includes('VERIFY_RECEIPT') || perms.includes('GENERATE_RECEIPT') || isSuperAdmin;
 
   const toggleVerifyMode = (on: boolean) => {
     const next = new URLSearchParams(searchParams);

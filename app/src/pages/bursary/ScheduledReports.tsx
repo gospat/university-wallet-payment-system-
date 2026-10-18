@@ -20,8 +20,11 @@ import {
 type Role = 'BURSARY' | 'ADMIN';
 export interface ScheduledReportsPageProps { role: Role; activePath: string; }
 
-const hasPerm = (p: string, perms?: string[], role?: Role) => {
-  if (role === 'ADMIN') return true;
+// Flag-aware capability check. Only a PROTECTED SUPER ADMIN
+// (`role === 'ADMIN' && isSuperAdmin === true`) bypasses; a NORMAL ADMIN is
+// evaluated against its effective permissions exactly like BURSARY.
+const hasPerm = (p: string, perms?: string[], isSuperAdmin?: boolean) => {
+  if (isSuperAdmin === true) return true;
   return perms?.includes(p) ?? false;
 };
 
@@ -79,6 +82,7 @@ const ScheduledReportsPage: React.FC<ScheduledReportsPageProps> = ({ role, activ
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<any[]>([]);
@@ -102,7 +106,7 @@ const ScheduledReportsPage: React.FC<ScheduledReportsPageProps> = ({ role, activ
 
   useEffect(() => { navCounters().then(setNavCounts).catch(() => {}); }, []);
 
-  const canSchedule = hasPerm('REPORTS_SCHEDULE', userPerms, role);
+  const canSchedule = hasPerm('REPORTS_SCHEDULE', userPerms, isSuperAdmin);
 
   const fetchData = () => {
     if (!canSchedule) { setLoading(false); return; }

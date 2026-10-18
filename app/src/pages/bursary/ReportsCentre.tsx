@@ -34,14 +34,13 @@ type Role = 'BURSARY' | 'ADMIN';
 type Preset = 'TODAY'|'YESTERDAY'|'THIS_WEEK'|'THIS_MONTH'|'LAST_MONTH'|'THIS_SESSION'|'CUSTOM';
 type ProviderChip = 'ALL' | 'PAYSTACK' | 'ALATPAY';
 
-const hasPermission = (perm: string | undefined, perms?: string[], role?: Role): boolean => {
+// Flag-aware capability check. Only a PROTECTED SUPER ADMIN
+// (`role === 'ADMIN' && isSuperAdmin === true`) bypasses; a NORMAL ADMIN is
+// evaluated against its effective permissions exactly like BURSARY. An EMPTY
+// permission array never activates a fallback.
+const hasPermission = (perm: string | undefined, perms?: string[], isSuperAdmin?: boolean): boolean => {
   if (!perm) return true;
-  if (role === 'ADMIN') {
-    const adminAuto = new Set(['MANAGE_USERS','MANAGE_ROLES','SYSTEM_SETTINGS','PAYSTACK_CONFIG','AUDIT_LOGS_VIEW_FULL','REPORTS_SCHEDULE']);
-    if (adminAuto.has(perm)) return true;
-    if (!perms || perms.length === 0) return false;
-    return perms.includes(perm);
-  }
+  if (isSuperAdmin === true) return true;
   if (!perms || perms.length === 0) return false;
   return perms.includes(perm);
 };
@@ -309,6 +308,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
   const [excTotalCount, setExcTotalCount] = useState<number | null>(null);
 
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
 
   useEffect(() => { navCounters().then(setNavCounts).catch(() => {}); }, []);
 
@@ -326,8 +326,8 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
     return out;
   }, [preset, customFrom, customTo, provider]);
 
-  const canViewCollections = hasPermission('REPORTS_VIEW_COLLECTIONS', userPerms, role);
-  const canViewReconciliation = hasPermission('REPORTS_VIEW_RECONCILIATION', userPerms, role);
+  const canViewCollections = hasPermission('REPORTS_VIEW_COLLECTIONS', userPerms, isSuperAdmin);
+  const canViewReconciliation = hasPermission('REPORTS_VIEW_RECONCILIATION', userPerms, isSuperAdmin);
 
   useEffect(() => {
     // GET /reports/dashboard-summary is protected by REPORTS_VIEW_COLLECTIONS on
@@ -461,14 +461,14 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
           <span className="text-xs font-semibold text-gray-500 tracking-wide mr-1">QUICK LINKS</span>
           <Link
             to="/bursary/reports/student-statement"
-            className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-medium border border-gray-300 bg-white hover:bg-gray-50 text-gray-800 shadow-sm transition-all ${!hasPermission('REPORTS_VIEW_STUDENT_STATEMENT', userPerms, role) ? 'hidden' : ''}`}
+            className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-medium border border-gray-300 bg-white hover:bg-gray-50 text-gray-800 shadow-sm transition-all ${!hasPermission('REPORTS_VIEW_STUDENT_STATEMENT', userPerms, isSuperAdmin) ? 'hidden' : ''}`}
           >
             <Search className="h-4 w-4" />
             <span>Student Statement</span>
           </Link>
           <Link
             to="/bursary/reports/exceptions"
-            className={`relative inline-flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-semibold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 shadow-sm transition-all ${!hasPermission('REPORTS_VIEW_RECONCILIATION', userPerms, role) ? 'hidden' : ''}`}
+            className={`relative inline-flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-semibold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 shadow-sm transition-all ${!hasPermission('REPORTS_VIEW_RECONCILIATION', userPerms, isSuperAdmin) ? 'hidden' : ''}`}
           >
             <AlertTriangle className="h-4 w-4" />
             <span>Reconciliation Exceptions</span>
@@ -532,7 +532,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {DashboardCardsDef.filter((cd) => hasPermission(cd.permission, userPerms, role)).map((cd) => {
+          {DashboardCardsDef.filter((cd) => hasPermission(cd.permission, userPerms, isSuperAdmin)).map((cd) => {
             const raw = cards ? cd.accessor(cards) : undefined;
             const display = loading
               ? <span className="inline-flex items-center gap-1 text-gray-400"><Loader2 className="h-3 w-3 animate-spin" />Loading…</span>
@@ -585,7 +585,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
           {groups.map((g) => {
             const reports = REPORT_LIBRARY.filter((r) => r.group === g);
             if (reports.length === 0) return null;
-            const visibleCount = reports.filter((r) => hasPermission(r.viewPermission, userPerms, role)).length;
+            const visibleCount = reports.filter((r) => hasPermission(r.viewPermission, userPerms, isSuperAdmin)).length;
             const groupAccent: string = {
               Collections: 'from-emerald-50 to-teal-50 border-emerald-200 text-emerald-800',
               Revenue: 'from-blue-50 to-indigo-50 border-blue-200 text-blue-800',
@@ -603,7 +603,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {reports.map((r) => {
-                    const canView = hasPermission(r.viewPermission, userPerms, role);
+                    const canView = hasPermission(r.viewPermission, userPerms, isSuperAdmin);
                     const qs = (filters.dateFrom || filters.dateTo)
                       ? `?${[filters.dateFrom && `dateFrom=${filters.dateFrom}`, filters.dateTo && `dateTo=${filters.dateTo}`].filter(Boolean).join('&')}`
                       : '';
@@ -652,7 +652,7 @@ const ReportsCentre: React.FC<ReportsCentreProps> = ({ role, activePath }) => {
               </div>
             );
           })}
-          {groups.every((g) => REPORT_LIBRARY.filter((r) => r.group === g && hasPermission(r.viewPermission, userPerms, role)).length === 0) && (
+          {groups.every((g) => REPORT_LIBRARY.filter((r) => r.group === g && hasPermission(r.viewPermission, userPerms, isSuperAdmin)).length === 0) && (
             <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-gray-500 text-sm">
               <Search className="h-10 w-10 text-gray-300 mx-auto mb-2" />
               No reports available. Contact admin to grant REPORTS_VIEW_* permissions.

@@ -39,11 +39,12 @@ type Role = 'BURSARY' | 'ADMIN';
 
 export interface GenericReportPageProps { role: Role; activePath: string; }
 
-const hasPermission = (perm: string, perms?: string[], role?: Role): boolean => {
-  if (role === 'ADMIN') {
-    const auto = new Set(['MANAGE_USERS','MANAGE_ROLES','SYSTEM_SETTINGS','PAYSTACK_CONFIG','AUDIT_LOGS_VIEW_FULL','REPORTS_SCHEDULE']);
-    if (auto.has(perm)) return true;
-  }
+// Flag-aware capability check. Only a PROTECTED SUPER ADMIN
+// (`role === 'ADMIN' && isSuperAdmin === true`) bypasses; a NORMAL ADMIN is
+// evaluated against its effective permissions exactly like BURSARY. An EMPTY
+// permission array never activates a fallback.
+const hasPermission = (perm: string, perms?: string[], isSuperAdmin?: boolean): boolean => {
+  if (isSuperAdmin === true) return true;
   if (!perms || perms.length === 0) return false;
   return perms.includes(perm);
 };
@@ -387,6 +388,7 @@ const GenericReportPage: React.FC<GenericReportPageProps> = ({ role, activePath 
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<any>(null);
@@ -450,7 +452,7 @@ const GenericReportPage: React.FC<GenericReportPageProps> = ({ role, activePath 
     return () => { mounted = false; };
   }, [reportKey, filters, pagination.page, pagination.pageSize, sortKey, sortOrder, allowedSorts.length ? allowedSorts.join(',') : '']);
 
-  const permMissing = libMeta?.viewPermission && !hasPermission(libMeta.viewPermission, userPerms, role);
+  const permMissing = libMeta?.viewPermission && !hasPermission(libMeta.viewPermission, userPerms, isSuperAdmin);
 
   const brand = role === 'BURSARY' ? i18n.portals.bursary.dashboardBrand : i18n.portals.admin.dashboardBrand;
   const userText = role === 'BURSARY'
@@ -471,7 +473,7 @@ const GenericReportPage: React.FC<GenericReportPageProps> = ({ role, activePath 
   const runExport = async (format: 'xlsx' | 'pdf') => {
     if (!meta) return;
     const perm = format === 'xlsx' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
-    if (!hasPermission(perm, userPerms, role)) {
+    if (!hasPermission(perm, userPerms, isSuperAdmin)) {
       fireToast('err', `Missing permission ${perm}`);
       return;
     }
@@ -520,8 +522,8 @@ const GenericReportPage: React.FC<GenericReportPageProps> = ({ role, activePath 
   const summary = meta ? meta.summaryAccessor?.(data ?? {}) : null;
   const total = data?.total;
 
-  const canXlsx = hasPermission('REPORTS_EXPORT_EXCEL', userPerms, role);
-  const canPdf = hasPermission('REPORTS_EXPORT_PDF', userPerms, role);
+  const canXlsx = hasPermission('REPORTS_EXPORT_EXCEL', userPerms, isSuperAdmin);
+  const canPdf = hasPermission('REPORTS_EXPORT_PDF', userPerms, isSuperAdmin);
 
   const SortIcon: React.FC<{ col: string }> = ({ col }) => {
     if (!allowedSorts.includes(col)) return null;

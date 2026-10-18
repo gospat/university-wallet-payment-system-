@@ -92,7 +92,11 @@ const StudentCategoriesPage: React.FC = () => {
   });
 
   const portalRole: 'ADMIN' | 'BURSARY' = user?.role === 'BURSARY' ? 'BURSARY' : 'ADMIN';
-  const canWrite = portalRole === 'ADMIN';
+  // ADMIN role boundary + the canonical MANAGE_STUDENTS capability. A NORMAL
+  // ADMIN without it cannot write; only a PROTECTED SUPER ADMIN bypasses.
+  const catPerms = (user?.permissions as string[] | undefined) ?? [];
+  const catIsSuper = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
+  const canWrite = portalRole === 'ADMIN' && (catIsSuper || catPerms.includes('MANAGE_STUDENTS'));
 
   useEffect(() => {
     navCounters().then(setNavCounts).catch(() => setNavCounts({}));

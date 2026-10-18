@@ -199,6 +199,8 @@ const CreateInternalBody = z.object({
 
 router.post(
   '/items/:reference/create-internal',
+  requirePermission('VIEW_RECONCILIATION'),
+  requirePermission('RUN_RECONCILIATION'),
   validateParams(ReferenceParam),
   validateBody(CreateInternalBody),
   catchAsync(async (req: any, res) => {

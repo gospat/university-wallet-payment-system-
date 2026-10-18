@@ -204,8 +204,10 @@ function sendExport(res: any, result: Awaited<ReturnType<typeof dispatchReportEx
 
 // ============================================================================
 //  REPORT ROUTE REGISTRATION (21 ReportTypes × (GET view + POST export) = 42 endpoints)
-//  Each requirePermission() enforces RBAC. ADMIN bypasses requirePermission guard
-//  via auth.ts L136 shortcut. Bursary excluded from REPORTS_SCHEDULE (per STAGE 3).
+//  Each requirePermission() enforces RBAC. Only a FLAG-AWARE Super Admin
+//  (role=ADMIN && isSuperAdmin=true) bypasses requirePermission; a normal ADMIN
+//  is governed by its effective permissions. Bursary excluded from
+//  REPORTS_SCHEDULE (per STAGE 3).
 // ============================================================================
 
 // ---------- R1 DASHBOARD_SUMMARY (Cards + Drilldown) ----------
@@ -226,7 +228,11 @@ router.post('/dashboard-summary/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -256,7 +262,11 @@ router.post('/daily-collections/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -291,7 +301,11 @@ router.post('/monthly-collections/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -322,7 +336,11 @@ router.post('/revenue-by-bill/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -355,7 +373,11 @@ router.post('/payment-register/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -392,7 +414,11 @@ router.post('/student-statement/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -423,7 +449,11 @@ router.post('/bill-collection-performance/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -458,7 +488,11 @@ router.post('/outstanding-debtors/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -490,7 +524,11 @@ router.post('/hierarchical-revenue/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -521,7 +559,11 @@ router.post('/payment-gateway/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -554,7 +596,11 @@ router.post('/settlement/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -586,7 +632,11 @@ router.post('/reconciliation-exceptions/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -615,7 +665,11 @@ router.post('/refunds/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -646,7 +700,11 @@ router.post('/charges-fee-income/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -682,7 +740,11 @@ router.post('/general-ledger/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -714,7 +776,11 @@ router.post('/receipt-register/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -743,7 +809,11 @@ router.post('/transaction-status/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -775,7 +845,11 @@ router.post('/comparative/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -818,7 +892,11 @@ router.post('/export-centre/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -992,7 +1070,11 @@ router.post('/scheduled/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -1037,7 +1119,11 @@ router.post('/audit-trail/export',
     const format = coerceFormat(req.query.format);
     const requiredExportPerm = format === 'XLSX' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
     const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
-    if (req.user?.role !== 'ADMIN' && !userPerms.includes(requiredExportPerm)) {
+    // Capability-only export authorization. A Super Admin holds the full
+    // registry (so it passes here), a normal ADMIN must actually hold the
+    // export capability, and a zero-permission ADMIN is denied. role === 'ADMIN'
+    // is deliberately NOT a bypass.
+    if (!userPerms.includes(requiredExportPerm)) {
       throw new AppError('You are not authorized to perform this action', 403);
     }
     const result = await dispatchReportExport({
@@ -1049,10 +1135,13 @@ router.post('/audit-trail/export',
 );
 
 // ---------- Download endpoint for queued exports (by reportUuid) ----------
-// AC-5 / R21: creator OR ADMIN only (403 for everyone else). RBAC triple-gated:
+// AC-5 / R21: creator OR holder of the matching report-export capability (403
+// for everyone else). RBAC triple-gated:
 //   1. router.use(restrictTo('BURSARY','ADMIN')) at top → STUDENT 403
 //   2. requirePermission(REPORTS_VIEW_ACCOUNTING) here → BURSARY without export-audit perms denied
-//   3. Inline creator==user || role==ADMIN check → other-bursary-non-admin 403
+//   3. Inline creator==user || export-capability check → other-bursary-non-admin 403.
+//      role === 'ADMIN' is deliberately NOT a bypass: a Super Admin holds the
+//      full registry (so passes), a normal ADMIN must hold the export capability.
 const UuidParam = z.object({ reportUuid: z.string().min(8).max(128) });
 router.get('/download/:reportUuid',
   requirePermission('REPORTS_VIEW_ACCOUNTING'),
@@ -1063,9 +1152,13 @@ router.get('/download/:reportUuid',
     });
     if (!rec) return next(new AppError('Report export not found', 404));
     const uid = Number(req.user?.id);
-    const role = req.user?.role as Role | undefined;
-    if (role !== 'ADMIN' && rec.generatedById !== uid) {
-      return next(new AppError('Not permitted to download this report (creator or ADMIN only)', 403));
+    const userPerms: string[] = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
+    const downloadPerm =
+      String(rec.format ?? 'XLSX').toUpperCase() === 'PDF'
+        ? 'REPORTS_EXPORT_PDF'
+        : 'REPORTS_EXPORT_EXCEL';
+    if (rec.generatedById !== uid && !userPerms.includes(downloadPerm)) {
+      return next(new AppError('Not permitted to download this report (creator or export permission required)', 403));
     }
     if (rec.status === 'COMPLETED' && rec.storagePath) {
       const safeFormat = String(rec.format ?? 'XLSX').toUpperCase();

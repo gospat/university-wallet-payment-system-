@@ -1,6 +1,6 @@
 import { AccessMode, Role } from '@prisma/client';
 import prisma from '../config/database';
-import { PERMISSION_DEFS } from './permissionSeed';
+import { PERMISSION_DEFS, RBAC_ADMIN_INIT_SENTINEL_ID } from './permissionSeed';
 
 // ---------------------------------------------------------------------------
 // AUTHORITATIVE PERMISSION RESOLVER (single source of truth)
@@ -65,6 +65,30 @@ function registryKeys(): string[] {
 }
 
 /**
+ * True when the ADMIN role baseline has been initialised at least once, proven
+ * by the explicit Counter sentinel written by seedPermissions().
+ *
+ * Absence ⇒ the ADMIN baseline was NEVER initialised (fresh install / pre-seed)
+ * so the canonical FULL-registry floor applies (prevents administrative
+ * lockout). Presence ⇒ a stored zero-row ADMIN baseline is an explicit state and
+ * MUST be honoured literally.
+ *
+ * On ANY read error we return `false` (treat as never-initialised) so a
+ * transient DB fault can never lock the protected ADMIN role out of the system.
+ */
+async function isAdminRoleInitialized(): Promise<boolean> {
+  try {
+    const marker = await prisma.counter.findUnique({
+      where: { id: RBAC_ADMIN_INIT_SENTINEL_ID },
+      select: { id: true },
+    });
+    return marker !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Flag-aware super-administrator test.
  *
  * A plain `role === ADMIN` is NO LONGER treated as a super administrator.
@@ -98,11 +122,15 @@ export async function getRolePermissions(role: Role | null | undefined): Promise
       select: { permission: { select: { key: true } } },
     });
     let perms = rows.map((r) => r.permission.key);
-    // D4 — the ADMIN role MAXIMUM is the FULL canonical registry. An install
-    // with no stored ADMIN baseline rows (fresh / pre-seed) must never silently
-    // lose administrative capability, so the registry is the floor. A Super
-    // Administrator may still narrow the baseline by storing a non-empty set.
-    if (role === Role.ADMIN && perms.length === 0) perms = registryKeys();
+    // D4 — the ADMIN role MAXIMUM is the FULL canonical registry, applied ONLY
+    // as the floor for a genuinely UNINITIALISED ADMIN baseline (proven absent
+    // by the explicit RBAC_ADMIN_INIT_SENTINEL_ID marker). Once the baseline has
+    // been initialised, a stored zero-row set is honoured literally: an
+    // intentionally zero-permission ADMIN baseline is NEVER silently converted
+    // into full access.
+    if (role === Role.ADMIN && perms.length === 0 && !(await isAdminRoleInitialized())) {
+      perms = registryKeys();
+    }
     rolePermsCache.set(role, { ts: now, perms });
     return perms;
   } catch (e) {

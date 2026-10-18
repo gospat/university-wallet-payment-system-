@@ -942,8 +942,8 @@ router.use(restrictTo(Role.ADMIN, Role.BURSARY));
 
 router.get('/', requirePermission('VIEW_STUDENTS'), validateQuery(StudentQuerySchema), listStudents);
 router.post('/', requirePermission('CREATE_STUDENT'), validateBody(CreateStudentSchema), createStudent);
-router.get('/:id', getStudent);
-router.patch('/:id', validateBody(UpdateStudentSchema), updateStudent);
+router.get('/:id', requirePermission('VIEW_STUDENTS'), getStudent);
+router.patch('/:id', requirePermission('MANAGE_STUDENTS'), validateBody(UpdateStudentSchema), updateStudent);
 router.post('/:id/status', requirePermission('CREATE_STUDENT'), setStudentStatus);
 router.post('/:id/reset-password', requirePermission('MANAGE_USERS'), resetStudentPassword);
 const MatricParam = z.object({ matric: z.string().min(3).max(50).trim() });

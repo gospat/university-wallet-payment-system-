@@ -21,13 +21,18 @@ import { Role, AccountStatus } from '@prisma/client';
 const mockState: {
   users: Record<number, { id: number; role: Role; accountStatus: AccountStatus; isSuperAdmin?: boolean }>;
   rolePerms: Record<string, string[]>;
+  adminInitialized: boolean;
 } = {
   users: {
     9001: { id: 9001, role: Role.ADMIN, accountStatus: AccountStatus.ACTIVE, isSuperAdmin: true },
     9002: { id: 9002, role: Role.BURSARY, accountStatus: AccountStatus.ACTIVE },
     9003: { id: 9003, role: Role.STUDENT, accountStatus: AccountStatus.ACTIVE },
+    // 9004 = a NORMAL ADMIN: role=ADMIN but NOT flagged → governed by its
+    // effective permissions (the RBAC-hardening invariant).
+    9004: { id: 9004, role: Role.ADMIN, accountStatus: AccountStatus.ACTIVE, isSuperAdmin: false },
   },
   rolePerms: {},
+  adminInitialized: true,
 };
 
 jest.mock('../config/database', () => ({
@@ -42,6 +47,13 @@ jest.mock('../config/database', () => ({
         const keys = mockState.rolePerms[role] ?? [];
         return Promise.resolve(keys.map((key) => ({ permission: { key } })));
       }),
+    },
+    // The explicit RBAC_ADMIN_INIT_SENTINEL_ID marker written by seedPermissions().
+    // Present ⇒ a stored zero-row ADMIN baseline is honoured literally.
+    counter: {
+      findUnique: jest.fn(() =>
+        Promise.resolve(mockState.adminInitialized ? { id: 'rbac_admin_role_initialized_20261017' } : null),
+      ),
     },
   },
 }));
@@ -63,6 +75,7 @@ const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 const ADMIN_TOKEN = token(9001, Role.ADMIN);
 const BURSARY_TOKEN = token(9002, Role.BURSARY);
 const STUDENT_TOKEN = token(9003, Role.STUDENT);
+const NORMAL_ADMIN_TOKEN = token(9004, Role.ADMIN);
 
 /** Set the authoritative live RolePermission rows for a role. */
 const setRolePerms = (role: Role, keys: string[]) => {
@@ -101,12 +114,46 @@ app.get(`${API}/academic/levels`, protect, restrictTo(Role.ADMIN, Role.BURSARY),
   res.status(200).json({ ok: 1 }),
 );
 
+// ---------------------------------------------------------------------------
+// RBAC HARDENING — operational capability mirrors (admin.ts / reports.ts /
+// reconciliation.ts). Every one of these is reachable ONLY by a flagged Super
+// Admin or a holder of the named canonical capability; a NORMAL ADMIN with an
+// empty effective set is denied.
+// ---------------------------------------------------------------------------
+app.get(`${API}/admin/stats`, protect, restrictTo(Role.ADMIN), requirePermission('VIEW_DASHBOARD'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+app.get(`${API}/admin/email-delivery-logs`, protect, restrictTo(Role.ADMIN, Role.BURSARY), requirePermission('VIEW_EMAIL_DELIVERY_LOGS'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+app.get(`${API}/admin/email-templates/:key`, protect, restrictTo(Role.ADMIN), requirePermission('MANAGE_EMAIL_TEMPLATES'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+app.post(`${API}/admin/users/:id/resend-credentials`, protect, restrictTo(Role.ADMIN), requirePermission('RESEND_CREDENTIALS'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+// Reports EXPORT is a capability (NOT a bare ADMIN grant).
+app.get(`${API}/reports/collections/export`, protect, restrictTo(Role.ADMIN, Role.BURSARY), requirePermission('REPORTS_VIEW_COLLECTIONS'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+// Reconciliation internal-item creation needs BOTH view + run capabilities.
+app.post(`${API}/reconciliation/items/:reference/create-internal`, protect, restrictTo(Role.ADMIN, Role.BURSARY), requirePermission('VIEW_RECONCILIATION'), requirePermission('RUN_RECONCILIATION'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+// Academic structure mutations require the ADMIN-only canonical capability.
+app.post(`${API}/academic/faculties`, protect, restrictTo(Role.ADMIN), requirePermission('MANAGE_ACADEMIC_STRUCTURE'), (_r, res) =>
+  res.status(200).json({ ok: 1 }),
+);
+// Personal-account surface: authentication only, NO capability required.
+app.get(`${API}/auth/me`, protect, (_r, res) => res.status(200).json({ ok: 1 }));
+
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(err?.statusCode ?? err?.status ?? 500).json({ status: 'error', message: err?.message ?? 'error' });
 });
 
 beforeEach(() => {
   mockState.rolePerms = {};
+  mockState.adminInitialized = true;
   bumpRolePermsVersion();
 });
 
@@ -248,5 +295,115 @@ describe('restrictTo — hard role boundary', () => {
     setRolePerms(Role.STUDENT, ['VIEW_STUDENTS']);
     const res = await request(app).get(`${API}/students`).set(auth(STUDENT_TOKEN));
     expect(res.status).toBe(403);
+  });
+});
+
+// ===========================================================================
+// RBAC SECURITY HARDENING — role=ADMIN no longer implies unrestricted access.
+// "Only role=ADMIN && isSuperAdmin=true may bypass granular operational
+//  permissions. A normal ADMIN must be governed by its effective permissions
+//  everywhere."  (9004 is a normal, unflagged ADMIN.)
+// ===========================================================================
+describe('HARDENING — normal ADMIN is governed by its effective permissions', () => {
+  it('a zero-permission normal ADMIN is DENIED on every operational capability route', async () => {
+    setRolePerms(Role.ADMIN, []); // stored zero-row ADMIN baseline (sentinel present ⇒ honoured literally)
+    const requests: Array<[string, 'get' | 'post']> = [
+      ['/admin/stats', 'get'],
+      ['/admin/email-delivery-logs', 'get'],
+      ['/admin/email-templates/welcome', 'get'],
+      ['/admin/users/9003/resend-credentials', 'post'],
+      ['/reports/collections/export', 'get'],
+      ['/reconciliation/items/REF-1/create-internal', 'post'],
+      ['/academic/faculties', 'post'],
+    ];
+    for (const [path, method] of requests) {
+      const res = await (request(app) as any)[method](`${API}${path}`).set(auth(NORMAL_ADMIN_TOKEN));
+      expect({ path, status: res.status }).toEqual({ path, status: 403 });
+    }
+  });
+
+  it('a normal ADMIN HOLDING the named capability is ALLOWED', async () => {
+    setRolePerms(Role.ADMIN, ['VIEW_DASHBOARD']);
+    expect((await request(app).get(`${API}/admin/stats`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(200);
+    // ...but a capability it does NOT hold is still denied.
+    expect((await request(app).get(`${API}/admin/email-delivery-logs`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+  });
+
+  it('capability is per-endpoint — one ADMIN capability never implies another', async () => {
+    setRolePerms(Role.ADMIN, ['MANAGE_EMAIL_TEMPLATES']);
+    expect((await request(app).get(`${API}/admin/email-templates/welcome`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(200);
+    expect((await request(app).get(`${API}/admin/email-delivery-logs`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+    expect((await request(app).post(`${API}/admin/users/9003/resend-credentials`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+    expect((await request(app).get(`${API}/reports/collections/export`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+  });
+
+  it('multi-capability route needs BOTH capabilities (reconciliation create-internal)', async () => {
+    setRolePerms(Role.ADMIN, ['VIEW_RECONCILIATION']);
+    expect((await request(app).post(`${API}/reconciliation/items/REF-1/create-internal`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+    setRolePerms(Role.ADMIN, ['VIEW_RECONCILIATION', 'RUN_RECONCILIATION']);
+    expect((await request(app).post(`${API}/reconciliation/items/REF-1/create-internal`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(200);
+  });
+
+  it('personal-account surface stays reachable for a zero-permission ADMIN', async () => {
+    setRolePerms(Role.ADMIN, []);
+    const res = await request(app).get(`${API}/auth/me`).set(auth(NORMAL_ADMIN_TOKEN));
+    expect(res.status).toBe(200);
+  });
+
+  it('a stale token claiming capabilities cannot widen a normal ADMIN', async () => {
+    setRolePerms(Role.ADMIN, []);
+    const stale = token(9004, Role.ADMIN, ['VIEW_DASHBOARD', 'MANAGE_EMAIL_TEMPLATES', 'RESEND_CREDENTIALS']);
+    expect((await request(app).get(`${API}/admin/stats`).set(auth(stale))).status).toBe(403);
+  });
+});
+
+describe('HARDENING — Super Admin regression (flagged ADMIN keeps the bypass)', () => {
+  it('flagged ADMIN bypasses EVERY operational capability route with ZERO rows', async () => {
+    setRolePerms(Role.ADMIN, []);
+    const requests: Array<[string, 'get' | 'post']> = [
+      ['/admin/stats', 'get'],
+      ['/admin/email-delivery-logs', 'get'],
+      ['/admin/email-templates/welcome', 'get'],
+      ['/admin/users/9003/resend-credentials', 'post'],
+      ['/reports/collections/export', 'get'],
+      ['/reconciliation/items/REF-1/create-internal', 'post'],
+      ['/academic/faculties', 'post'],
+    ];
+    for (const [path, method] of requests) {
+      const res = await (request(app) as any)[method](`${API}${path}`).set(auth(ADMIN_TOKEN));
+      expect({ path, status: res.status }).toEqual({ path, status: 200 });
+    }
+  });
+});
+
+describe('HARDENING — BURSARY regression (capability-gated, never ADMIN-inherited)', () => {
+  it('BURSARY with VIEW_EMAIL_DELIVERY_LOGS reads the delivery log (200)', async () => {
+    setRolePerms(Role.BURSARY, ['VIEW_EMAIL_DELIVERY_LOGS']);
+    expect((await request(app).get(`${API}/admin/email-delivery-logs`).set(auth(BURSARY_TOKEN))).status).toBe(200);
+  });
+
+  it('BURSARY without MANAGE_EMAIL_TEMPLATES is denied template administration (403)', async () => {
+    setRolePerms(Role.BURSARY, ['VIEW_EMAIL_DELIVERY_LOGS']);
+    expect((await request(app).get(`${API}/admin/email-templates/welcome`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+  });
+
+  it('BURSARY cannot reach ADMIN-only academic structure even with a forged row (403)', async () => {
+    setRolePerms(Role.BURSARY, ['MANAGE_ACADEMIC_STRUCTURE']);
+    expect((await request(app).post(`${API}/academic/faculties`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+  });
+});
+
+describe('HARDENING — ADMIN baseline initialisation is deterministic (sentinel)', () => {
+  it('sentinel PRESENT + zero rows ⇒ zero permissions (no silent full-registry escalation)', async () => {
+    mockState.adminInitialized = true;
+    setRolePerms(Role.ADMIN, []);
+    expect((await request(app).get(`${API}/admin/stats`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+  });
+
+  it('sentinel ABSENT + zero rows ⇒ canonical full-registry floor (prevents administrative lockout)', async () => {
+    mockState.adminInitialized = false;
+    setRolePerms(Role.ADMIN, []);
+    expect((await request(app).get(`${API}/admin/stats`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(200);
+    mockState.adminInitialized = true; // restored by beforeEach on the next test
   });
 });

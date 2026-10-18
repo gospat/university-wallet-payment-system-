@@ -42,7 +42,7 @@ import {
   buildErrorsCsv,
   BulkKind,
 } from '../services/academicBulkImport';
-import { assertCanManageTemplates } from '../utils/templateAuth';
+import { assertCanManageTemplates, sendTemplateAuthFailure } from '../utils/templateAuth';
 
 const router = express.Router();
 
@@ -146,9 +146,13 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 router.get(
   '/faculties/template.csv',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
+    // Academic structure is an ADMIN-only domain (every mutation and bulk
+    // import is restrictTo('ADMIN')); the import template download follows the
+    // same boundary AND requires the canonical capability, so a normal
+    // zero-permission ADMIN cannot download it.
+    const auth = await assertCanManageTemplates(req, ['ADMIN'], 'MANAGE_ACADEMIC_STRUCTURE', { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
-      return res.status(401).type('text/html').send(auth.html!);
+      return sendTemplateAuthFailure(res, auth);
     }
     const t = downloadTemplateCsv('college');
     res.attachment(t.filename);
@@ -161,9 +165,13 @@ router.get(
 router.get(
   '/faculties/template.xlsx',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
+    // Academic structure is an ADMIN-only domain (every mutation and bulk
+    // import is restrictTo('ADMIN')); the import template download follows the
+    // same boundary AND requires the canonical capability, so a normal
+    // zero-permission ADMIN cannot download it.
+    const auth = await assertCanManageTemplates(req, ['ADMIN'], 'MANAGE_ACADEMIC_STRUCTURE', { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
-      return res.status(401).type('text/html').send(auth.html!);
+      return sendTemplateAuthFailure(res, auth);
     }
     const t = await downloadTemplateXlsx('college');
     res.attachment(t.filename);
@@ -177,9 +185,13 @@ router.get(
 router.get(
   '/departments/template.csv',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
+    // Academic structure is an ADMIN-only domain (every mutation and bulk
+    // import is restrictTo('ADMIN')); the import template download follows the
+    // same boundary AND requires the canonical capability, so a normal
+    // zero-permission ADMIN cannot download it.
+    const auth = await assertCanManageTemplates(req, ['ADMIN'], 'MANAGE_ACADEMIC_STRUCTURE', { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
-      return res.status(401).type('text/html').send(auth.html!);
+      return sendTemplateAuthFailure(res, auth);
     }
     const t = downloadTemplateCsv('department');
     res.attachment(t.filename);
@@ -192,9 +204,13 @@ router.get(
 router.get(
   '/departments/template.xlsx',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
+    // Academic structure is an ADMIN-only domain (every mutation and bulk
+    // import is restrictTo('ADMIN')); the import template download follows the
+    // same boundary AND requires the canonical capability, so a normal
+    // zero-permission ADMIN cannot download it.
+    const auth = await assertCanManageTemplates(req, ['ADMIN'], 'MANAGE_ACADEMIC_STRUCTURE', { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
-      return res.status(401).type('text/html').send(auth.html!);
+      return sendTemplateAuthFailure(res, auth);
     }
     const t = await downloadTemplateXlsx('department');
     res.attachment(t.filename);
@@ -208,9 +224,13 @@ router.get(
 router.get(
   '/programmes/template.csv',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
+    // Academic structure is an ADMIN-only domain (every mutation and bulk
+    // import is restrictTo('ADMIN')); the import template download follows the
+    // same boundary AND requires the canonical capability, so a normal
+    // zero-permission ADMIN cannot download it.
+    const auth = await assertCanManageTemplates(req, ['ADMIN'], 'MANAGE_ACADEMIC_STRUCTURE', { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
-      return res.status(401).type('text/html').send(auth.html!);
+      return sendTemplateAuthFailure(res, auth);
     }
     const t = downloadTemplateCsv('programme');
     res.attachment(t.filename);
@@ -223,9 +243,13 @@ router.get(
 router.get(
   '/programmes/template.xlsx',
   catchAsync(async (req: Request, res: Response) => {
-    const auth = await assertCanManageTemplates(req, ['ADMIN', 'BURSARY'], { frontendUrl: FRONTEND_URL });
+    // Academic structure is an ADMIN-only domain (every mutation and bulk
+    // import is restrictTo('ADMIN')); the import template download follows the
+    // same boundary AND requires the canonical capability, so a normal
+    // zero-permission ADMIN cannot download it.
+    const auth = await assertCanManageTemplates(req, ['ADMIN'], 'MANAGE_ACADEMIC_STRUCTURE', { frontendUrl: FRONTEND_URL });
     if (!auth.ok) {
-      return res.status(401).type('text/html').send(auth.html!);
+      return sendTemplateAuthFailure(res, auth);
     }
     const t = await downloadTemplateXlsx('programme');
     res.attachment(t.filename);
@@ -236,6 +260,26 @@ router.get(
 );
 
 router.use(protect);
+
+// Academic-structure MANAGEMENT capability. Every mutation in this router
+// (create / update / delete / deactivate / bulk-import) and the bulk-import
+// error-file download is gated by the canonical MANAGE_ACADEMIC_STRUCTURE
+// capability IN ADDITION to each route's existing restrictTo('ADMIN') boundary.
+// Reads (list/detail) keep their own VIEW_* guards and are NOT gated here.
+// STUDENT-CATEGORY mutations are exempt: they are governed by MANAGE_STUDENTS.
+// A normal ADMIN must actually hold the capability; a zero-permission ADMIN is
+// denied; a flag-aware Super Admin passes via the centralised bypass.
+const ACADEMIC_MANAGE_EXEMPT = /^\/student-categories(\/|$)/;
+const ACADEMIC_IMPORT_ERROR_DOWNLOAD = /^\/_errors(\/|$)/;
+router.use((req, res, next) => {
+  if (ACADEMIC_MANAGE_EXEMPT.test(req.path)) return next();
+  const isMutation = req.method !== 'GET';
+  const isImportErrorDownload = req.method === 'GET' && ACADEMIC_IMPORT_ERROR_DOWNLOAD.test(req.path);
+  if (isMutation || isImportErrorDownload) {
+    return requirePermission('MANAGE_ACADEMIC_STRUCTURE')(req, res, next);
+  }
+  return next();
+});
 
 // ============ FACULTY ============
 router.get(

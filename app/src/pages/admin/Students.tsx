@@ -222,7 +222,12 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const viewMode = searchParams.get('view') ?? 'list';
-  const canBulk = role === 'ADMIN';
+  // ADMIN role boundary + the canonical BULK_UPLOAD_STUDENTS capability. A
+  // NORMAL ADMIN without it cannot bulk-import; only a PROTECTED SUPER ADMIN
+  // bypasses the capability.
+  const bulkPerms = ((user as any)?.permissions as string[] | undefined) ?? [];
+  const bulkIsSuper = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
+  const canBulk = role === 'ADMIN' && (bulkIsSuper || bulkPerms.includes('BULK_UPLOAD_STUDENTS'));
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   void goBack;
   void dashboardTo;

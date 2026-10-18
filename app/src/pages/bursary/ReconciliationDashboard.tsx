@@ -108,8 +108,11 @@ const ReconciliationDashboardPage: React.FC<ReconciliationDashboardPageProps> = 
 }) => {
   const { user } = useAuth();
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
-  const canView = role === 'ADMIN' || userPerms.includes('VIEW_RECONCILIATION');
-  const canExport = role === 'ADMIN' || userPerms.includes('VIEW_RECONCILIATION_REPORTS');
+  // Flag-aware: only a PROTECTED SUPER ADMIN bypasses; a NORMAL ADMIN is
+  // governed by its effective permissions exactly like BURSARY.
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
+  const canView = isSuperAdmin || userPerms.includes('VIEW_RECONCILIATION');
+  const canExport = isSuperAdmin || userPerms.includes('VIEW_RECONCILIATION_REPORTS');
 
   const today = useMemo(() => new Date(), []);
   const firstOfMonth = useMemo(() => new Date(today.getFullYear(), today.getMonth(), 1), [today]);

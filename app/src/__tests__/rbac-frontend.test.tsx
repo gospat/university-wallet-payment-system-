@@ -106,7 +106,7 @@ vi.mock('../services/adminApi', () => ({
   permissionsApi: { list: (...a: any[]) => permsListMock(...a) },
 }));
 
-import { hasPermission, RequirePermission } from '../components/PrivateRoute';
+import { hasPermission, hasAnyPermission, RequirePermission } from '../components/PrivateRoute';
 import PrivateRoute from '../components/PrivateRoute';
 import RolesPage from '../pages/admin/Roles';
 import PermissionsPage from '../pages/admin/Permissions';
@@ -244,6 +244,80 @@ describe('permission-aware routing (brief §12, §13)', () => {
     currentUser = { role: 'BURSARY', permissions: ['VIEW_PAYMENTS'] };
     await render(<PrivateRoute roles={['BURSARY']} permission="VIEW_PAYMENTS" />);
     expect(container.querySelector('[data-testid="outlet"]')).not.toBeNull();
+  });
+});
+
+// ===========================================================================
+describe('RBAC HARDENING — operational capability guards (role=ADMIN is not a bypass)', () => {
+  // The canonical operational keys now enforced by the backend. A normal ADMIN
+  // (unflagged) must pass a guard ONLY when it actually holds the capability.
+  const OPERATIONAL_KEYS = [
+    'VIEW_DASHBOARD',
+    'VIEW_EMAIL_DELIVERY_LOGS',
+    'MANAGE_EMAIL_TEMPLATES',
+    'RESEND_CREDENTIALS',
+    'MANAGE_ACADEMIC_STRUCTURE',
+    'REPORTS_VIEW_COLLECTIONS',
+    'RUN_RECONCILIATION',
+  ];
+
+  it('hasAnyPermission — empty array is ZERO, a super admin always passes', () => {
+    expect(hasAnyPermission({ role: 'ADMIN', isSuperAdmin: true, permissions: [] } as any, OPERATIONAL_KEYS)).toBe(true);
+    expect(hasAnyPermission({ role: 'ADMIN', permissions: [] } as any, OPERATIONAL_KEYS)).toBe(false);
+    expect(hasAnyPermission({ role: 'ADMIN', permissions: undefined } as any, OPERATIONAL_KEYS)).toBe(false);
+    expect(hasAnyPermission({ role: 'BURSARY', permissions: ['REPORTS_VIEW_COLLECTIONS'] } as any, OPERATIONAL_KEYS)).toBe(true);
+    expect(hasAnyPermission({ role: 'BURSARY', permissions: ['VIEW_STUDENTS'] } as any, OPERATIONAL_KEYS)).toBe(false);
+  });
+
+  it('hasAnyPermission — prefix matching never admits EXPORT/SCHEDULE report keys', () => {
+    expect(hasAnyPermission({ role: 'BURSARY', permissions: ['REPORTS_VIEW_REVENUE'] } as any, undefined, 'REPORTS_VIEW_')).toBe(true);
+    expect(hasAnyPermission({ role: 'BURSARY', permissions: ['REPORTS_EXPORT_PDF'] } as any, undefined, 'REPORTS_VIEW_')).toBe(false);
+    expect(hasAnyPermission({ role: 'BURSARY', permissions: ['REPORTS_SCHEDULE'] } as any, undefined, 'REPORTS_VIEW_')).toBe(false);
+  });
+
+  it('a zero-permission normal ADMIN is denied every operational guard', async () => {
+    currentUser = { role: 'ADMIN', permissions: [] };
+    for (const permission of OPERATIONAL_KEYS) {
+      await render(<RequirePermission permission={permission}><div>secret</div></RequirePermission>);
+      expect({ permission, denied: container.textContent?.includes('Access Denied') }).toEqual({ permission, denied: true });
+      expect(container.textContent).not.toContain('secret');
+    }
+  });
+
+  it('a normal ADMIN passes a guard only for the capability it holds', async () => {
+    currentUser = { role: 'ADMIN', permissions: ['MANAGE_EMAIL_TEMPLATES'] };
+    await render(<RequirePermission permission="MANAGE_EMAIL_TEMPLATES"><div>secret</div></RequirePermission>);
+    expect(container.textContent).toContain('secret');
+
+    await render(<RequirePermission permission="VIEW_DASHBOARD"><div>secret</div></RequirePermission>);
+    expect(container.textContent).toContain('Access Denied');
+  });
+
+  it('a BURSARY session holding a capability is admitted to that guard only', async () => {
+    currentUser = { role: 'BURSARY', permissions: ['VIEW_EMAIL_DELIVERY_LOGS'] };
+    await render(<RequirePermission permission="VIEW_EMAIL_DELIVERY_LOGS"><div>secret</div></RequirePermission>);
+    expect(container.textContent).toContain('secret');
+
+    await render(<RequirePermission permission="VIEW_DASHBOARD"><div>secret</div></RequirePermission>);
+    expect(container.textContent).toContain('Access Denied');
+  });
+
+  it('PrivateRoute enforces the ADMIN role boundary AND the VIEW_DASHBOARD capability', async () => {
+    currentUser = { role: 'ADMIN', permissions: [] };
+    await render(<PrivateRoute roles={['ADMIN']} permission="VIEW_DASHBOARD" />);
+    expect(container.textContent).toContain('Access Denied');
+
+    currentUser = { role: 'ADMIN', permissions: ['VIEW_DASHBOARD'] };
+    await render(<PrivateRoute roles={['ADMIN']} permission="VIEW_DASHBOARD" />);
+    expect(container.querySelector('[data-testid="outlet"]')).not.toBeNull();
+  });
+
+  it('a protected SUPER ADMIN passes every operational guard without explicit permissions', async () => {
+    currentUser = { role: 'ADMIN', isSuperAdmin: true, permissions: [] };
+    for (const permission of OPERATIONAL_KEYS) {
+      await render(<RequirePermission permission={permission}><div>secret</div></RequirePermission>);
+      expect({ permission, ok: container.textContent?.includes('secret') }).toEqual({ permission, ok: true });
+    }
   });
 });
 

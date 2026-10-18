@@ -71,7 +71,11 @@ const FacultiesPage: React.FC = () => {
   });
 
   const portalRole: 'ADMIN' | 'BURSARY' = user?.role === 'BURSARY' ? 'BURSARY' : 'ADMIN';
-  const canWrite = portalRole === 'ADMIN';
+  // ADMIN role boundary + the canonical MANAGE_ACADEMIC_STRUCTURE capability.
+  // A NORMAL ADMIN without it cannot write; only a PROTECTED SUPER ADMIN bypasses.
+  const acadPerms = (user?.permissions as string[] | undefined) ?? [];
+  const acadIsSuper = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
+  const canWrite = portalRole === 'ADMIN' && (acadIsSuper || acadPerms.includes('MANAGE_ACADEMIC_STRUCTURE'));
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);

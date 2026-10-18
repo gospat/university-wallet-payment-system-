@@ -21,8 +21,11 @@ import {
 type Role = 'BURSARY' | 'ADMIN';
 export interface ExportCentrePageProps { role: Role; activePath: string; }
 
-const hasPerm = (p: string, perms?: string[], role?: Role) => {
-  if (role === 'ADMIN') return true;
+// Flag-aware capability check. Only a PROTECTED SUPER ADMIN
+// (`role === 'ADMIN' && isSuperAdmin === true`) bypasses; a NORMAL ADMIN is
+// evaluated against its effective permissions exactly like BURSARY.
+const hasPerm = (p: string, perms?: string[], isSuperAdmin?: boolean) => {
+  if (isSuperAdmin === true) return true;
   return perms?.includes(p) ?? false;
 };
 
@@ -70,6 +73,7 @@ const ExportCentrePage: React.FC<ExportCentrePageProps> = ({ role, activePath })
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const userPerms = (user?.permissions as string[] | undefined) ?? [];
+  const isSuperAdmin = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
@@ -107,8 +111,8 @@ const ExportCentrePage: React.FC<ExportCentrePageProps> = ({ role, activePath })
     window.setTimeout(() => setToast((t) => (t && t.text === text ? null : t)), ms);
   };
 
-  const canXlsx = hasPerm('REPORTS_EXPORT_EXCEL', userPerms, role);
-  const canPdf = hasPerm('REPORTS_EXPORT_PDF', userPerms, role);
+  const canXlsx = hasPerm('REPORTS_EXPORT_EXCEL', userPerms, isSuperAdmin);
+  const canPdf = hasPerm('REPORTS_EXPORT_PDF', userPerms, isSuperAdmin);
 
   const downloadExport = async (row: any) => {
     const id = row.reportUuid || row.uuid || row.id;
@@ -131,7 +135,7 @@ const ExportCentrePage: React.FC<ExportCentrePageProps> = ({ role, activePath })
 
   const runExport = async (format: 'xlsx' | 'pdf') => {
     const perm = format === 'xlsx' ? 'REPORTS_EXPORT_EXCEL' : 'REPORTS_EXPORT_PDF';
-    if (!hasPerm(perm, userPerms, role)) { fireToast('err', `Missing permission ${perm}`); return; }
+    if (!hasPerm(perm, userPerms, isSuperAdmin)) { fireToast('err', `Missing permission ${perm}`); return; }
     try {
       setExporting(format);
       const resp = await api.post(`/reports/export-centre/export?format=${format}`, {}, { responseType: 'blob', timeout: 120000 });
