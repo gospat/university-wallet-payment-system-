@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import api, { onAuthExpired, setAuthTokenPersistence } from '../services/api';
 import { mapRoleToDashboard, mapRoleToLogin, type Role } from '../config/session';
+import { getAccessToken, setAccessToken, clearAccessToken } from '../utils/tokenStore';
 
 interface User {
   id: number;
@@ -49,7 +50,6 @@ interface User {
 interface AuthContextType {
   user: User | null;
   token: string | null;
-  refreshToken: string | null;
   login: (token: string, user: User, refreshToken?: string | null) => void;
   refresh: () => Promise<boolean>;
   logout: (reason?: 'SESSION_EXPIRED' | 'LOGOUT' | 'ACCOUNT_INACTIVE') => Promise<void>;
@@ -63,14 +63,35 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const STORAGE_TOKEN = 'token';
-const STORAGE_REFRESH = 'refreshToken';
 const STORAGE_USER = 'user';
 const STORAGE_NOTICE = 'auth_notice';
 const STORAGE_LOGIN_AT = 'login_at';
+// ---------------------------------------------------------------------------
+// LEGACY TOKEN KEYS (requirement 10 — migration cleanup)
+// ---------------------------------------------------------------------------
+// Pre-migration builds persisted BOTH the access token (`token`) and the
+// refresh token (`refreshToken`) in script-accessible `localStorage`. Neither
+// is read any more: the access token now lives ONLY in memory and the refresh
+// token ONLY in an HttpOnly cookie. These keys are purged so a stale credential
+// can never be replayed from localStorage.
+// ---------------------------------------------------------------------------
+const LEGACY_TOKEN_KEY = 'token';
+const LEGACY_REFRESH_KEY = 'refreshToken';
 
-export { STORAGE_TOKEN, STORAGE_USER, STORAGE_NOTICE, STORAGE_REFRESH, STORAGE_LOGIN_AT };
+export { STORAGE_TOKEN, STORAGE_USER, STORAGE_NOTICE, STORAGE_LOGIN_AT };
 
 const isBrowser = typeof window !== 'undefined';
+
+/** Purge any token material written by pre-migration builds. */
+const purgeLegacyTokenStorage = (): void => {
+  if (!isBrowser) return;
+  try {
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_REFRESH_KEY);
+  } catch {
+    /* ignore */
+  }
+};
 
 // ============================================================================
 // JWT HELPERS — decode the access token's HS256 payload WITHOUT external deps.
@@ -188,118 +209,90 @@ const readStorageUser = (): User | null => {
     const raw = localStorage.getItem(STORAGE_USER);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as User;
-    // Even if cached user object may have stale / empty permissions. Always prefer the
-    // current token's signed claims (permissions above the cached copy we read) to avoid the
-    // exact same bug reported: user logs in and sidebar is cached user on the sidebar collapse.
-    const tokenNow = readStorageToken();
-    return mergeTokenPermissionsIntoUser(parsed, tokenNow);
+    // Always prefer the current in-memory access token's signed claims over the
+    // cached copy to avoid a stale-permissions sidebar. On a cold load the
+    // in-memory token is empty until the silent cookie restore completes, in
+    // which case the cached (already-enriched) user is returned unchanged.
+    return mergeTokenPermissionsIntoUser(parsed, getAccessToken());
   } catch (_) {
     return null;
   }
 };
 
-const readStorageToken = (): string | null => {
-  if (!isBrowser) return null;
-  return localStorage.getItem(STORAGE_TOKEN);
-};
-
-const readStorageRefresh = (): string | null => {
-  if (!isBrowser) return null;
-  return localStorage.getItem(STORAGE_REFRESH);
+type RefreshResponse = {
+  status?: string;
+  data?: { user?: User };
+  accessToken?: string;
+  token?: string;
 };
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(() => readStorageUser());
-  const [token, setToken] = useState<string | null>(() => readStorageToken());
-  const [refreshToken, setRefreshToken] = useState<string | null>(() => readStorageRefresh());
+  // The access token lives ONLY in memory (never localStorage). On a cold load it
+  // starts empty and is restored from the HttpOnly refresh cookie by the silent
+  // boot restore below.
+  const [token, setToken] = useState<string | null>(() => getAccessToken());
   const [isValidating, setIsValidating] = useState<boolean>(true);
   const [authNotice, setAuthNotice] = useState<string | null>(
     () => (isBrowser ? localStorage.getItem(STORAGE_NOTICE) : null)
   );
+  // Flips true once the one-time silent cookie restore has finished, so a reload
+  // never flashes the login page before the restore attempt resolves.
+  const [bootChecked, setBootChecked] = useState<boolean>(false);
   const mountedRef = useRef(true);
-  const refreshPromiseRef = useRef<Promise<boolean> | null>(null);
+  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
   const logoutInFlightRef = useRef(false);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    setAuthTokenPersistence({
-      getAccessToken: readStorageToken,
-      getRefreshToken: readStorageRefresh,
-      setTokens: (accessToken, refreshTokenNew) => {
-        if (!isBrowser) return;
-        if (accessToken) localStorage.setItem(STORAGE_TOKEN, accessToken);
-        else localStorage.removeItem(STORAGE_TOKEN);
-        if (refreshTokenNew) localStorage.setItem(STORAGE_REFRESH, refreshTokenNew);
-        else localStorage.removeItem(STORAGE_REFRESH);
-        setToken(accessToken ?? null);
-        setRefreshToken(refreshTokenNew ?? null);
-      },
-      clearAll: () => {
-        if (!isBrowser) return;
-        localStorage.removeItem(STORAGE_TOKEN);
-        localStorage.removeItem(STORAGE_REFRESH);
-        localStorage.removeItem(STORAGE_USER);
-        setToken(null);
-        setRefreshToken(null);
-        setUser(null);
-      },
-      onRefreshRequired: async (): Promise<{ accessToken: string; refreshToken: string } | null> => {
-        if (refreshPromiseRef.current) {
-          return refreshPromiseRef.current.then((ok) => {
-            if (!ok) return null;
-            return { accessToken: readStorageToken() || '', refreshToken: readStorageRefresh() || '' };
-          });
+  /**
+   * Exchange the HttpOnly refresh cookie for a fresh access token.
+   *
+   * The refresh credential is NEVER exposed to JS: the browser attaches the
+   * cookie automatically (withCredentials) and the server returns the rotated
+   * refresh token as another HttpOnly cookie. Only the short-lived access token
+   * is retained — and only in memory. Concurrent callers share one in-flight
+   * request; the request carries NO body.
+   */
+  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+
+    const attempt = (async (): Promise<string | null> => {
+      try {
+        // NO request body — the HttpOnly cookie IS the credential. The
+        // `__skipAuthRefresh` flag stops the shared client's 401 interceptor
+        // from recursing back into this same refresh path.
+        const res = await api.post<RefreshResponse>('/auth/refresh', undefined, {
+          __skipAuthRefresh: true,
+        } as any);
+        const newAccess = res.data?.accessToken ?? res.data?.token ?? null;
+        if (!newAccess) return null;
+        setAccessToken(newAccess);
+        setToken(newAccess);
+        const freshUser = (res.data?.data?.user as User | undefined) ?? null;
+        if (freshUser) {
+          // Token permissions are the canonical authority; the refresh response
+          // body may omit them.
+          setUser(enrichAndStoreUser(freshUser, newAccess));
         }
-        refreshPromiseRef.current = (async () => {
-          try {
-            const rt = readStorageRefresh();
-            if (!rt) return false;
-            const res = await api.post<{ status: string; data?: { user?: User }; accessToken?: string; refreshToken?: string; token?: string }>(
-              '/auth/refresh',
-              { refreshToken: rt },
-            );
-            const newAccess = res.data?.accessToken ?? res.data?.token ?? null;
-            const newRefresh = res.data?.refreshToken ?? null;
-            if (!newAccess) return false;
-            if (isBrowser) {
-              localStorage.setItem(STORAGE_TOKEN, newAccess);
-              if (newRefresh) localStorage.setItem(STORAGE_REFRESH, newRefresh);
-              const freshUser = (res.data?.data?.user as User | undefined) ?? null;
-              if (freshUser) {
-                // Merge signed token permissions into freshUser before persisting + setState.
-                // Token perms are the canonical authority; /auth/refresh response object may omit them.
-                const enriched = enrichAndStoreUser(freshUser, newAccess);
-                setUser(enriched);
-              }
-            }
-            setToken(newAccess);
-            setRefreshToken(newRefresh);
-            return true;
-          } catch {
-            return false;
-          } finally {
-            refreshPromiseRef.current = null;
-          }
-        })();
-        const ok = await refreshPromiseRef.current;
-        if (!ok) return null;
-        return { accessToken: readStorageToken() || '', refreshToken: readStorageRefresh() || '' };
-      },
-      onAuthExpired: () => {
-        fireLogoutNotice('SESSION_EXPIRED');
-      },
-    });
-    return () => {
-      mountedRef.current = false;
-    };
+        return newAccess;
+      } catch {
+        return null;
+      }
+    })();
+
+    refreshPromiseRef.current = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (refreshPromiseRef.current === attempt) refreshPromiseRef.current = null;
+    }
   }, []);
 
   const fireLogoutNotice = useCallback(
     (reason: 'SESSION_EXPIRED' | 'LOGOUT' | 'ACCOUNT_INACTIVE') => {
+      clearAccessToken();
       if (isBrowser) {
-        localStorage.removeItem(STORAGE_TOKEN);
-        localStorage.removeItem(STORAGE_REFRESH);
         localStorage.removeItem(STORAGE_USER);
+        purgeLegacyTokenStorage();
         if (reason === 'SESSION_EXPIRED') {
           localStorage.setItem(STORAGE_NOTICE, 'Your session has expired. Please log in again.');
         } else if (reason === 'ACCOUNT_INACTIVE') {
@@ -309,7 +302,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
       setToken(null);
-      setRefreshToken(null);
       setUser(null);
       setIsValidating(false);
       if (reason === 'SESSION_EXPIRED') {
@@ -345,32 +337,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (isBrowser) {
           localStorage.setItem(STORAGE_NOTICE, 'Your account is no longer active.');
         }
+        clearAccessToken();
         setToken(null);
-        setRefreshToken(null);
         setUser(null);
         if (isBrowser) {
-          localStorage.removeItem(STORAGE_TOKEN);
-          localStorage.removeItem(STORAGE_REFRESH);
           localStorage.removeItem(STORAGE_USER);
+          purgeLegacyTokenStorage();
         }
         setIsValidating(false);
         return;
       }
-      // Merge signed token permissions into fresh user. The /auth/me response safeUserSelect
-      // currently omits the permissions field entirely; our decode-token helper fills that gap.
-      const currentToken = readStorageToken();
-      const enriched = enrichAndStoreUser(fresh, currentToken);
-      setUser(enriched);
+      // Merge signed token permissions into fresh user. The /auth/me response
+      // safeUserSelect omits the permissions field; the decode-token helper fills
+      // that gap from the in-memory access token.
+      setUser(enrichAndStoreUser(fresh, getAccessToken()));
     } catch (err: any) {
       if (!mountedRef.current) return;
       if (err && (err.statusCode === 401 || err.statusCode === 403)) {
+        clearAccessToken();
         setToken(null);
-        setRefreshToken(null);
         setUser(null);
         if (isBrowser) {
-          localStorage.removeItem(STORAGE_TOKEN);
-          localStorage.removeItem(STORAGE_REFRESH);
           localStorage.removeItem(STORAGE_USER);
+          purgeLegacyTokenStorage();
         }
         const msg =
           err.statusCode === 403
@@ -386,6 +375,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  // Register the shared API client's auth bridge and purge any token material
+  // persisted by pre-migration builds. The bridge NEVER hands the refresh token
+  // to the client — the HttpOnly cookie is managed entirely by the browser.
+  useEffect(() => {
+    mountedRef.current = true;
+    purgeLegacyTokenStorage();
+    setAuthTokenPersistence({
+      getAccessToken,
+      setTokens: (accessToken) => {
+        setAccessToken(accessToken);
+        setToken(accessToken ?? null);
+      },
+      clearAll: () => {
+        clearAccessToken();
+        if (isBrowser) {
+          try { localStorage.removeItem(STORAGE_USER); } catch { /* ignore */ }
+        }
+        purgeLegacyTokenStorage();
+        setToken(null);
+        setUser(null);
+      },
+      onRefreshRequired: async (): Promise<{ accessToken: string } | null> => {
+        const accessToken = await refreshAccessToken();
+        return accessToken ? { accessToken } : null;
+      },
+      onAuthExpired: () => {
+        fireLogoutNotice('SESSION_EXPIRED');
+      },
+    });
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [refreshAccessToken, fireLogoutNotice]);
+
   useEffect(() => {
     if (authNotice) {
       const t = window.setTimeout(() => {
@@ -396,10 +419,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [authNotice]);
 
+  // -------------------------------------------------------------------------
+  // SILENT SESSION RESTORE (requirement 10)
+  // -------------------------------------------------------------------------
+  // The access token is memory-only, so a page reload starts with no bearer
+  // token. If a previous session left a cached identity, silently exchange the
+  // HttpOnly refresh cookie for a fresh access token; a genuinely signed-out
+  // visitor is skipped (no needless probe).
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!getAccessToken() && readStorageUser()) {
+          await refreshAccessToken();
+        }
+      } finally {
+        if (mountedRef.current) setBootChecked(true);
+      }
+    })();
+  }, [refreshAccessToken]);
+
   useEffect(() => {
     let cancelled = false;
     if (!token) {
-      setIsValidating(false);
+      // Delay the "signed out" conclusion until the boot restore has resolved.
+      if (bootChecked) setIsValidating(false);
       return;
     }
     setIsValidating(true);
@@ -411,7 +455,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       cancelled = true;
     };
-  }, [token, performSessionValidation]);
+  }, [token, bootChecked, performSessionValidation]);
 
   useEffect(() => {
     const unsub = onAuthExpired(() => {
@@ -420,69 +464,46 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return unsub;
   }, [fireLogoutNotice]);
 
-  const login = useCallback((newToken: string, newUser: User, newRefreshToken?: string | null) => {
+  const login = useCallback((newToken: string, newUser: User, _refreshToken?: string | null) => {
     // Merge signed token permissions into newUser. The login endpoint response body's
     // safeUserSelect currently does NOT include a `permissions` field, so without this
     // enrich step sidebar would filter ALL items for Bursary role (empty permissions
     // array) and only show the 6 Administration items for Admin (adminAllowed set).
+    //
+    // The third parameter (a refresh token) is intentionally IGNORED: the refresh
+    // credential is delivered exclusively as an HttpOnly cookie and must never be
+    // persisted by frontend JS. It is retained only for backward compatibility.
     const enriched = enrichAndStoreUser(newUser, newToken);
+    setAccessToken(newToken);
     if (isBrowser) {
-      localStorage.setItem(STORAGE_TOKEN, newToken);
       localStorage.setItem(STORAGE_LOGIN_AT, String(Date.now()));
-      if (newRefreshToken) localStorage.setItem(STORAGE_REFRESH, newRefreshToken);
-      else localStorage.removeItem(STORAGE_REFRESH);
       localStorage.removeItem(STORAGE_NOTICE);
     }
+    // Drop any token material written by pre-migration builds.
+    purgeLegacyTokenStorage();
     setToken(newToken);
-    setRefreshToken(newRefreshToken ?? null);
     setUser(enriched);
     setAuthNotice(null);
     setIsValidating(false);
   }, []);
 
   const refresh = useCallback(async (): Promise<boolean> => {
-    if (!isBrowser) return false;
-    try {
-      const rt = localStorage.getItem(STORAGE_REFRESH);
-      if (!rt) return false;
-      const res = await api.post<{ status: string; data?: { user?: User }; accessToken?: string; refreshToken?: string; token?: string }>(
-        '/auth/refresh',
-        { refreshToken: rt },
-      );
-      const newAccess = res.data?.accessToken ?? res.data?.token ?? null;
-      const newRefresh = res.data?.refreshToken ?? null;
-      if (!newAccess) return false;
-      localStorage.setItem(STORAGE_TOKEN, newAccess);
-      if (newRefresh) localStorage.setItem(STORAGE_REFRESH, newRefresh);
-      const freshUser = (res.data?.data?.user as User | undefined) ?? null;
-      if (freshUser) {
-        // Merge signed token permissions into fresh user.
-        const enriched = enrichAndStoreUser(freshUser, newAccess);
-        setUser(enriched);
-      }
-      setToken(newAccess);
-      setRefreshToken(newRefresh);
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
+    const accessToken = await refreshAccessToken();
+    return Boolean(accessToken);
+  }, [refreshAccessToken]);
 
   const logout = useCallback(
     async (reason: 'SESSION_EXPIRED' | 'LOGOUT' | 'ACCOUNT_INACTIVE' = 'LOGOUT') => {
       if (logoutInFlightRef.current) return;
       logoutInFlightRef.current = true;
       try {
-        if (reason === 'LOGOUT' && isBrowser) {
-          const rt = localStorage.getItem(STORAGE_REFRESH);
-          if (rt) {
-            try {
-              await api
-                .post('/auth/logout', { refreshToken: rt })
-                .catch(() => {});
-            } catch {
-              /* noop */
-            }
+        if (reason === 'LOGOUT') {
+          // The HttpOnly refresh cookie is attached automatically
+          // (withCredentials); the server revokes the session and clears it.
+          try {
+            await api.post('/auth/logout').catch(() => {});
+          } catch {
+            /* noop */
           }
         }
       } finally {
@@ -520,7 +541,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     () => ({
       user,
       token,
-      refreshToken,
       login,
       refresh,
       logout,
@@ -530,7 +550,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isValidating,
       authNotice,
     }),
-    [user, token, refreshToken, login, refresh, logout, clearMustChangePassword, refetchUser, isValidating, authNotice]
+    [user, token, login, refresh, logout, clearMustChangePassword, refetchUser, isValidating, authNotice]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

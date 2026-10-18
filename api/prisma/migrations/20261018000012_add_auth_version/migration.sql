@@ -1,0 +1,22 @@
+-- Additive, backward-compatible column: per-user session generation counter.
+--
+-- Purpose: invalidate ALREADY-ISSUED access tokens after a credential/security
+-- event (student first-login password change, self-service change, forgot-password
+-- reset, admin-triggered reset). The value is embedded in newly signed access
+-- tokens and compared against the authoritative DB value on every authenticated
+-- request.
+--
+-- Safety:
+--   * Pure additive DDL (ALTER TABLE ... ADD COLUMN) — no existing column is
+--     dropped, renamed or retyped.
+--   * NOT NULL with DEFAULT 0 so every existing row is immediately valid.
+--   * Touches ONLY `users.authVersion`. No payment / transaction / receipt /
+--     invoice / refund / settlement / ledger / reconciliation / webhook table
+--     is read or modified, and no historical financial data is altered.
+--   * No data backfill required (0 is the correct initial generation for every
+--     existing session).
+--
+-- Rollback: `ALTER TABLE `users` DROP COLUMN `authVersion`;` — safe, because the
+-- column carries no financial or business-record meaning.
+
+ALTER TABLE `users` ADD COLUMN `authVersion` INTEGER NOT NULL DEFAULT 0;

@@ -1179,7 +1179,11 @@ const UploadWizard: React.FC<{ role: 'ADMIN' | 'BURSARY'; }> = ({ role }) => {
                 )}
               </div>
               {stageId && (preview.problemRows ?? 0) > 0 && (
-                <a href={feeApi.uploadErrorsUrl(stageId)} target="_blank" rel="noreferrer" className="inline-block mt-3 text-sm text-blue-700 hover:underline">⬇ {t.errorsCsv}</a>
+                <button
+                  type="button"
+                  onClick={() => { void feeApi.downloadUploadErrors(stageId).catch(() => {}); }}
+                  className="inline-block mt-3 text-sm text-blue-700 hover:underline"
+                >⬇ {t.errorsCsv}</button>
               )}
             </div>
           </div>

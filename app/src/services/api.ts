@@ -1,4 +1,5 @@
 import axios, { AxiosError, InternalAxiosRequestConfig, AxiosRequestConfig } from 'axios';
+import { getAccessToken as getInMemoryAccessToken } from '../utils/tokenStore';
 
 export const API_BASE_URL =
   (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:3001/api/v1';
@@ -30,10 +31,9 @@ const fireAuthExpired = () => {
 
 export interface AuthPersistence {
   getAccessToken: () => string | null;
-  getRefreshToken: () => string | null;
-  setTokens: (accessToken: string | null, refreshToken: string | null) => void;
+  setTokens: (accessToken: string | null, refreshToken?: string | null) => void;
   clearAll: () => void;
-  onRefreshRequired: () => Promise<{ accessToken: string; refreshToken: string } | null>;
+  onRefreshRequired: () => Promise<{ accessToken: string } | null>;
   onAuthExpired: () => void;
 }
 
@@ -43,9 +43,9 @@ export const setAuthTokenPersistence = (p: AuthPersistence): void => {
   persistence = p;
 };
 
-let refreshPromise: Promise<{ accessToken: string; refreshToken: string } | null> | null = null;
+let refreshPromise: Promise<{ accessToken: string } | null> | null = null;
 
-const ensureRefresh = async (): Promise<{ accessToken: string; refreshToken: string } | null> => {
+const ensureRefresh = async (): Promise<{ accessToken: string } | null> => {
   if (!persistence) return null;
   if (refreshPromise) return refreshPromise;
   refreshPromise = Promise.resolve()
@@ -56,8 +56,6 @@ const ensureRefresh = async (): Promise<{ accessToken: string; refreshToken: str
   return refreshPromise;
 };
 
-const isBrowser = typeof window !== 'undefined';
-
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -65,11 +63,13 @@ const api = axios.create({
     Accept: 'application/json',
   },
   timeout: 30000,
-  withCredentials: false,
+  // Send cookies so the HttpOnly refresh cookie reaches POST /auth/refresh.
+  withCredentials: true,
 });
 
 const attachToken = (config: InternalAxiosRequestConfig): InternalAxiosRequestConfig => {
-  const token = persistence?.getAccessToken?.() ?? (isBrowser ? localStorage.getItem('token') : null);
+  // The access token lives ONLY in the in-memory store (never localStorage).
+  const token = persistence?.getAccessToken?.() ?? getInMemoryAccessToken();
   if (token) {
     config.headers.set('Authorization', `Bearer ${token}`);
   }
@@ -85,7 +85,23 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
     const status = error.response?.status;
-    const config = error.config as InternalAxiosRequestConfig & { __retried?: boolean };
+    const config = error.config as InternalAxiosRequestConfig & {
+      __retried?: boolean;
+      /**
+       * Set on the refresh call itself so a 401 from `POST /auth/refresh` never
+       * recurses into another refresh attempt (or fires the global "session
+       * expired" handler) — the caller decides what a failed refresh means.
+       */
+      __skipAuthRefresh?: boolean;
+    };
+    // The refresh endpoint is the recovery mechanism; it must never trigger a
+    // nested recovery attempt.
+    const isRefreshRequest =
+      config.__skipAuthRefresh === true ||
+      (typeof config.url === 'string' && config.url.includes('/auth/refresh'));
+    if (status === 401 && isRefreshRequest) {
+      return Promise.reject(normalizeError(error));
+    }
     if (status === 401 && !config.__retried && persistence) {
       const refreshed = await ensureRefresh().catch(() => null);
       if (refreshed?.accessToken) {

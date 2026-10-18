@@ -395,25 +395,29 @@ type Selected = Awaited<ReturnType<typeof prisma.user.findMany<{ select: typeof 
 function defaultPasswordFor(input: CreateStudentInput): string {
   if (input.password) return input.password;
   // ===========================================================================
-  // UNIVERSITY ONBOARDING RULE (per product request, 2026-10):
-  //   - The initial password for every newly-created student is the student's
-  //     SURNAME / LAST NAME in ALL LOWERCASE.
+  // UNIVERSITY ONBOARDING RULE (product requirement):
+  //   - The initial password for every newly-created / imported student is the
+  //     student's SURNAME / LAST NAME in ALL LOWERCASE.
   //   - Example: Surname "Adebayo"  → password "adebayo"
   //   - Example: Surname "Okafor-Smith"  → password "okafor-smith"
-  //   - We NEVER fall back to a random string here — universities prefer
-  //     predictable credential distribution, and the "mustChangePassword=true"
-  //     flag forces every student to choose their own real password at FIRST
-  //     login, closing the security loop.
-  //   - Extra defensive: if surname is empty or only whitespace (data-quality
-  //     issue on the uploaded CSV), fall back to matricNumber as a last-resort
-  //     — also lowercase. The "mustChangePassword=true" flag still applies so
-  //     the student will be forced to choose a unique password.
+  //   - A missing / blank surname is a data-quality problem and MUST surface as
+  //     a clear validation error naming the missing field. There is deliberately
+  //     NO random fallback: generating one would (a) contradict the documented,
+  //     predictable onboarding rule and (b) hand the university a credential it
+  //     cannot reproduce from the student record. Nor do we fall back to the
+  //     matric number — the requirement is surname-only.
+  //   - StudentService.create always sets "mustChangePassword=true", so the
+  //     student is still forced to choose a real password at first login.
   // ===========================================================================
   const surnameClean = String(input.lastName ?? '').trim().toLowerCase();
-  if (surnameClean.length > 0) return surnameClean;
-  if (input.matricNumber) return String(input.matricNumber).trim().toLowerCase();
-  // Absolute last-resort (should never happen for valid rows): random 10-char.
-  return crypto.randomBytes(5).toString('hex');
+  if (surnameClean.length === 0) {
+    throw new AppError(
+      'Surname (lastName) is required to generate the initial student password. ' +
+        'Add the missing surname to the record and retry.',
+      400,
+    );
+  }
+  return surnameClean;
 }
 
 // Prisma's Json column types require JsonNull (DbNull) rather than the JS null
@@ -837,13 +841,21 @@ export class StudentService {
           failedLoginAttempts: 0,
           lockedUntil: null,
           mustChangePassword: true,
+          // An ADMIN-triggered reset is a credential/security event: bump the
+          // session generation so every already-issued access token for this
+          // student is rejected, and revoke all renewable sessions.
+          authVersion: { increment: 1 },
         },
+      });
+      await tx.refreshToken.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
       });
       await tx.auditLog.create({
         data: {
           action: i18n.auditActions.passwordResetCompleted,
           entityType: 'USER', entityId: String(id), userId: actorId,
-          oldValue: JSON_DB_NULL, newValue: { passwordChanged: true, mustChangePassword: true } as Prisma.InputJsonValue,
+          oldValue: JSON_DB_NULL, newValue: { passwordChanged: true, mustChangePassword: true, sessionsRevoked: true } as Prisma.InputJsonValue,
           ipAddress: opts?.ip, userAgent: opts?.userAgent,
         },
       });

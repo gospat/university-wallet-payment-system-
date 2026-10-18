@@ -110,6 +110,10 @@ jest.mock('../config/database', () => {
           fn({
             refreshToken: {
               update: () => Promise.resolve(null),
+              // Atomic rotation claim (§ requirement 8) — the conditional
+              // updateMany must report exactly one claimed row for a valid,
+              // unrevoked, unexpired refresh token.
+              updateMany: () => Promise.resolve({ count: 1 }),
               create: () => Promise.resolve(null),
             },
             auditLog: { create: () => Promise.resolve({ id: 1 }) },
@@ -169,7 +173,7 @@ describe('Auth token payload hardening — permissions resolved server-side', ()
   });
 });
 
-describe('Auth transport — no redundant Set-Cookie headers', () => {
+describe('Auth transport — HttpOnly refresh cookie, never an access-token cookie', () => {
   let app: express.Express;
 
   beforeAll(() => {
@@ -181,17 +185,32 @@ describe('Auth transport — no redundant Set-Cookie headers', () => {
     app.post('/api/v1/auth/logout', protect, authController.logout as any);
   });
 
-  it('login response does NOT set access_token or refresh_token cookies', async () => {
+  it('login sets an HttpOnly SameSite=Lax refresh cookie, never an access_token cookie, and no refreshToken in the body', async () => {
     const res = await request(app)
       .post('/api/v1/auth/login')
       .send({ email: 'admin@university.edu.ng', password: 'admin123' });
     expect(res.status).toBe(200);
-    const setCookie = res.headers['set-cookie'];
-    const cookieStr = Array.isArray(setCookie) ? setCookie.join(';') : (setCookie ?? '');
-    expect(cookieStr).not.toContain('access_token');
-    expect(cookieStr).not.toContain('refresh_token');
+
+    const setCookieHeader = res.headers['set-cookie'] as unknown as string[] | string | undefined;
+    const cookies = Array.isArray(setCookieHeader)
+      ? setCookieHeader
+      : setCookieHeader
+      ? [setCookieHeader]
+      : [];
+    const cookieNames = cookies.map((c) => String(c).split('=')[0].trim());
+
+    // The access token must NEVER be placed in a cookie.
+    expect(cookieNames).not.toContain('access_token');
+
+    // The refresh token is delivered via an HttpOnly, SameSite=Lax cookie.
+    const refreshCookie = cookies.find((c) => String(c).startsWith('refresh_token='));
+    expect(refreshCookie).toBeTruthy();
+    expect(refreshCookie).toMatch(/HttpOnly/i);
+    expect(refreshCookie).toMatch(/SameSite=Lax/i);
+
+    // The access token IS still returned in the body; the refresh token is NOT.
     expect(res.body.accessToken).toBeTruthy();
-    expect(res.body.refreshToken).toBeTruthy();
+    expect(res.body.refreshToken).toBeUndefined();
   });
 });
 

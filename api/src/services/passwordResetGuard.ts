@@ -22,30 +22,38 @@ export function randomHex(bytes = 16): string {
   return randomBytes(bytes).toString('hex');
 }
 
-export async function isConsumedOrMissing(jti: string): Promise<boolean> {
-  cleanInMem();
-  const key = jtiKey(jti);
-  try {
-    const v = await redisProxy.get(key).catch(() => null as any);
-    if (v !== null && v !== undefined) return true;
-  } catch {
-    const m = IN_MEM.get(key);
-    if (m && m.expireAt > Date.now()) return true;
-  }
-  return false;
-}
+export type ResetTokenClaim = 'claimed' | 'already-consumed' | 'store-unavailable';
 
-export async function markConsumed(jti: string, ttlSeconds = 960): Promise<void> {
+/**
+ * ATOMIC single-use claim for a password-reset token.
+ *
+ * The previous implementation performed a non-atomic `isConsumedOrMissing()`
+ * read followed by a separate `markConsumed()` write, so two concurrent
+ * requests presenting the SAME still-valid token could both observe
+ * "not consumed" and both proceed to reset the password (§ requirement 6).
+ *
+ * This performs the check and the write in ONE conditional Redis operation
+ * (`SET key value EX ttl NX`), which the Redis server evaluates atomically.
+ * Exactly one caller can ever be told 'claimed' for a given jti; every other
+ * caller gets 'already-consumed'.
+ *
+ * FAIL CLOSED: if the store is unreachable we return 'store-unavailable' and
+ * the CALLER MUST REFUSE the reset. We deliberately do NOT fall back to a
+ * process-local Map — that silently weakens the single-use guarantee across
+ * multiple instances and would allow a replay after a process restart.
+ */
+export async function claimResetToken(jti: string, ttlSeconds = 960): Promise<ResetTokenClaim> {
   cleanInMem();
   const key = jtiKey(jti);
-  const expireAt = Date.now() + ttlSeconds * 1000;
   try {
-    const ok = await redisProxy.set(key, 'CONSUMED', 'EX', Math.max(1, ttlSeconds), 'NX').catch(() => null as any);
-    if (ok !== null && ok !== undefined) return;
+    const r = await getRedis();
+    const res = await r.set(key, 'CONSUMED', 'EX', Math.max(1, ttlSeconds), 'NX');
+    if (res === 'OK') return 'claimed';
+    if (res === null) return 'already-consumed';
+    return 'store-unavailable';
   } catch {
-    // fall through to in-mem
+    return 'store-unavailable';
   }
-  IN_MEM.set(key, { val: 'CONSUMED', expireAt });
 }
 
 export async function getSafe(name: string): Promise<string | null> {

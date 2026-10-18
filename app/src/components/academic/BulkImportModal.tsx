@@ -2,7 +2,7 @@ import React, { useState, useRef, useMemo } from 'react';
 import { Download, UploadCloud, FileSpreadsheet, AlertTriangle, CheckCircle2, XCircle, Info, Loader2, StepForward } from 'lucide-react';
 import Modal from '../Modal';
 import { AcademicBulkKind, BulkImportResult, BulkRowError, bulkImport } from '../../services/academicApi';
-import { API_BASE_URL } from '../../services/api';
+import { downloadBlob } from '../../services/api';
 
 const kindLabels: Record<AcademicBulkKind, { singular: string; plural: string; capital: string }> = {
   college: { singular: 'College', plural: 'Colleges', capital: 'COLLEGE' },
@@ -74,16 +74,13 @@ const BulkImportModal: React.FC<Props> = ({ kind, isOpen, onClose, onSuccess }) 
 
   const downloadErrorsCsv = () => {
     if (!result?.errorsCsvUrl) return;
-    const token = localStorage.getItem('token') ?? '';
-    const abs = result.errorsCsvUrl.startsWith('/') ? `${API_BASE_URL.replace(/\/api\/v1$/, '')}${result.errorsCsvUrl}` : result.errorsCsvUrl;
-    const sep = abs.includes('?') ? '&' : '?';
-    const url = `${abs}${sep}access_token=${encodeURIComponent(token)}`;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    // The server returns a path under the API base (e.g. /api/v1/academic/_errors/<file>).
+    // Strip the base prefix so the shared authenticated client (which prepends the
+    // API base and attaches the Bearer header) resolves it — no token in the URL.
+    const relative = result.errorsCsvUrl.replace(/^\/api\/v1/, '');
+    void downloadBlob(relative, 'bulk-import-errors.csv').catch((e: any) => {
+      setErrorMsg(e?.message || 'Failed to download the errors file.');
+    });
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {

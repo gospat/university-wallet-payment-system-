@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { getAccessToken } from '../../utils/tokenStore';
 import {
   Download,
   BookOpen,
@@ -213,7 +214,7 @@ const StudentDashboard: React.FC = () => {
       return;
     }
     try {
-      const token = localStorage.getItem('token') ?? '';
+      const token = getAccessToken() ?? '';
       const response = await api.get(`/students/receipts/${r.id}/download`, {
         responseType: 'blob',
         headers: { Accept: 'application/pdf', ...(token ? { Authorization: `Bearer ${token}` } : {}) },

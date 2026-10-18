@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import { buildBranding } from '../utils/branding';
 import { wrapEmail, buttonLink } from './email';
 import type { RenderedEmail } from './email';
+import { escapeHtml } from '../utils/security';
 
 export const EMAIL_TEMPLATE_KEYS = {
   STUDENT_CREDENTIALS: 'student_credentials',
@@ -195,22 +196,30 @@ export async function renderStudentCredentialEmailHtmlText(
   };
 
   const portalLoginUrl = overrides?.portalLoginUrl || config.portalLoginUrl || envPortalLoginDefault();
-  const greeting = renderPlaceholders(config.greeting, mergedVars);
-  const paragraph = renderPlaceholders(config.paragraph, mergedVars);
-  const forceNotice = renderPlaceholders(config.forceChangeNotice, mergedVars);
-  const closing = renderPlaceholders(config.closing, mergedVars).replace(/\n/g, '<br>');
+  // Raw (plain-text) renderings — used for the text/plain body and subject.
+  const greetingText = renderPlaceholders(config.greeting, mergedVars);
+  const paragraphText = renderPlaceholders(config.paragraph, mergedVars);
+  const forceNoticeText = renderPlaceholders(config.forceChangeNotice, mergedVars);
   const closingText = renderPlaceholders(config.closing, mergedVars);
   const subject = renderPlaceholders(config.subjectLine, mergedVars);
   const btnLabel = renderPlaceholders(config.buttonLabel, mergedVars) || 'Access Student Portal';
   const btn = buttonLink(portalLoginUrl, btnLabel, config.accentColor || undefined);
+  // HTML-bound text: BOTH the admin-configured template text AND the interpolated
+  // student values are untrusted from an XSS standpoint, so escape the fully
+  // rendered result before it is placed inside the HTML email body.
+  const greeting = escapeHtml(greetingText);
+  const paragraph = escapeHtml(paragraphText);
+  const forceNotice = escapeHtml(forceNoticeText);
+  // Escape first, THEN convert newlines to <br> so the injected <br> tags survive.
+  const closing = escapeHtml(closingText).replace(/\n/g, '<br>');
 
   const bodyHtml = `
 <p>${greeting}</p>
 <p>${paragraph}</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Matric Number</strong></td><td>${vars.matricNumber}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Email</strong></td><td>${vars.email}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Temporary Password</strong></td><td>${vars.temporaryPassword}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Matric Number</strong></td><td>${escapeHtml(vars.matricNumber)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Email</strong></td><td>${escapeHtml(vars.email)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Temporary Password</strong></td><td>${escapeHtml(vars.temporaryPassword)}</td></tr>
 </table>
 <p style="margin:20px 0;">${btn.html}</p>
 <p style="color:#b91c1c;"><strong>${forceNotice}</strong></p>
@@ -218,13 +227,13 @@ export async function renderStudentCredentialEmailHtmlText(
   `.trim();
 
   const bodyText =
-    `${greeting}\n\n` +
-    `${paragraph}\n\n` +
+    `${greetingText}\n\n` +
+    `${paragraphText}\n\n` +
     `Matric Number: ${vars.matricNumber}\n` +
     `Email: ${vars.email}\n` +
     `Temporary Password: ${vars.temporaryPassword}\n\n` +
     `${btn.text}\n\n` +
-    `${forceNotice}\n\n` +
+    `${forceNoticeText}\n\n` +
     closingText;
 
   const wrapped = wrapEmail(bodyHtml, bodyText, config.accentColor || undefined);

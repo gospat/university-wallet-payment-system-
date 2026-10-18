@@ -28,6 +28,19 @@ function ensureTmpDir() {
   return dir;
 }
 
+/**
+ * Best-effort removal of a multipart temp file. Never throws — cleanup must
+ * not change (or mask) the handler's real outcome.
+ */
+function cleanupTempFile(filePath?: string | null): void {
+  if (!filePath) return;
+  try {
+    fs.unlinkSync(filePath);
+  } catch {
+    // Already removed or inaccessible — ignore.
+  }
+}
+
 const ConfirmSchema = z.object({
   duplicateStrategy: z.enum(['SKIP', 'UPDATE', 'CANCEL']).default('SKIP'),
   sendCredentialEmails: z.boolean().optional().default(false),
@@ -63,7 +76,11 @@ function parseMultipartForm(req: IncomingMessage): Promise<{ fields: Fields; fil
   return new Promise((resolve, reject) => {
     form.parse(req, (err, fields, files) => {
       if (err) {
-        if ((err as any).code === 1009) {
+        // Formidable uses code 1016 (biggerThanMaxFileSize) for a single file
+        // over maxFileSize and 1009 (biggerThanTotalMaxFileSize) for the total;
+        // map BOTH to a clear 413 instead of a generic 400.
+        const code = (err as any).code;
+        if (code === 1009 || code === 1016) {
           return reject(new AppError(`File too large. Maximum size is ${MAX_FILE_BYTES / 1024 / 1024} MB`, 413));
         }
         return reject(err);
@@ -85,34 +102,34 @@ export const stageStudentUpload = catchAsync(async (req: Request, res: Response,
   if (!file || !file.originalFilename || !file.filepath) {
     return next(new AppError(i18n.errors.upload.fileRequired, 400));
   }
-  const ext = path.extname(file.originalFilename).toLowerCase();
-  if (!ALLOWED_EXT.has(ext)) return next(new AppError(i18n.errors.upload.unsupportedFormat, 400));
-  const v = validateSpreadsheetBytes(file.filepath, ext);
-  if (!v.ok) return next(new AppError(v.error!, 400));
-
+  // From here on the multipart temp file exists on disk. Guarantee it is
+  // removed on EVERY exit path (success, validation error, parse error).
   try {
-    const result = await BulkStudentUploadService.stageUpload({
-      filePath: file.filepath,
-      fileName: file.originalFilename,
-      actorId: req.user.id,
-    });
-    res.status(200).json({ status: 'success', data: result });
-  } catch (e) {
-    if (e instanceof AppError) return next(e);
-    // Preserve the actual error message in the server logs (critical for
-    // operators debugging a bad XLSX import) so we don't lose it to the
-    // generic i18n mask.  Then return the generic user-facing message.
-    console.error(
-      `[bulkUpload] stageStudentUpload unhandled error fileName=${JSON.stringify(file.originalFilename)} actorId=${req.user.id}:`,
-      e,
-    );
-    const extra = e instanceof Error ? e.message : String(e ?? '');
-    return next(
-      new AppError(
-        i18n.errors.upload.importFailed + (extra ? ` (${extra})` : ''),
-        400,
-      ),
-    );
+    const ext = path.extname(file.originalFilename).toLowerCase();
+    if (!ALLOWED_EXT.has(ext)) return next(new AppError(i18n.errors.upload.unsupportedFormat, 400));
+    const v = validateSpreadsheetBytes(file.filepath, ext);
+    if (!v.ok) return next(new AppError(v.error!, 400));
+
+    try {
+      const result = await BulkStudentUploadService.stageUpload({
+        filePath: file.filepath,
+        fileName: file.originalFilename,
+        actorId: req.user.id,
+      });
+      res.status(200).json({ status: 'success', data: result });
+    } catch (e) {
+      if (e instanceof AppError) return next(e);
+      // Preserve the actual error message in the SERVER logs (critical for
+      // operators debugging a bad XLSX import) but NEVER surface parser/library
+      // internals (filesystem paths, stack traces) to the client.
+      console.error(
+        `[bulkUpload] stageStudentUpload unhandled error fileName=${JSON.stringify(file.originalFilename)} actorId=${req.user.id}:`,
+        e,
+      );
+      return next(new AppError(i18n.errors.upload.importFailed, 400));
+    }
+  } finally {
+    cleanupTempFile(file.filepath);
   }
 });
 

@@ -502,7 +502,6 @@ router.get('/reports/collections', requirePermission('VIEW_RECONCILIATION_REPORT
   });
 
   if (format === 'csv') {
-    const Papa = require('papaparse');
     const header = [
       'Receipt No.', 'Date', 'Student Name', 'Matric No.',
       'College', 'Department', 'Program', 'Level',
@@ -533,7 +532,9 @@ router.get('/reports/collections', requirePermission('VIEW_RECONCILIATION_REPORT
     csvRows.push([]);
     csvRows.push(['', '', '', '', '', '', '', '', '', '', '', '', 'GRAND TOTAL', '', Number(totals.total).toFixed(2), '', `(${totals.count} tx)`]);
 
-    const csv = Papa.unparse(csvRows, { delimiter: ',' });
+    // SECURITY: neutralize CSV formula injection (OWASP) on every cell — this
+    // report contains student/gateway-sourced values (names, matric numbers).
+    const csv = csvRows.map((r: any[]) => csvLineSafe(Array.isArray(r) ? r : [])).join('');
     const ts = (d: any) => (d ? new Date(d).toISOString().slice(0, 10).replace(/-/g, '') : 'all');
     const rawFilename = `collections_report_${ts(dateFrom)}_${ts(dateTo)}_${Date.now()}.csv`;
     const safeFn = String(rawFilename ?? 'collections_report.csv').replace(/[\/\\:*?"<>|\x00-\x1f%]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 180) || 'collections_report.csv';

@@ -3,6 +3,7 @@ import { getDefaultEmailDomain } from '../utils/alatpay';
 import { brandingEnvOnly } from '../utils/branding';
 import { selectEmailProvider } from './emailProviders';
 import type { MailArgs, MailAttachment } from './emailProviders';
+import { escapeHtml } from '../utils/security';
 
 const envBranding = brandingEnvOnly();
 
@@ -65,7 +66,8 @@ export function buttonLink(url: string, label: string, accentHex?: string): { ht
     ? (accentHex.startsWith('#') ? accentHex : `#${accentHex}`)
     : emailStrings.roles.studentBlue;
   return {
-    html: `<a href="${url}" style="display:inline-block;background:${color};color:#ffffff;padding:10px 20px;text-decoration:none;font-weight:bold;">${label}</a>`,
+    html: `<a href="${escapeHtml(url)}" style="display:inline-block;background:${color};color:#ffffff;padding:10px 20px;text-decoration:none;font-weight:bold;">${escapeHtml(label)}</a>`,
+    // `text` is a plain-text (non-HTML) context — do NOT HTML-escape it.
     text: `${label}: ${url}`,
   };
 }
@@ -205,12 +207,12 @@ export function renderPaymentSuccessful({
   const btn = buttonLink(receiptDownloadUrl, emailStrings.buttons.downloadReceipt);
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
-<p>Your payment for <strong>${feeName}</strong> has been successfully received.</p>
+<p>Dear ${escapeHtml(studentName)},</p>
+<p>Your payment for <strong>${escapeHtml(feeName)}</strong> has been successfully received.</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Amount</strong></td><td>${amount}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${reference}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Receipt</strong></td><td>${receiptNumber}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Amount</strong></td><td>${escapeHtml(amount)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${escapeHtml(reference)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Receipt</strong></td><td>${escapeHtml(receiptNumber)}</td></tr>
 </table>
 <p style="margin:20px 0;">${btn.html}</p>
 <p style="color:#666666;font-size:12px;"><em>If you did not make this payment, please contact bursary immediately.</em></p>
@@ -247,10 +249,10 @@ export function renderPaymentInitiated({
   const amount = formatNaira(amountNgnNumber);
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
-<p>We are processing your payment of <strong>${amount}</strong> for <strong>${feeName}</strong>.</p>
+<p>Dear ${escapeHtml(studentName)},</p>
+<p>We are processing your payment of <strong>${escapeHtml(amount)}</strong> for <strong>${escapeHtml(feeName)}</strong>.</p>
 <p>No receipt has been issued yet.</p>
-<p>Reference: ${reference}</p>
+<p>Reference: ${escapeHtml(reference)}</p>
   `.trim();
 
   const bodyText =
@@ -279,11 +281,11 @@ export function renderPaymentFailed({
   const date = attemptDate instanceof Date ? attemptDate.toLocaleString() : attemptDate;
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
+<p>Dear ${escapeHtml(studentName)},</p>
 <p>Your payment attempt could not be completed. Please try again or contact bursary for assistance.</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${reference}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Attempt Date</strong></td><td>${date}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${escapeHtml(reference)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Attempt Date</strong></td><td>${escapeHtml(date)}</td></tr>
 </table>
   `.trim();
 
@@ -316,12 +318,12 @@ export function renderPaymentReversed({
   const date = reversedAt instanceof Date ? reversedAt.toLocaleString() : reversedAt;
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
+<p>Dear ${escapeHtml(studentName)},</p>
 <p>A payment reversal has been applied to your account.</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${reference}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Amount</strong></td><td>${amount}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Reversed At</strong></td><td>${date}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${escapeHtml(reference)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Amount</strong></td><td>${escapeHtml(amount)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Reversed At</strong></td><td>${escapeHtml(date)}</td></tr>
 </table>
   `.trim();
 
@@ -354,12 +356,12 @@ export function renderRefundStatusChanged({
   const amount = formatNaira(amountNgnNumber);
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
-<p>The refund for your transaction has been updated to <strong>${refundStatus}</strong>.</p>
+<p>Dear ${escapeHtml(studentName)},</p>
+<p>The refund for your transaction has been updated to <strong>${escapeHtml(refundStatus)}</strong>.</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${reference}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Amount</strong></td><td>${amount}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Status</strong></td><td>${refundStatus}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Reference</strong></td><td>${escapeHtml(reference)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Amount</strong></td><td>${escapeHtml(amount)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Status</strong></td><td>${escapeHtml(refundStatus)}</td></tr>
 </table>
   `.trim();
 
@@ -390,8 +392,8 @@ export function renderPasswordReset({
   const btn = buttonLink(resetUrl, emailStrings.buttons.resetPassword);
 
   const bodyHtml = `
-<p>Dear ${userFirstname},</p>
-<p>Click the button below to reset your password. This link is valid for <strong>${expiresMinutes} minutes</strong>.</p>
+<p>Dear ${escapeHtml(userFirstname)},</p>
+<p>Click the button below to reset your password. This link is valid for <strong>${escapeHtml(expiresMinutes)} minutes</strong>.</p>
 <p style="margin:20px 0;">${btn.html}</p>
 <p style="color:#666666;font-size:12px;"><em>If you did not request this, please ignore this email. Your password will not change.</em></p>
   `.trim();
@@ -426,12 +428,12 @@ export function renderStudentAccountCreated({
   const btn = buttonLink(portalLoginUrl, emailStrings.buttons.loginPortal);
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
+<p>Dear ${escapeHtml(studentName)},</p>
 <p>Your student account has been created. Here are your login details:</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Matric Number</strong></td><td>${matricNumber}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Email</strong></td><td>${email}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Temporary Password</strong></td><td>${temporaryPassword}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Matric Number</strong></td><td>${escapeHtml(matricNumber)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Email</strong></td><td>${escapeHtml(email)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Temporary Password</strong></td><td>${escapeHtml(temporaryPassword)}</td></tr>
 </table>
 <p style="margin:20px 0;">${btn.html}</p>
 <p style="color:#b91c1c;"><strong>CHANGE your password on first login immediately to keep your account secure.</strong></p>
@@ -498,9 +500,9 @@ export function renderPaymentReminder({
   const btn = buttonLink(invoiceUrl, emailStrings.buttons.viewInvoice);
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
-<p>This is a friendly reminder that your <strong>${feeName}</strong> fee is due on <strong>${date}</strong> with balance ${amount}.</p>
-<p>You have <strong>${daysLeft} day(s) left</strong>. Please pay on time to avoid penalties.</p>
+<p>Dear ${escapeHtml(studentName)},</p>
+<p>This is a friendly reminder that your <strong>${escapeHtml(feeName)}</strong> fee is due on <strong>${escapeHtml(date)}</strong> with balance ${escapeHtml(amount)}.</p>
+<p>You have <strong>${escapeHtml(daysLeft)} day(s) left</strong>. Please pay on time to avoid penalties.</p>
 <p style="margin:20px 0;">${btn.html}</p>
   `.trim();
 
@@ -556,28 +558,28 @@ export function renderStudentBillAssigned({
   const btn = buttonLink(invoiceUrl, 'Pay this bill');
 
   const descriptionRow = fee.description
-    ? `<tr><td style="background:#f0f0f0;"><strong>Fee description</strong></td><td style="white-space:pre-wrap;">${String(fee.description)}</td></tr>`
+    ? `<tr><td style="background:#f0f0f0;"><strong>Fee description</strong></td><td style="white-space:pre-wrap;">${escapeHtml(fee.description)}</td></tr>`
     : '';
   const noteRow = noteToStudent
     ? `<div style="margin-top:20px;padding:16px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;">
          <p style="margin:0 0 6px 0;"><strong>Note from the Bursary department:</strong></p>
-         <p style="margin:0;white-space:pre-wrap;">${String(noteToStudent)}</p>
+         <p style="margin:0;white-space:pre-wrap;">${escapeHtml(noteToStudent)}</p>
        </div>`
     : '';
   const assignmentRow = assignment?.id
-    ? `<tr><td style="background:#f0f0f0;"><strong>Assignment reference</strong></td><td>#${assignment.id}</td></tr>`
+    ? `<tr><td style="background:#f0f0f0;"><strong>Assignment reference</strong></td><td>#${escapeHtml(assignment.id)}</td></tr>`
     : '';
 
   const bodyHtml = `
-<p>Dear ${studentName},</p>
+<p>Dear ${escapeHtml(studentName)},</p>
 <p>A new bill has been assigned to you by the Bursary department. Please review and pay at your earliest convenience:</p>
 <table cellpadding="8" cellspacing="0" border="1" bordercolor="#e0e0e0" style="border-collapse:collapse;margin:16px 0;">
-<tr><td style="background:#f0f0f0;"><strong>Student / Matric</strong></td><td>${studentName}${student.matricNumber ? ` — <span style="font-family:monospace;">${student.matricNumber}</span>` : ''}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Fee</strong></td><td>${fee.name}${fee.id ? ` <span style="color:#666;font-size:12px;">(Fee#${fee.id})</span>` : ''}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Student / Matric</strong></td><td>${escapeHtml(studentName)}${student.matricNumber ? ` — <span style="font-family:monospace;">${escapeHtml(student.matricNumber)}</span>` : ''}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Fee</strong></td><td>${escapeHtml(fee.name)}${fee.id ? ` <span style="color:#666;font-size:12px;">(Fee#${escapeHtml(fee.id)})</span>` : ''}</td></tr>
 ${descriptionRow}
-<tr><td style="background:#f0f0f0;"><strong>Invoice</strong></td><td><span style="font-family:monospace;">${invoice.invoiceNumber}</span></td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Amount due</strong></td><td style="font-weight:bold;color:#b91c1c;font-size:16px;">${amount}</td></tr>
-<tr><td style="background:#f0f0f0;"><strong>Due date</strong></td><td>${dateStr}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Invoice</strong></td><td><span style="font-family:monospace;">${escapeHtml(invoice.invoiceNumber)}</span></td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Amount due</strong></td><td style="font-weight:bold;color:#b91c1c;font-size:16px;">${escapeHtml(amount)}</td></tr>
+<tr><td style="background:#f0f0f0;"><strong>Due date</strong></td><td>${escapeHtml(dateStr)}</td></tr>
 ${assignmentRow}
 </table>
 <p style="margin:20px 0;">${btn.html}</p>

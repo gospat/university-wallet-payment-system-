@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { AppError } from './AppError';
+import { MAX_UPLOAD_ROWS, MAX_UPLOAD_COLUMNS } from './security';
 
 type CellValue = ExcelJS.CellValue;
 type SheetJsonRow = Record<string, CellValue | number | string | boolean | null | Date>;
@@ -82,8 +84,22 @@ export async function read(
   wb.eachSheet((ws) => {
     const rows: CellValue[][] = [];
     ws.eachRow({ includeEmpty: false }, (row) => {
+      // SECURITY: fail CLOSED before materializing an unbounded sheet. This
+      // bounds memory against a decompression-bomb / 1,000,000-row workbook.
+      if (rows.length > MAX_UPLOAD_ROWS) {
+        throw new AppError(
+          `This spreadsheet has too many rows. The maximum is ${MAX_UPLOAD_ROWS.toLocaleString()} rows per upload. Split it into smaller files and try again.`,
+          413,
+        );
+      }
       const rowArr: CellValue[] = [];
       row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        if (colNumber > MAX_UPLOAD_COLUMNS) {
+          throw new AppError(
+            `This spreadsheet has too many columns. The maximum is ${MAX_UPLOAD_COLUMNS} columns per upload.`,
+            413,
+          );
+        }
         while (rowArr.length < colNumber - 1) rowArr.push(null);
         let value: CellValue = cell.value ?? null;
         if (opts && opts.cellDates && cell.type === ExcelJS.ValueType.Date) {

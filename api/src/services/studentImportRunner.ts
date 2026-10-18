@@ -15,10 +15,10 @@
 //     counters are incremented atomically, which keeps live progress exact.
 // =============================================================================
 
-import Papa from 'papaparse';
 import prisma from '../config/database';
 import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
+import { csvCellSafe } from '../utils/security';
 import { StudentService } from './student';
 
 // -----------------------------------------------------------------------------
@@ -59,7 +59,6 @@ interface RowOutcome {
   status: RowOutcomeStatus;
   errorMessage: string | null;
   studentId: number | null;
-  temporaryPassword: string | null;
   passwordSent: boolean;
 }
 
@@ -130,19 +129,23 @@ async function processRow(
     // IMPORTANT: bcrypt.hash runs on the libuv threadpool, so the bounded
     // concurrency at the slice level (IMPORT_CONCURRENCY) is what lets ~7,000
     // rows finish in minutes instead of ~30 minutes sequentially.
+    //
+    // We deliberately DO NOT ask the service to hand back the plaintext initial
+    // password (returnPlaintextPassword is false). The initial password is
+    // derived deterministically from the surname, so there is no reason to ever
+    // carry the plaintext in memory here — let alone persist it.
     const created: any = await StudentService.create(payload as any, opts.actorId, {
       ip: opts.ip,
       userAgent: opts.userAgent,
       importId: opts.studentImportId ?? undefined,
       sendCredentialEmail: sendCredentialEmails,
-      returnPlaintextPassword: true,
+      returnPlaintextPassword: false,
     });
     return {
       rowId: row.id,
       status: 'SUCCESS',
       errorMessage: null,
-      studentId: created?.user?.id ?? null,
-      temporaryPassword: created?.temporaryPasswordPlaintext ?? null,
+      studentId: created?.id ?? created?.user?.id ?? null,
       passwordSent: sendCredentialEmails,
     };
   } catch (err) {
@@ -150,12 +153,14 @@ async function processRow(
     const isDuplicate = message === i18n.errors.auth.emailExists || message === i18n.errors.auth.matricExists;
 
     if (!isDuplicate) {
+      // Non-duplicate failures (e.g. a blank surname that cannot yield an
+      // initial password) become a per-row VALIDATION ERROR: the import keeps
+      // going and NO account is created for the offending row.
       return {
         rowId: row.id,
         status: 'FAILED',
         errorMessage: truncateError(message),
         studentId: null,
-        temporaryPassword: null,
         passwordSent: false,
       };
     }
@@ -179,7 +184,6 @@ async function processRow(
             status: 'SUCCESS',
             errorMessage: null,
             studentId: existing.id,
-            temporaryPassword: null,
             passwordSent: false,
           };
         } catch (updateErr) {
@@ -188,7 +192,6 @@ async function processRow(
             status: 'FAILED',
             errorMessage: truncateError((updateErr as Error)?.message),
             studentId: null,
-            temporaryPassword: null,
             passwordSent: false,
           };
         }
@@ -201,7 +204,6 @@ async function processRow(
       status: 'SKIPPED',
       errorMessage: DUPLICATE_MESSAGE,
       studentId: null,
-      temporaryPassword: null,
       passwordSent: false,
     };
   }
@@ -258,6 +260,10 @@ export async function runStudentImport(
       }
 
       // Persist the whole slice atomically, then bump the run counters.
+      // SECURITY: `temporaryPassword` is intentionally NOT written. The column
+      // is retained in the schema for backward compatibility ONLY and must
+      // never hold a real password — the initial password is derived from the
+      // surname on demand (see buildCredentialsCsv). It stays NULL.
       await prisma.$transaction(
         outcomes.map((outcome) =>
           prisma.importRow.update({
@@ -266,7 +272,6 @@ export async function runStudentImport(
               status: outcome.status,
               errorMessage: outcome.errorMessage,
               studentId: outcome.studentId,
-              temporaryPassword: outcome.temporaryPassword,
               passwordSent: outcome.passwordSent,
             },
           }),
@@ -333,8 +338,27 @@ export async function getImportProgress(importRunId: number): Promise<ImportProg
 }
 
 /**
+ * Derive the initial (first-login) password for a student from their surname.
+ *
+ * This is the SAME rule as StudentService.defaultPasswordFor: the surname
+ * trimmed and lower-cased. It exists so the downloadable credentials CSV can be
+ * rebuilt any time WITHOUT reading a stored plaintext password. Returns '' for a
+ * blank surname (defensive only — a SUCCESS row always carries a surname because
+ * creation would have failed otherwise).
+ */
+export function deriveInitialPasswordFromSurname(surname: unknown): string {
+  return String(surname ?? '').trim().toLowerCase();
+}
+
+/**
  * Build a downloadable credentials CSV for the SUCCESS rows of a run.
- * Delegates all quoting/escaping to Papa.unparse.
+ *
+ * The password column is DERIVED from each row's validated surname at
+ * build time. We deliberately NEVER read a stored plaintext password (the
+ * legacy `temporaryPassword` field, when present, is ignored).
+ *
+ * Every cell is passed through csvCellSafe so a value beginning with
+ * = + - @ (or a DDE() payload) cannot execute as a spreadsheet formula.
  */
 export function buildCredentialsCsv(
   rows: Array<{
@@ -343,20 +367,23 @@ export function buildCredentialsCsv(
     lastName: string;
     email: string | null;
     matricNumber: string;
-    temporaryPassword: string | null;
-    studentId: number | null;
+    /** @deprecated Plaintext is never stored or read; the password is derived from lastName. */
+    temporaryPassword?: string | null;
+    studentId?: number | null;
   }>,
 ): string {
-  const data: string[][] = [['row_number', 'matric_number', 'first_name', 'last_name', 'email', 'password']];
+  const header = ['row_number', 'matric_number', 'first_name', 'last_name', 'email', 'password'];
+  const lines: string[] = [header.map(csvCellSafe).join(',')];
   for (const r of rows) {
-    data.push([
+    const cells = [
       String(r.rowNumber),
       r.matricNumber ?? '',
       r.firstName ?? '',
       r.lastName ?? '',
       r.email ?? '',
-      r.temporaryPassword ?? '',
-    ]);
+      deriveInitialPasswordFromSurname(r.lastName),
+    ];
+    lines.push(cells.map(csvCellSafe).join(','));
   }
-  return Papa.unparse(data);
+  return lines.join('\r\n');
 }

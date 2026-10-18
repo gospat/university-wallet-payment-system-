@@ -7,7 +7,7 @@ import { FacultyService, DepartmentService, ProgrammeService } from './academic'
 import { AppError } from '../utils/AppError';
 import type { Request } from 'express';
 import { buildTwoSheetWorkbook, TwoSheetTemplate } from '../utils/xlsxTemplate';
-import { csvLineSafe, csvCellSafe } from '../utils/security';
+import { csvLineSafe, csvCellSafe, assertUploadWithinBounds, MAX_UPLOAD_ROWS } from '../utils/security';
 
 export type BulkKind = 'college' | 'department' | 'programme';
 
@@ -89,13 +89,16 @@ export async function parseCsvOrXlsx(filePath: string, fileName: string): Promis
   const ext = path.extname(fileName).toLowerCase();
   if (!ALLOWED_EXT.has(ext)) throw new AppError('Unsupported file format. Please upload CSV, XLSX, or XLS.', 400);
 
+  let rows: Record<string, any>[];
   if (ext === '.csv') {
-    return new Promise<Record<string, any>[]>((resolve, reject) => {
+    rows = await new Promise<Record<string, any>[]>((resolve, reject) => {
       const stream = fs.createReadStream(filePath, 'utf-8');
       Papa.parse<Record<string, any>>(stream, {
         header: true,
         skipEmptyLines: 'greedy' as any,
         worker: false,
+        // Bound memory: stop after the row cap (+1 to detect an over-limit file).
+        preview: MAX_UPLOAD_ROWS + 1,
         transformHeader: (h) => h,
         complete: (result) => {
           const rawRows = (result.data as any[]) ?? [];
@@ -104,18 +107,20 @@ export async function parseCsvOrXlsx(filePath: string, fileName: string): Promis
         error: (err) => reject(err),
       });
     });
-  }
-
-  if (ext === '.xlsx' || ext === '.xls') {
+  } else if (ext === '.xlsx' || ext === '.xls') {
     const buf = await fs.promises.readFile(filePath);
     const wb = await XLSX.read(buf, { type: 'buffer', cellDates: true });
     const sheetName = wb.SheetNames[0];
     const sheet = wb.Sheets[sheetName];
     const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: true }) as any[];
-    return rawRows.map(normalizeRow);
+    rows = rawRows.map(normalizeRow);
+  } else {
+    throw new AppError('Unsupported file format. Please upload CSV, XLSX, or XLS.', 400);
   }
 
-  throw new AppError('Unsupported file format. Please upload CSV, XLSX, or XLS.', 400);
+  const columnCount = rows.reduce((m, r) => Math.max(m, Object.keys(r ?? {}).length), 0);
+  assertUploadWithinBounds(rows.length, columnCount);
+  return rows;
 }
 
 // -----------------------------------------------------------------------------

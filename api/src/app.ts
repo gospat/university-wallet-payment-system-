@@ -1,11 +1,14 @@
 import express from 'express';
+import crypto from 'crypto';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { getRedis } from './config/redis';
 import { globalErrorHandler } from './middlewares/error';
+import { protect, requirePermission } from './middlewares/auth';
 import authRoutes from './routes/auth';
 import adminRoutes from './routes/admin';
 import bursaryRoutes from './routes/bursary';
@@ -24,12 +27,30 @@ import client from 'prom-client';
 import { getQueueHealth } from './config/queue';
 import { publicVerifyReceipt } from './controllers/receipt';
 import { buildBranding, brandingEnvOnly } from './utils/branding';
+import { isAllowedOrigin } from './utils/originAllowlist';
 
 const app = express();
 
-// NOTE: If app runs behind nginx/ngrok/k8s ingress, preserve client IP (for rate limit + audit logs).
-// Default 1 means "trust a single hop of X-Forwarded-For" — matches single nginx on the VPS.
-// Override via TRUST_PROXY_HOPS=N env var if Bells IT ever puts Cloudflare / AWS ALB in front (+1 hop).
+// SECURITY — authoritative client IP. The app runs behind exactly ONE reverse
+// proxy (nginx -> 127.0.0.1:3001). `trust proxy = 1` tells Express to trust the
+// FIRST hop's X-Forwarded-For entry, and therefore `req.ip` / `req.ips` resolve
+// to the real client address (used for rate limiting, audit logs and security
+// alerts). This is also why application code MUST read `req.ip` and NEVER the
+// raw left-most `X-Forwarded-For` header — that header is client-controlled and
+// can be forged to spoof the source IP.
+//
+// ⚠ TOPOLOGY REQUIREMENT: nginx MUST OVERWRITE the inbound forwarding headers,
+// not pass them through. In the nginx server block set BOTH:
+//     proxy_set_header X-Real-IP        $remote_addr;
+//     proxy_set_header X-Forwarded-For  $remote_addr;   # OVERWRITE (do NOT use
+//                                                       # $proxy_add_x_forwarded_for,
+//                                                       # which APPENDS the client value)
+// Using `$proxy_add_x_forwarded_for` lets an attacker prepend arbitrary values and,
+// with `trust proxy = 1`, those forged values would be read as the client IP.
+//
+// If Bells IT ever adds another hop (Cloudflare / AWS ALB) in FRONT of nginx, raise
+// this via TRUST_PROXY_HOPS=N (N = number of trusted hops) AND ensure every hop
+// overwrites/appends correctly. Keep this value in sync with the real topology.
 const trustProxyHops = parseInt(process.env.TRUST_PROXY_HOPS ?? '1', 10);
 app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 1 ? trustProxyHops : 1);
 
@@ -144,11 +165,13 @@ app.use(helmet({
       'upgrade-insecure-requests': [],
     },
   },
-  hsts: {
-    maxAge: 63072000, // 2 years
-    includeSubDomains: true,
-    preload: true,
-  },
+  // HSTS is only meaningful when the response is served over HTTPS (nginx
+  // terminates TLS and is the only HTTPS endpoint). Enable it ONLY in
+  // production so local/dev/test over plain HTTP are never pinned to HTTPS.
+  hsts:
+    process.env.NODE_ENV === 'production'
+      ? { maxAge: 63072000, includeSubDomains: true, preload: true }
+      : false,
   dnsPrefetchControl: { allow: false },
   permittedCrossDomainPolicies: { permittedPolicies: 'none' },
   frameguard: { action: 'sameorigin' },
@@ -168,38 +191,24 @@ app.use((_req, res, next) => {
 app.disable('x-powered-by');
 
 // 2. CORS
-function buildCorsOrigins(): string[] {
-  const fromEnv = (process.env.CORS_ORIGIN || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const defaults = [
-    'http://localhost:5173',
-    'http://localhost:5174',
-    process.env.FRONTEND_BASE_URL,
-  ].filter((v): v is string => Boolean(v));
-  return Array.from(new Set([...defaults, ...fromEnv]));
-}
-
-const localOriginPatterns: RegExp[] = [
-  /^https?:\/\/localhost(:\d+)?(\/|$)/,
-  /^https?:\/\/127\.0\.0\.1(:\d+)?(\/|$)/,
-  /^https?:\/\/0\.0\.0\.0(:\d+)?(\/|$)/,
-  /\.localtest\.me(:\d+)?(\/|$)/,
-];
-
+//
+// SECURITY: a strict exact-match allowlist. There is NO wildcard origin and NO
+// arbitrary origin reflection — an origin is only echoed back when it is an
+// exact member of the allowlist (or, OUTSIDE production, a local dev origin).
+// `credentials: true` is therefore only ever paired with known origins.
+//
+// The allowlist source of truth lives in `./utils/originAllowlist` so the
+// cookie-based refresh CSRF guard can reuse the exact same list.
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      const origins = buildCorsOrigins();
-      if (origins.includes(origin)) return cb(null, true);
-      if (localOriginPatterns.some((re) => re.test(origin))) return cb(null, true);
+      if (isAllowedOrigin(origin)) return cb(null, true);
       return cb(new Error('Not allowed by CORS'));
     },
     credentials: true,
   })
 );
+
 
 // 3. Rate Limiting (Prevent Brute Force & DDoS)
 // Reasonable thresholds: not so tight that legitimate usage breaks, but brutal on abuse.
@@ -317,7 +326,10 @@ app.use(/^\/api\/v1\/reports\/.*\/?(export|download)$/i, reportsExportLimiter);
 //    - development: morgan('dev') → short colored human-readable logs
 //    - production : morgan('combined') → standard Apache/NCSA format, good for log parsers
 //    - Always skip /health and /ready probes so 10s monitoring pings don't spam the logs.
-morgan.token('realip', (req: any) => req.headers['x-forwarded-for']?.toString().split(',')[0].trim() ?? req.ip ?? '-');
+// SECURITY: log the AUTHORITATIVE client IP (`req.ip`), never the raw
+// X-Forwarded-For header — the header's left-most value is attacker-controlled
+// and would let a caller poison access logs with a spoofed source address.
+morgan.token('realip', (req: any) => req.ip ?? req.socket?.remoteAddress ?? '-');
 const isProd = process.env.NODE_ENV === 'production';
 app.use(morgan(isProd ? ':realip - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent"' : 'dev', {
   skip: (req) => {
@@ -341,6 +353,14 @@ app.use(
 // extended:false disables `qs` parser → only simple key=value pairs.
 // Prevents prototype pollution when code later does bracket access with req.body[key].
 app.use(express.urlencoded({ extended: false, limit: '256kb', parameterLimit: 100 }));
+
+// Cookie parsing — REQUIRED for the HttpOnly refresh-token cookie: `authenticate()`
+// prefers `req.cookies.access_token`, and the refresh/logout controllers read the
+// `refresh_token` cookie. Without this, `req.cookies` is always undefined.
+// Unsigned parsing only — the refresh cookie is opaque and its authenticity is
+// enforced by verifying the JWT inside it, never by a cookie signature.
+app.use(cookieParser());
+
 
 client.collectDefaultMetrics();
 
@@ -387,13 +407,30 @@ app.get('/api/v1/ready', async (req, res) => {
   }
 });
 
+// Prometheus metrics — FAIL CLOSED.
+//
+//  · METRICS_TOKEN missing/empty  ⇒ respond 404 (the endpoint behaves as if it
+//    does not exist, so an unconfigured deployment never leaks metrics).
+//  · wrong credential             ⇒ 401.
+//  · correct credential           ⇒ metrics served.
+//
+// Credential format is unchanged: `Authorization: Bearer <METRICS_TOKEN>`.
+// Compared with a timing-safe equality check (length guard first so
+// crypto.timingSafeEqual never throws on mismatched buffer sizes).
 app.get('/api/v1/metrics', async (req, res) => {
-  const token = process.env.METRICS_TOKEN;
-  if (token) {
-    const auth = req.header('Authorization') || '';
-    if (auth !== `Bearer ${token}`) {
-      return res.status(401).json({ status: 'fail', message: 'Unauthorized' });
-    }
+  const expectedToken = process.env.METRICS_TOKEN ?? '';
+  if (expectedToken.trim().length === 0) {
+    return res.status(404).json({ status: 'fail', message: 'Not Found' });
+  }
+  const auth = req.header('Authorization') || '';
+  const prefix = 'Bearer ';
+  const provided = auth.startsWith(prefix) ? auth.slice(prefix.length) : '';
+  const providedBuf = Buffer.from(provided, 'utf8');
+  const expectedBuf = Buffer.from(expectedToken, 'utf8');
+  const tokenMatches =
+    providedBuf.length === expectedBuf.length && crypto.timingSafeEqual(providedBuf, expectedBuf);
+  if (!tokenMatches) {
+    return res.status(401).json({ status: 'fail', message: 'Unauthorized' });
   }
   res.setHeader('Content-Type', client.register.contentType);
   res.send(await client.register.metrics());
@@ -413,8 +450,14 @@ app.use('/api/v1/bursary', bursaryRoutes);
 app.use('/api/v1/bursary/reconciliation', reconciliationRoutes);
 app.use('/api/v1/academic', academicRoutes);
 
-// Admin-only: Queue health probe (used by dashboards + k8s liveness).
-app.get('/api/v1/queue-health', async (_req, res) => {
+// Admin-only: Queue health probe.
+// SECURITY: this MUST NOT be public — it discloses queue mode / Redis
+// connectivity / registered topic count (internal infrastructure detail). It is
+// gated behind authentication + the granular VIEW_QUEUES capability.
+// The unauthenticated minimal liveness endpoint is `/api/v1/health` (aka
+// `/healthz`), which returns no queue/Redis/worker internals — use that for
+// k8s/proxmox liveness probes instead of this endpoint.
+app.get('/api/v1/queue-health', protect, requirePermission('VIEW_QUEUES'), async (_req, res) => {
   try {
     const qh = await getQueueHealth();
     res.status(200).json({ status: 'success', data: qh });

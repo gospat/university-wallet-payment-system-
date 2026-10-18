@@ -30,9 +30,17 @@ const getRefreshSecret = (): string => {
   return process.env.JWT_REFRESH_SECRET as string;
 };
 
-const signAccessToken = (id: number, role: Role) => {
+/**
+ * Access tokens embed a SESSION GENERATION (`ver`). `protect()` compares it
+ * against the authoritative `User.authVersion` on every authenticated request,
+ * so bumping that column immediately invalidates every already-issued access
+ * token. Tokens issued before this change carry no `ver` and are treated as
+ * generation 0 (the additive DB default), keeping the change backward
+ * compatible.
+ */
+const signAccessToken = (id: number, role: Role, authVersion = 0) => {
   return jwt.sign(
-    { id, role, type: 'access' },
+    { id, role, type: 'access', ver: Number(authVersion) || 0 },
     process.env.JWT_SECRET as string,
     { expiresIn: ACCESS_EXPIRES_IN as any, algorithm: 'HS256' }
   );
@@ -79,10 +87,11 @@ export class AuthService {
   private static async buildTokensForUser(
     userId: number,
     role: Role,
+    authVersion = 0,
     ipAddress?: string,
     userAgent?: string
   ): Promise<{ accessToken: string; refreshToken: string; expiresInMs: number }> {
-    const accessToken = signAccessToken(userId, role);
+    const accessToken = signAccessToken(userId, role, authVersion);
     const { refreshJWT } = await AuthService.generateRefreshToken(userId, ipAddress, userAgent);
     return {
       accessToken,
@@ -158,13 +167,33 @@ export class AuthService {
     });
 
     const result = await prisma.$transaction(async (tx) => {
-      await tx.refreshToken.update({
-        where: { id: refreshRow.id },
+      // ---------------------------------------------------------------------
+      // ATOMIC ROTATION CLAIM (§ requirement 8)
+      // ---------------------------------------------------------------------
+      // The previous implementation read the row, checked `revokedAt`, then
+      // updated it — a check-then-mutate sequence that allowed the SAME refresh
+      // token to be rotated twice concurrently (two independent valid sessions
+      // minted from one token). This single conditional UPDATE re-evaluates the
+      // predicate against the CURRENT committed row under the row lock, so with
+      // concurrent callers exactly ONE matches a row (count === 1) and every
+      // other caller matches 0 and is rejected. The claim and the replacement
+      // token creation are in the same transaction, so there is no window in
+      // which a token is revoked without a successor.
+      const claimed = await tx.refreshToken.updateMany({
+        where: {
+          token: tokenHex,
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        },
         data: {
           revokedAt: new Date(),
           lastUsedAt: new Date(),
         },
       });
+
+      if (claimed.count !== 1) {
+        throw new AppError('Refresh token has already been used. Please log in again.', 401);
+      }
 
       const newTokenHex = randomHex(64);
       const newExpiresAt = new Date(Date.now() + REFRESH_EXPIRES_MS);
@@ -179,7 +208,11 @@ export class AuthService {
         },
       });
 
-      const newAccessToken = signAccessToken(user.id, user.role);
+      const newAccessToken = signAccessToken(
+        user.id,
+        user.role,
+        Number((user as any).authVersion ?? 0),
+      );
       const newRefreshJWT = signRefreshToken(user.id, newTokenHex);
 
       return { newAccessToken, newRefreshJWT };
@@ -277,59 +310,9 @@ export class AuthService {
     return { revoked: true };
   }
 
-  static async signup(data: any): Promise<AuthResult> {
-    const { email, password, firstName, lastName, matricNumber } = data;
-
-    const existingUser = await prisma.user.findUnique({ where: { email } });
-    if (existingUser) {
-      throw new AppError('Email already exists', 400);
-    }
-
-    if (matricNumber) {
-      const existingMatric = await prisma.user.findUnique({ where: { matricNumber } });
-      if (existingMatric) {
-        throw new AppError('A student with this matriculation number already exists', 400);
-      }
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 12);
-
-    const result = await prisma.$transaction(async (tx) => {
-      const newUser = await tx.user.create({
-        data: {
-          email,
-          password: hashedPassword,
-          firstName,
-          lastName,
-          matricNumber,
-          role: Role.STUDENT,
-        },
-        select: safeUserSelect,
-      });
-
-      await tx.auditLog.create({
-        data: {
-          userId: newUser.id,
-          action: 'STUDENT_SELF_SIGNUP',
-          entityType: 'USER',
-          entityId: String(newUser.id),
-          details: { email, matricNumber: matricNumber ?? null },
-        },
-      });
-
-      return newUser;
-    });
-
-    const tokens = await AuthService.buildTokensForUser(result.id, result.role);
-
-    return {
-      user: result,
-      token: tokens.accessToken,
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-      expiresInMs: tokens.expiresInMs,
-    };
-  }
+  // NOTE: `AuthService.signup()` has been REMOVED (§ requirement 2). Public
+  // self-signup no longer exists anywhere in the codebase, so there is no code
+  // path that can create an anonymous account.
 
   static async login(
     data: any,
@@ -477,34 +460,44 @@ export class AuthService {
 
     const user = await prisma.user.findUnique({
       where: { id: userWithPassword.id },
-      select: safeUserSelect,
+      // `authVersion` is needed to stamp the session generation onto the access
+      // token; it is stripped from the response payload below.
+      select: { ...safeUserSelect, authVersion: true },
     });
     if (!user) throw new AppError(i18n.errors.auth.userNotFound, 404);
 
+    const { authVersion: loginAuthVersion, ...publicUser } = user as any;
+
     const permissions: string[] = await resolveEffectivePermissionsForUser({
-      id: user.id,
-      role: user.role,
-      isSuperAdmin: (user as any).isSuperAdmin === true,
+      id: publicUser.id,
+      role: publicUser.role,
+      isSuperAdmin: (publicUser as any).isSuperAdmin === true,
     });
 
     await prisma.auditLog
       .create({
         data: {
-          userId: user.id,
+          userId: publicUser.id,
           action: i18n.auditActions.login,
           entityType: 'USER',
-          entityId: String(user.id),
+          entityId: String(publicUser.id),
           ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
           userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
-          details: { role: user.role, audience: audience ?? null },
+          details: { role: publicUser.role, audience: audience ?? null },
         },
       })
       .catch(() => {});
 
-    const tokens = await AuthService.buildTokensForUser(user.id, user.role, ipAddress, userAgent);
+    const tokens = await AuthService.buildTokensForUser(
+      publicUser.id,
+      publicUser.role,
+      Number(loginAuthVersion ?? 0),
+      ipAddress,
+      userAgent,
+    );
 
     return {
-      user: { ...user, permissions },
+      user: { ...publicUser, permissions },
       token: tokens.accessToken,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
@@ -531,30 +524,80 @@ export class AuthService {
     return { ...user, permissions };
   }
 
-  static async changePassword(userId: number, currentPassword: string, newPassword: string) {
+  static async changePassword(
+    userId: number,
+    currentPassword: string,
+    newPassword: string,
+    opts?: { ipAddress?: string; userAgent?: string },
+  ) {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new AppError('User not found', 404);
 
     const ok = await bcrypt.compare(currentPassword, user.password);
     if (!ok) throw new AppError('Current password is incorrect.', 401);
     if (await bcrypt.compare(newPassword, user.password)) {
-      throw new AppError('New password must differ from current password.', 400);
+      throw new AppError(i18n.errors.auth.passwordSame, 400);
     }
     if (newPassword.length < 8) {
-      throw new AppError('New password must be at least 8 characters.', 400);
+      throw new AppError(i18n.errors.auth.passwordTooShort, 400);
+    }
+
+    // The bootstrap credential IS the lowercased surname (or matric number when
+    // no surname is known), so those values — and the account's own email and
+    // its local part — must never be reusable as the new password, otherwise
+    // the first-login change would be cosmetic only.
+    const newLower = newPassword.trim().toLowerCase();
+    const forbidden = new Set<string>();
+    const surname = String(user.lastName ?? '').trim().toLowerCase();
+    if (surname) forbidden.add(surname);
+    const matric = String(user.matricNumber ?? '').trim().toLowerCase();
+    if (matric) forbidden.add(matric);
+    const email = String(user.email ?? '').trim().toLowerCase();
+    if (email) {
+      forbidden.add(email);
+      const localPart = email.split('@')[0];
+      if (localPart) forbidden.add(localPart);
+    }
+    if (forbidden.has(newLower)) {
+      throw new AppError(
+        'New password must not be your surname, matriculation number or email address.',
+        400,
+      );
     }
 
     const hash = await bcrypt.hash(newPassword, 12);
-    await prisma.user.update({ where: { id: userId }, data: { password: hash, mustChangePassword: false } });
 
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'PASSWORD_CHANGED',
-        entityType: 'USER',
-        entityId: String(userId),
-        details: { via: 'SELF_SERVICE' },
-      },
+    // One transaction: password write, session-generation bump and refresh-token
+    // revocation. Bumping `authVersion` invalidates every already-issued access
+    // token (including the caller's own), and revoking refresh tokens removes
+    // every renewable session — so a password change genuinely ends all prior
+    // sessions rather than only affecting future logins.
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          password: hash,
+          mustChangePassword: false,
+          authVersion: { increment: 1 },
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+      await tx.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId,
+          action: 'PASSWORD_CHANGED',
+          entityType: 'USER',
+          entityId: String(userId),
+          ipAddress: opts?.ipAddress ? String(opts.ipAddress).slice(0, 64) : null,
+          userAgent: opts?.userAgent ? String(opts.userAgent).slice(0, 512) : null,
+          details: { via: 'SELF_SERVICE', sessionsRevoked: true },
+        },
+      });
     });
   }
 }

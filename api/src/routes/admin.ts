@@ -58,12 +58,15 @@ const router = express.Router();
 // ============ TEMPLATE ROUTES (mounted BEFORE protect — inline auth with HTML fallback) ============
 //
 // These download endpoints are registered before the router-level protect()
-// because their frontend callers use a `?access_token=` query token (a
-// browser-navigation download cannot send an Authorization header). The inline
-// check therefore does the SAME work protect() would: authenticate, resolve the
-// caller's LIVE effective permissions, and authorise on capability — never on
-// the bare role. A normal (non-flagged) ADMIN without the capability is denied;
-// only a FLAG-AWARE super administrator bypasses the capability floor.
+// because their frontend callers fetch them and trigger a browser download from
+// a Blob. They authenticate ONLY from the `Authorization: Bearer` header — the
+// previous `?access_token=` query-string fallback was REMOVED (§ requirement 7)
+// because query-string credentials leak into browser history, `Referer`
+// headers, proxy logs and monitoring. The inline check therefore does the SAME
+// work protect() would: authenticate, resolve the caller's LIVE effective
+// permissions, and authorise on capability — never on the bare role. A normal
+// (non-flagged) ADMIN without the capability is denied; only a FLAG-AWARE super
+// administrator bypasses the capability floor.
 
 const FRONTEND_URL_ADMIN = process.env.FRONTEND_URL || 'http://localhost:5173';
 
@@ -77,9 +80,6 @@ async function templateAuthCheckAdmin(
   let token: string | undefined;
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.slice(7);
-  if (!token && typeof (req.query as any).access_token === 'string') {
-    token = (req.query as any).access_token as string;
-  }
   let userId: number | null = null;
   let userRole: string | null = null;
   let userIsSuperAdmin = false;
@@ -792,6 +792,14 @@ router.patch(
         if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
       }
 
+      // Requirement 3 — a NORMAL admin must never change/deactivate/demote or
+      // otherwise mutate a PROTECTED Super Administrator's account. Evaluated
+      // from the LOCKED authoritative target state (after the invariant check, so
+      // removing the LAST active Super Administrator stays a 409).
+      if (assertCanMutateProtectedTarget(req.user, existing)) {
+        return { kind: 'superAdminRequired' as const };
+      }
+
       const updated = await tx.user.update({
         where: { id },
         data: updateData,
@@ -808,6 +816,13 @@ router.patch(
         status: 'fail',
         code: 'FINAL_SUPER_ADMIN',
         error: 'Cannot demote, suspend or change the role of the final active Super Administrator. Grant the flag to another active administrator first.',
+      });
+    }
+    if (outcome.kind === 'superAdminRequired') {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: 'Only a Super Administrator may modify a protected Super Administrator account.',
       });
     }
     if (outcome.kind === 'unchanged') {
@@ -859,6 +874,14 @@ router.post(
         if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
       }
 
+      // Requirement 3 — a NORMAL admin must never deactivate/suspend a PROTECTED
+      // Super Administrator. Evaluated from the LOCKED authoritative target state
+      // (after the invariant check, so suspending the LAST active Super
+      // Administrator stays a 409).
+      if (assertCanMutateProtectedTarget(req.user, existing)) {
+        return { kind: 'superAdminRequired' as const };
+      }
+
       const updated = await tx.user.update({
         where: { id },
         data: { accountStatus: newStatus },
@@ -875,6 +898,13 @@ router.post(
         status: 'fail',
         code: 'FINAL_SUPER_ADMIN',
         error: 'Cannot suspend the final active Super Administrator. Grant the flag to another active administrator first.',
+      });
+    }
+    if (outcome.kind === 'superAdminRequired') {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: 'Only a Super Administrator may modify a protected Super Administrator account.',
       });
     }
 
@@ -902,20 +932,70 @@ router.post(
   catchAsync(async (req: any, res) => {
     const { id } = req.params as z.infer<typeof UserIdParam>;
     const { newPassword } = req.body as z.infer<typeof ResetPasswordSchema>;
-    const existing = await prisma.user.findUnique({ where: { id } });
-    if (!existing) {
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+    // D10/D7 + Requirement 3 — the SAME common locking context used by every
+    // other user mutation (SET lock → TARGET-row lock → AUTHORITATIVE read →
+    // VALIDATE → WRITE), so the protected-target gate is decided on state that
+    // cannot change under it.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const existing = await lockSuperAdminMutationContext(tx, id, {
+        id: true,
+        email: true,
+        role: true,
+        isSuperAdmin: true,
+        accountStatus: true,
+      });
+      if (!existing) return { kind: 'notFound' as const };
+
+      // Requirement 3 — a NORMAL admin must never reset a PROTECTED Super
+      // Administrator's password. (A password reset does not remove the target
+      // from the ACTIVE Super Administrator set, so the final-active-Super-Admin
+      // invariant is unaffected and stays intact.)
+      if (assertCanMutateProtectedTarget(req.user, existing)) {
+        return { kind: 'superAdminRequired' as const };
+      }
+
+      await tx.user.update({
+        where: { id },
+        data: {
+          password: hashedPassword,
+          // Only a STUDENT target is forced through the first-login change-
+          // password flow; a staff target keeps the previous behaviour.
+          ...(existing.role === Role.STUDENT ? { mustChangePassword: true } : {}),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          // An ADMIN-triggered reset is a credential/security event: bump the
+          // session generation so every already-issued access token is rejected.
+          authVersion: { increment: 1 },
+        },
+      });
+      // Revoke all renewable sessions for the target — a reset must end every
+      // prior session, not only affect future logins.
+      await tx.refreshToken.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      return { kind: 'done' as const, existing };
+    });
+
+    if (outcome.kind === 'notFound') {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
-    const hashedPassword = await bcrypt.hash(newPassword, 12);
-    await prisma.user.update({
-      where: { id },
-      data: { password: hashedPassword },
-    });
+    if (outcome.kind === 'superAdminRequired') {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: 'Only a Super Administrator may reset a protected Super Administrator password.',
+      });
+    }
+
     await writeAudit(req, {
       action: 'PASSWORD_RESET',
       entityType: 'USER',
       entityId: id,
-      details: { email: existing.email },
+      details: { email: outcome.existing.email },
     });
     res.status(200).json({ status: 'success', data: { message: 'Password reset successful' } });
   }),
@@ -1043,6 +1123,55 @@ async function assertSuperAdminInvariant(
     },
   });
   return remaining > 0 ? 'ok' : 'finalSuperAdmin';
+}
+
+/**
+ * REQUIREMENT 3 — PROTECTED SUPER ADMINISTRATOR TARGET PROTECTION.
+ *
+ * The ONE centralised, server-side gate that prevents a NORMAL administrator
+ * (role === ADMIN ∧ isSuperAdmin !== true) from ever taking control of a
+ * PROTECTED Super Administrator's security state: resetting its password,
+ * changing/deactivating/deleting it, demoting it / changing its role or account
+ * status, altering its individual access profile, revoking its Super Admin flag,
+ * or otherwise mutating its identity / authentication state.
+ *
+ * Authority is derived ONLY from the actor's own resolved state and the TARGET's
+ * AUTHORITATIVE state (`target`, read from the database under the mutation lock)
+ * — NEVER from the request body and NEVER from the frontend.
+ *
+ * Returns a ready-to-send 403 body when the mutation must be BLOCKED, or null
+ * when it may proceed:
+ *   · a flag-aware Super Administrator may operate on any account (the
+ *     final-active-Super-Admin invariant is enforced separately), and
+ *   · a user acting on their OWN account is never blocked by this rule
+ *     (self-service password change is a separate endpoint anyway).
+ *
+ * PRECEDENCE: callers evaluate the final-active-Super-Admin invariant BEFORE
+ * this gate, so removing the LAST active Super Administrator is a 409
+ * FINAL_SUPER_ADMIN (never a 403) — the lockout guard takes precedence.
+ */
+function assertCanMutateProtectedTarget(
+  actor: { id: number; role: Role; isSuperAdmin?: boolean } | undefined,
+  target: { id: number; role: Role; isSuperAdmin?: boolean } | null | undefined,
+): { code: 'SUPER_ADMIN_REQUIRED'; error: string } | null {
+  if (!target) return null;
+  // A flag-aware Super Administrator may manage any account (subject to the
+  // final-active-Super-Admin invariant enforced by the caller).
+  if (isSuperAdmin(actor)) return null;
+  // A user acting on their OWN account is not blocked by this rule.
+  if (actor && actor.id === target.id) return null;
+  // Protection is the COMPLETE Super Administrator definition, evaluated through
+  // the centralised helper (a non-ADMIN carrying a stray flag is NOT protected).
+  const targetIsProtected = isSuperAdmin({
+    id: target.id,
+    role: target.role,
+    isSuperAdmin: target.isSuperAdmin === true,
+  });
+  if (!targetIsProtected) return null;
+  return {
+    code: 'SUPER_ADMIN_REQUIRED',
+    error: 'Only a Super Administrator may modify a protected Super Administrator account.',
+  };
 }
 
 /**
@@ -1245,6 +1374,14 @@ router.delete(
         if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
       }
 
+      // Requirement 3 — a NORMAL admin must never delete a PROTECTED Super
+      // Administrator. Evaluated from the LOCKED authoritative target state
+      // (after the invariant check, so deleting the LAST active Super
+      // Administrator stays a 409).
+      if (assertCanMutateProtectedTarget(req.user, target)) {
+        return { kind: 'superAdminRequired' as const };
+      }
+
       // Gate B — the AUTHORITATIVE student financial gate, derived from the
       // LOCKED role. A target that IS (or has just BECOME) a STUDENT under the
       // lock can never be deleted while read-only financial records reference it.
@@ -1283,6 +1420,13 @@ router.delete(
         status: 'fail',
         code: 'FINAL_SUPER_ADMIN',
         error: 'Cannot delete the final active Super Administrator. Grant the flag to another active administrator first.',
+      });
+    }
+    if (outcome.kind === 'superAdminRequired') {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: 'Only a Super Administrator may modify a protected Super Administrator account.',
       });
     }
 
@@ -1408,6 +1552,19 @@ router.patch(
         status: 'fail',
         code: 'NOT_STAFF',
         error: 'Individual access configuration applies to ADMIN and BURSARY users only.',
+      });
+    }
+
+    // Requirement 3 — a NORMAL admin must never alter a PROTECTED Super
+    // Administrator's individual access profile. The decision is derived from the
+    // AUTHORITATIVE target state through the single shared gate. (The stricter
+    // rule below additionally forbids a normal admin from touching ANY
+    // administrator's access.)
+    if (assertCanMutateProtectedTarget(actor, t)) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'SUPER_ADMIN_REQUIRED',
+        error: 'Only a Super Administrator may modify a protected Super Administrator account.',
       });
     }
 

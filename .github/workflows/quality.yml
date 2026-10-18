@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Least privilege for the workflow token.
+permissions:
+  contents: read
+
 jobs:
   test-api:
     runs-on: ubuntu-latest
@@ -26,15 +30,27 @@ jobs:
 
       - name: Lint API
         working-directory: api
-        run: npx eslint . --max-warnings 0 || echo "ESLint not configured, skipping"
+        run: npx eslint . --max-warnings 0
 
       - name: Type-check API
         working-directory: api
         run: npx tsc --noEmit
 
+      - name: Build API
+        working-directory: api
+        run: npm run build
+
       - name: Test API
         working-directory: api
         run: npx jest --silent --passWithNoTests
+
+      - name: Security tests (API)
+        working-directory: api
+        run: npx jest --silent --passWithNoTests "security|auth-token-hardening|rbac|ssrf|receipt-ssrf"
+
+      - name: Audit API production dependencies
+        working-directory: api
+        run: npm audit --omit=dev --audit-level=high
 
   build-app:
     runs-on: ubuntu-latest
@@ -55,7 +71,7 @@ jobs:
 
       - name: Lint App
         working-directory: app
-        run: npx eslint . --max-warnings 0 || echo "ESLint not configured, skipping"
+        run: npx eslint . --max-warnings 0
 
       - name: Type-check App
         working-directory: app
@@ -68,3 +84,7 @@ jobs:
       - name: Build App
         working-directory: app
         run: npm run build
+
+      - name: Audit App production dependencies
+        working-directory: app
+        run: npm audit --omit=dev --audit-level=high

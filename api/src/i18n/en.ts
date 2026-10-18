@@ -15,6 +15,7 @@ export const errors = {
     wrongTokenTypeAccess: 'Invalid token type. Please use an access token.',
     wrongTokenTypeRefresh: 'Invalid token type. Please use a refresh token.',
     tokenUserGone: 'The user belonging to this token no longer exists.',
+    sessionInvalidated: 'Your session is no longer valid. Please log in again.',
     accountInactive: 'This account is no longer active. Please contact the administrator.',
     accountSuspended: 'Your account has been suspended. Please contact the administrator.',
     accountGraduated: 'This account has been marked as graduated. Please contact alumni services.',

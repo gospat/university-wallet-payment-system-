@@ -1,4 +1,4 @@
-import api from './api';
+import api, { downloadBlob } from './api';
 
 export interface AuditLogFilters {
   page?: number;
@@ -60,16 +60,13 @@ export const auditApi = {
     const res = await api.get(`/admin/audit-logs${qs}`);
     return (res?.data?.data ?? res?.data ?? { items: [], pagination: { page: 1, limit: 50, total: 0, totalPages: 1, hasNext: false, hasPrev: false }, filters: {} }) as AuditListResponse;
   },
-  exportUrl: (query: AuditLogFilters = {}): string => {
-    const base = (api.defaults.baseURL ?? '/api/v1') + '/admin/audit-logs/export.csv';
+  exportDownload: (query: AuditLogFilters = {}): Promise<void> => {
     const params = new URLSearchParams();
     Object.entries(query).forEach(([k, v]) => {
       if (v === null || v === undefined || v === '') return;
       params.append(k, String(v));
     });
-    const token = localStorage.getItem('token') ?? '';
-    if (token) params.set('access_token', token);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    return base + qs;
+    return downloadBlob(`/admin/audit-logs/export.csv${qs}`, 'audit-logs.csv');
   },
 };

@@ -10,8 +10,14 @@ export type TemplateAuthResult = { ok: boolean; html?: string; forbidden?: boole
 
 /**
  * Inline authorization for template-download routes that are mounted BEFORE
- * `protect()` (they support an `?access_token=` query-param flow because a bare
- * browser navigation cannot set an Authorization header).
+ * `protect()`.
+ *
+ * SECURITY: the access token is accepted ONLY from the `Authorization: Bearer
+ * <token>` header. A query-string token (`?access_token=`) is deliberately NOT
+ * accepted — URLs leak into access logs, proxy logs, browser history, referrer
+ * headers and monitoring traces, so query-string credentials are treated as a
+ * token-disclosure vector. Callers must send the header (e.g. via fetch with an
+ * Authorization header) rather than a bare navigation URL.
  *
  * Authorization is BOTH:
  *   · a role boundary (`allowedRoles`) — preserved exactly as before, AND
@@ -32,9 +38,6 @@ export async function assertCanManageTemplates(
   let token: string | undefined;
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.slice(7);
-  if (!token && typeof (req.query as any).access_token === 'string') {
-    token = (req.query as any).access_token as string;
-  }
   let userId: number | null = null;
   let userRole: string | null = null;
   let superAdmin = false;

@@ -373,6 +373,9 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
   }));
   jest.mock('../middlewares/auth', () => ({
     protect: jest.fn((_r: any, _re: any, n: any) => n()),
+    // Present in the real module (routes/auth.ts mounts it) — a passthrough so
+    // the hand-rolled mock mirrors the current public surface.
+    protectSelfService: jest.fn((_r: any, _re: any, n: any) => n()),
     restrictTo: jest.fn(() => (_r: any, _re: any, n: any) => n()),
     requirePermission: jest.fn(() => (_r: any, _re: any, n: any) => n()),
     requireSuperAdmin: jest.fn((_r: any, _re: any, n: any) => n()),
@@ -589,6 +592,9 @@ describe('8 limiters + webhook regression', () => {
     }));
     jest.mock('../middlewares/auth', () => ({
       protect: jest.fn((_r: any, _re: any, n: any) => n()),
+      // Present in the real module (routes/auth.ts mounts it) — a passthrough so
+      // the hand-rolled mock mirrors the current public surface.
+      protectSelfService: jest.fn((_r: any, _re: any, n: any) => n()),
       restrictTo: jest.fn(() => (_r: any, _re: any, n: any) => n()),
       requirePermission: jest.fn(() => (_r: any, _re: any, n: any) => n()),
       requireSuperAdmin: jest.fn((_r: any, _re: any, n: any) => n()),

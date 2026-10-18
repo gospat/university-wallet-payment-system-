@@ -2,9 +2,73 @@
 // All repeated validation/sanitization patterns across the API MUST live here.
 
 import crypto from 'crypto';
+import { AppError } from './AppError';
 
 const CSV_FORMULA_TRIGGER = /^[=+\-@\t\r|%]/;
 const CSV_DDE_TRIGGER = /^DDE\s*\(/i;
+
+/**
+ * Neutralize spreadsheet formula-injection for a SINGLE cell value WITHOUT the
+ * CSV-level quoting performed by `csvCellSafe` (use for XLSX/ExcelJS cells and
+ * any non-CSV sink). A value beginning with = + - @, tab, CR, |, or a DDE()
+ * payload is prefixed with a literal apostrophe so Excel/Sheets/LibreOffice
+ * render it as inert text instead of executing it.
+ */
+export function neutralizeSpreadsheetFormula(value: unknown): string {
+  let s: string;
+  if (value === null || value === undefined) s = '';
+  else if (typeof value === 'object') s = JSON.stringify(value);
+  else s = String(value);
+  if (s.length > 0 && (CSV_FORMULA_TRIGGER.test(s) || CSV_DDE_TRIGGER.test(s))) {
+    s = "'" + s;
+  }
+  return s;
+}
+
+// --- Upload bounds ---------------------------------------------------------
+
+/** Hard ceiling on the number of data rows accepted from one uploaded file. */
+export const MAX_UPLOAD_ROWS = 200_000;
+/** Hard ceiling on the number of columns accepted from one uploaded file. */
+export const MAX_UPLOAD_COLUMNS = 200;
+
+/**
+ * Bound the size of an uploaded spreadsheet AFTER parsing (row/column count).
+ * Complements the compressed-size cap enforced at the multipart layer so a
+ * malicious 1,000,000-row CSV/XLSX (or a decompression bomb) is rejected with a
+ * clear 413 instead of exhausting API memory. Fails CLOSED.
+ */
+export function assertUploadWithinBounds(rowCount: number, columnCount: number): void {
+  if (!Number.isFinite(rowCount) || rowCount > MAX_UPLOAD_ROWS) {
+    throw new AppError(
+      `This file has too many rows (${rowCount}). The maximum is ${MAX_UPLOAD_ROWS.toLocaleString()} rows per upload. Split it into smaller files and try again.`,
+      413,
+    );
+  }
+  if (!Number.isFinite(columnCount) || columnCount > MAX_UPLOAD_COLUMNS) {
+    throw new AppError(
+      `This file has too many columns (${columnCount}). The maximum is ${MAX_UPLOAD_COLUMNS} columns per upload.`,
+      413,
+    );
+  }
+}
+
+// --- HTML escaping ---------------------------------------------------------
+
+/**
+ * Escape a value for safe interpolation into an HTML context (element text or a
+ * double/single-quoted attribute). Centralized so every server-rendered email /
+ * template escapes user-, student- and admin-controlled values identically.
+ */
+export function escapeHtml(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 export function randomHex(n: number): string {
   return crypto.randomBytes(n).toString('hex');
@@ -147,12 +211,15 @@ export function hasOwn(obj: unknown, key: string | number | symbol): boolean {
 
 // --- Helpers: Trust Proxy / Forwarded IP parsing -------------------------------------------
 
+/**
+ * Authoritative client IP (same rule as utils/http.ts `reqIp`).
+ *
+ * SECURITY: do NOT read `X-Forwarded-For` directly. Its left-most value is
+ * attacker-controlled, so trusting it allows source-IP spoofing (bypassing
+ * IP rate limits, poisoning audit logs / security alerts). `req.ip` is the
+ * Express-derivative of the socket address + the app's `trust proxy` setting.
+ */
 export function realClientIp(req: { ip?: string; headers?: Record<string, string | string[] | undefined> }): string {
-  const header = req.headers?.['x-forwarded-for'];
-  if (typeof header === 'string') {
-    const first = header.split(',')[0]?.trim();
-    if (first) return first;
-  }
   return (req.ip ?? '').toString().slice(0, 64);
 }
 

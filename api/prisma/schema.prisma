@@ -228,6 +228,13 @@ model User {
   failedLoginAttempts Int            @default(0)
   lockedUntil         DateTime?
   mustChangePassword  Boolean        @default(false)
+  // Session generation counter. Bumped on every credential/security event
+  // (password change, password reset, admin-triggered reset). Access tokens
+  // embed this value; `protect()` rejects any token whose `ver` differs from
+  // the authoritative DB value, so already-issued access tokens are
+  // invalidated immediately. Additive + backward compatible: existing rows
+  // default to 0 and legacy tokens (no `ver`) are treated as 0.
+  authVersion         Int            @default(0)
   studentImportId     Int?
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt

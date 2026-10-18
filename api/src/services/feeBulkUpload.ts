@@ -18,6 +18,7 @@ import { AppError } from '../utils/AppError';
 import { i18n } from '../i18n/en';
 import { generateImportReference } from '../utils/paystack';
 import { Prisma } from '@prisma/client';
+import { csvLineSafe, assertUploadWithinBounds, MAX_UPLOAD_ROWS } from '../utils/security';
 
 const JSON_DB_NULL = Prisma.JsonNull;
 
@@ -158,29 +159,33 @@ function normalize(rawRow: Record<string, any>): Record<string, any> {
 // ---------------------------------------------------------------------------
 async function parseCsvOrXlsx(filePath: string, fileName: string): Promise<Record<string, any>[]> {
   const ext = path.extname(fileName).toLowerCase();
+  let rows: Record<string, any>[];
   if (ext === '.csv') {
-    return new Promise<Record<string, any>[]>((resolve, reject) => {
+    rows = await new Promise<Record<string, any>[]>((resolve, reject) => {
       const stream = fs.createReadStream(filePath, 'utf-8');
-      let rows: Record<string, any>[] = [];
       Papa.parse<Record<string, any>>(stream, {
         header: true,
         skipEmptyLines: true,
         worker: false,
+        // Bound memory: stop after the row cap (+1 to detect an over-limit file).
+        preview: MAX_UPLOAD_ROWS + 1,
         complete: (result) => {
-          rows = rows.concat(result.data as any[]);
-          resolve(rows);
+          resolve(result.data as any[]);
         },
         error: (err) => reject(err),
       });
     });
-  }
-  if (ext === '.xlsx' || ext === '.xls') {
+  } else if (ext === '.xlsx' || ext === '.xls') {
     const buf = await fs.promises.readFile(filePath);
     const wb = await XLSX.read(buf, { type: 'buffer', cellDates: true });
     const sheet = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false }) as any[];
+    rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false }) as any[];
+  } else {
+    throw new AppError(i18n.errors.upload.unsupportedFormat, 400);
   }
-  throw new AppError(i18n.errors.upload.unsupportedFormat, 400);
+  const columnCount = rows.reduce((m, r) => Math.max(m, Object.keys(r ?? {}).length), 0);
+  assertUploadWithinBounds(rows.length, columnCount);
+  return rows;
 }
 
 function compositeKeyOf(r: { feeCode: string; academicSession: string; program?: string | null | number; level?: string | null | number }): string {
@@ -671,7 +676,9 @@ function buildErrorCsv(stage: FeeUploadStage): string | undefined {
       ...Object.keys(stage.rawRecords[0] ?? {}).map((k) => String(p.record[k] ?? '')),
     ]);
   }
-  const csv = Papa.unparse(rows, { delimiter: ',' });
+  // SECURITY: neutralize CSV formula injection (OWASP) on every cell — the
+  // record values are uploader-supplied.
+  const csv = rows.map((r) => csvLineSafe(r)).join('');
   fs.writeFileSync(filePath, '\uFEFF' + csv, 'utf-8');
   return filePath;
 }

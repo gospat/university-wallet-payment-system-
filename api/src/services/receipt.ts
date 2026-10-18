@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { AppError } from '../utils/AppError';
 import { buildBranding, brandingEnvOnly, hasBrandingSignature, type Branding, BELLS_LOGO_DATA_URI } from '../utils/branding';
+import { assertSafeRemoteImageUrl, defaultReceiptAllowedHosts } from '../utils/ssrf';
 import prisma from '../config/database';
 
 // -----------------------------------------------------------------------------
@@ -331,9 +332,9 @@ type ReceiptData = {
     | null;
 };
 
-function signatureBlockHtml(b: Branding): string {
+async function signatureBlockHtml(b: Branding): Promise<string> {
   if (!hasBrandingSignature(b)) return '';
-  const safeSigUrl = assertSafeImageUrl(b.bursarSignatureUrl);
+  const safeSigUrl = await assertSafeImageUrl(b.bursarSignatureUrl);
   const sigImg = safeSigUrl
     ? `<div class="signature-line-img"><img src="${escapeHtml(safeSigUrl)}" alt="Signature" onerror="this.style.display='none'" /></div>`
     : '';
@@ -365,8 +366,8 @@ function conditionalTermLine1(b: Branding): string {
   return '1. This receipt is computer generated and requires no signature. It is valid only for the specific transaction referenced.';
 }
 
-function logoImgHtml(b: Branding, sizePx = 54): string {
-  const safeLogoUrl = assertSafeImageUrl(b.logoUrl);
+async function logoImgHtml(b: Branding, sizePx = 54): Promise<string> {
+  const safeLogoUrl = await assertSafeImageUrl(b.logoUrl);
   if (!safeLogoUrl) return '';
   return `<div class="logo-img"><img src="${escapeHtml(safeLogoUrl)}" alt="logo" style="max-height:${sizePx}px; max-width:${sizePx * 1.6}px; object-fit:contain;" onerror="this.parentNode.style.display='none'" /></div>`;
 }
@@ -434,42 +435,19 @@ function chargeSourceHtml(info: DirectBillInfo): string {
   return `<div class="charge-source">Charge source: <strong>Direct Bill</strong> (Bursary assignment #${info.assignmentId})${matricPart}</div>`;
 }
 
-function assertSafeImageUrl(url: string | undefined | null): string | null {
-  if (!url) return null;
-  try {
-    const u = new URL(url);
-    const isDevLocalHttp =
-      process.env.NODE_ENV !== 'production' &&
-      (url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1'));
-    if (u.protocol !== 'https:' && !isDevLocalHttp) {
-      console.warn(`[receipt.ts] Blocked unsafe image URL: protocol=${u.protocol} hostname=${u.hostname}`);
-      return null;
-    }
-    const unsafeHost = /^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[::1\]|metadata\.google\.internal|169\.254\.169\.254)$/i;
-    if (unsafeHost.test(u.hostname)) {
-      console.warn(`[receipt.ts] Blocked unsafe image URL: hostname=${u.hostname}`);
-      return null;
-    }
-    return url;
-  } catch {
-    console.warn(`[receipt.ts] Blocked unsafe image URL: malformed url=${String(url).slice(0, 120)}`);
+async function assertSafeImageUrl(url: string | undefined | null): Promise<string | null> {
+  const check = await assertSafeRemoteImageUrl(url, {
+    allowedHosts: defaultReceiptAllowedHosts(),
+    allowLocalHttp: process.env.NODE_ENV !== 'production',
+  });
+  if (!check.ok) {
+    // Never log embedded credentials; truncate as before.
+    const hasCreds = /\/\/[^/@]*@/.test(String(url ?? ''));
+    const shown = hasCreds ? '[redacted]' : String(url ?? '').slice(0, 120);
+    console.warn(`[receipt.ts] Blocked unsafe image URL: ${check.reason} url=${shown}`);
     return null;
   }
-}
-
-function _isAllowedImageUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    const isDevLocalHttp =
-      process.env.NODE_ENV !== 'production' &&
-      (url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1'));
-    if (u.protocol !== 'https:' && !isDevLocalHttp) return false;
-    const unsafeHost = /^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[::1\]|metadata\.google\.internal|169\.254\.169\.254)$/i;
-    if (unsafeHost.test(u.hostname)) return false;
-    return true;
-  } catch {
-    return false;
-  }
+  return check.url;
 }
 
 async function render(html: string) {
@@ -597,12 +575,27 @@ async function render(html: string) {
       }
       if (rt === 'image') {
         const url: string = req.url();
-        if (url.startsWith('data:') || _isAllowedImageUrl(url)) {
+        if (url.startsWith('data:')) {
           req.continue();
-        } else {
-          console.warn(`[receipt.ts] Blocked image fetch via request interception: url=${url.slice(0, 160)}`);
-          req.abort();
+          return;
         }
+        // Defense-in-depth: revalidate every image request (including redirect
+        // hops Chromium follows) with the same DNS + private-IP check.
+        void assertSafeRemoteImageUrl(url, {
+          allowedHosts: defaultReceiptAllowedHosts(),
+          allowLocalHttp: process.env.NODE_ENV !== 'production',
+        })
+          .then((check) => {
+            if (check.ok) {
+              req.continue();
+            } else {
+              console.warn(`[receipt.ts] Blocked image fetch via request interception: url=${url.slice(0, 160)}`);
+              req.abort();
+            }
+          })
+          .catch(() => {
+            try { req.abort(); } catch (_) { /* ignore */ }
+          });
         return;
       }
       req.abort();
@@ -750,7 +743,7 @@ ${chargeSourceCss()}
     <tbody>${rows}</tbody>
   </table>
 
-  ${signatureBlockHtml(branding)}
+  ${await signatureBlockHtml(branding)}
 
   <div class="footer">
     <p>${hasBrandingSignature(branding) ? 'This is an official document authenticated by the Bursary signatory above.' : 'This is a computer-generated document and requires no signature.'}</p>
@@ -899,7 +892,7 @@ ${chargeSourceCss()}
     </table>
   </div>
 
-  ${signatureBlockHtml(branding)}
+  ${await signatureBlockHtml(branding)}
 
   <div class="footer">
     <div class="text">
@@ -1050,7 +1043,7 @@ ${chargeSourceCss()}
     </table>
   </div>
 
-  ${signatureBlockHtml(branding)}
+  ${await signatureBlockHtml(branding)}
 
   <div class="footer">
     <div class="text">

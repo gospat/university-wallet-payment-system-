@@ -109,6 +109,8 @@ jest.mock('../config/database', () => {
           fn({
             refreshToken: {
               update: () => Promise.resolve(null),
+              // Atomic rotation claim (§ requirement 8).
+              updateMany: () => Promise.resolve({ count: 1 }),
               create: () => Promise.resolve(null),
             },
             auditLog: { create: () => Promise.resolve({ id: 1 }) },
@@ -450,6 +452,8 @@ describe('AC7 Audit events emitted where expected', () => {
           fn({
             refreshToken: {
               update: () => Promise.resolve(null),
+              // Atomic rotation claim (§ requirement 8) — one claimed row.
+              updateMany: () => Promise.resolve({ count: 1 }),
               create: () => Promise.resolve(null),
             },
           })

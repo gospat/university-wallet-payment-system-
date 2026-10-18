@@ -1,4 +1,4 @@
-import api, { API_BASE_URL } from './api';
+import api, { downloadBlob } from './api';
 
 function unwrap<T>(resp: { data?: any }): T {
   return ((resp?.data?.data) as T) ?? ((resp as any)?.data as T);
@@ -289,17 +289,8 @@ export const feeApi = {
   async uploadConfirm(stageId: string, strategy: 'SKIP' | 'UPDATE' | 'ERROR'): Promise<any> {
     return api.post(`/fees/bulk-upload/${stageId}/confirm`, { duplicateStrategy: strategy }).then((r) => unwrap(r));
   },
-  uploadErrorsUrl(stageId: string) {
-    const token = localStorage.getItem('token') ?? '';
-    return `${API_BASE_URL}/fees/bulk-upload/${stageId}/errors.csv?access_token=${encodeURIComponent(token)}`;
-  },
-  feesTemplateUrl() {
-    const token = localStorage.getItem('token') ?? '';
-    return `${API_BASE_URL}/fees/template.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-  },
-  feesTemplateXlsxUrl() {
-    const token = localStorage.getItem('token') ?? '';
-    return `${API_BASE_URL}/fees/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
+  downloadUploadErrors(stageId: string): Promise<void> {
+    return downloadBlob(`/fees/bulk-upload/${stageId}/errors.csv`, 'fees-bulk-upload-errors.csv');
   },
 
   getStudentByMatric(matric: string): Promise<{ student: MatricStudentResp }> {

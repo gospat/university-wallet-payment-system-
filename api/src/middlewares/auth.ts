@@ -18,6 +18,12 @@ declare global {
         id: number;
         role: Role;
         isSuperAdmin: boolean;
+        /**
+         * Mandatory first-login password change flag (authoritative DB value).
+         * When true AND role === STUDENT the account is in the restricted
+         * first-login state and every `protect()`-guarded route is blocked.
+         */
+        mustChangePassword?: boolean;
         permissions?: string[];
       };
       cookies?: {
@@ -51,78 +57,134 @@ declare global {
 // existing importers (`../middlewares/auth`) keep working unchanged.
 export { isSuperAdmin, bumpRolePermsVersion } from '../services/permissionResolver';
 
+/**
+ * Core authentication: verifies the access token, loads the AUTHORITATIVE user
+ * row and resolves the LIVE effective permission set. Returns an AppError
+ * describing the failure, or null on success (with `req.user` populated).
+ *
+ * JWT permission claims are DELIBERATELY ignored — a forged/stale token can
+ * never widen access. On any resolver failure the effective set collapses to
+ * [] (fail closed).
+ */
+async function authenticate(req: Request): Promise<AppError | null> {
+  let token: string | undefined;
+  if (req.cookies && typeof req.cookies.access_token === 'string') {
+    token = req.cookies.access_token;
+  }
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer')) {
+      token = authHeader.split(' ')[1];
+    }
+  }
+
+  if (!token) return new AppError(i18n.errors.auth.unauthenticated, 401);
+
+  let decoded: any;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET as string, { algorithms: ['HS256'] });
+  } catch {
+    return new AppError(i18n.errors.auth.invalidToken, 401);
+  }
+
+  if (typeof decoded !== 'object' || !decoded || typeof decoded.id !== 'number') {
+    return new AppError(i18n.errors.auth.invalidToken, 401);
+  }
+
+  if (decoded.type && decoded.type !== 'access') {
+    return new AppError(i18n.errors.auth.wrongTokenTypeAccess, 401);
+  }
+
+  const currentUser = await prisma.user.findUnique({
+    where: { id: decoded.id },
+    select: {
+      id: true,
+      role: true,
+      accountStatus: true,
+      isSuperAdmin: true,
+      mustChangePassword: true,
+      authVersion: true,
+    },
+  });
+
+  if (!currentUser) {
+    return new AppError(i18n.errors.auth.tokenUserGone, 401);
+  }
+
+  if (currentUser.accountStatus !== AccountStatus.ACTIVE) {
+    return new AppError(i18n.errors.auth.accountInactive, 403);
+  }
+
+  // SESSION-GENERATION CHECK — invalidates already-issued access tokens after a
+  // credential/security event (password change/reset). Legacy tokens carry no
+  // `ver` claim and are treated as generation 0, matching the additive DB
+  // default, so this is fully backward compatible.
+  const tokenVersion = typeof decoded.ver === 'number' ? decoded.ver : 0;
+  const currentVersion = Number((currentUser as any).authVersion ?? 0);
+  if (tokenVersion !== currentVersion) {
+    return new AppError(i18n.errors.auth.sessionInvalidated, 401);
+  }
+
+  const role = currentUser.role as Role;
+  const superAdmin = isSuperAdmin({
+    id: currentUser.id,
+    role,
+    isSuperAdmin: (currentUser as any).isSuperAdmin === true,
+  });
+
+  const effectivePermissions = await resolveEffectivePermissionsForUser({
+    id: currentUser.id,
+    role,
+    isSuperAdmin: superAdmin,
+  });
+
+  req.user = {
+    id: currentUser.id,
+    role,
+    isSuperAdmin: superAdmin,
+    mustChangePassword: (currentUser as any).mustChangePassword === true,
+    permissions: effectivePermissions,
+  };
+  return null;
+}
+
+/**
+ * AUTHENTICATION + MANDATORY FIRST-LOGIN PASSWORD CHANGE ENFORCEMENT.
+ *
+ * A student holding the predictable bootstrap credential (lowercased surname)
+ * is placed in a RESTRICTED first-login state by the BACKEND. Every route
+ * mounted behind `protect()` is blocked with 403 `PASSWORD_CHANGE_REQUIRED`
+ * until the password has been changed. Frontend routing is NOT the boundary.
+ *
+ * Only the minimal self-service surface (identity / change-password / refresh /
+ * logout) is mounted behind `protectSelfService` instead.
+ */
 export const protect = catchAsync(
   async (req: Request, res: Response, next: NextFunction) => {
-    let token: string | undefined;
-    if (req.cookies && typeof req.cookies.access_token === 'string') {
-      token = req.cookies.access_token;
+    const err = await authenticate(req);
+    if (err) return next(err);
+
+    const user = req.user!;
+    if (user.role === Role.STUDENT && user.mustChangePassword === true) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'PASSWORD_CHANGE_REQUIRED',
+        error: 'You must change your initial password before continuing.',
+      });
     }
-    if (!token) {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith('Bearer')) {
-        token = authHeader.split(' ')[1];
-      }
-    }
+    next();
+  }
+);
 
-    if (!token) {
-      return next(new AppError(i18n.errors.auth.unauthenticated, 401));
-    }
-
-    let decoded: any;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET as string, { algorithms: ['HS256'] });
-    } catch (err) {
-      return next(new AppError(i18n.errors.auth.invalidToken, 401));
-    }
-
-    if (typeof decoded !== 'object' || !decoded || typeof decoded.id !== 'number') {
-      return next(new AppError(i18n.errors.auth.invalidToken, 401));
-    }
-
-    if (decoded.type && decoded.type !== 'access') {
-      return next(new AppError(i18n.errors.auth.wrongTokenTypeAccess, 401));
-    }
-
-    const currentUser = await prisma.user.findUnique({
-      where: { id: decoded.id },
-      select: { id: true, role: true, accountStatus: true, isSuperAdmin: true },
-    });
-
-    if (!currentUser) {
-      return next(new AppError(i18n.errors.auth.tokenUserGone, 401));
-    }
-
-    if (currentUser.accountStatus !== AccountStatus.ACTIVE) {
-      return next(
-        new AppError(
-          i18n.errors.auth.accountInactive,
-          403
-        )
-      );
-    }
-
-    const role = currentUser.role as Role;
-    const superAdmin = isSuperAdmin({
-      id: currentUser.id,
-      role,
-      isSuperAdmin: (currentUser as any).isSuperAdmin === true,
-    });
-
-    // LIVE authorization. JWT permission claims are DELIBERATELY ignored: a
-    // forged/stale token can never widen access. On any resolver failure the
-    // effective set collapses to [] (fail closed).
-    const effectivePermissions = await resolveEffectivePermissionsForUser({
-      id: currentUser.id,
-      role,
-      isSuperAdmin: superAdmin,
-    });
-
-    req.user = {
-      id: currentUser.id,
-      role,
-      isSuperAdmin: superAdmin,
-      permissions: effectivePermissions,
-    };
+/**
+ * AUTHENTICATION ONLY — for the minimal set of endpoints a restricted
+ * first-login account must still reach: identity (`/auth/me`), password change,
+ * session refresh and logout.
+ */
+export const protectSelfService = catchAsync(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const err = await authenticate(req);
+    if (err) return next(err);
     next();
   }
 );

@@ -1126,3 +1126,209 @@ describe('Import history — VIEW_IMPORT_HISTORY gates READS; actions keep their
   });
 });
 
+// ===========================================================================
+// REQUIREMENT 3 — a NORMAL administrator (role=ADMIN, isSuperAdmin !== true)
+// must NEVER take control of / modify a PROTECTED Super Administrator's
+// security state. Enforcement is centralised (assertCanMutateProtectedTarget)
+// and derived from the target's AUTHORITATIVE state, returning 403
+// SUPER_ADMIN_REQUIRED with NO database write.
+//
+// 9005 is a SECOND protected Super Administrator and 9001 (the default) remains,
+// so the final-active-Super-Admin invariant does NOT mask the Requirement-3
+// denial — a normal admin still gets 403, not 409.
+// ===========================================================================
+describe('REQUIREMENT 3 — a normal ADMIN can never mutate a protected Super Admin', () => {
+  const setupProtectedTarget = () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    // Sentinel so a blocked password write is observable.
+    state.users[9005].password = 'ORIGINAL_HASH';
+  };
+
+  it('(a) cannot RESET-PASSWORD a protected Super Administrator → 403, no write', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .post(`${API}/admin/users/9005/reset-password`)
+      .set(NORMAL_ADMIN)
+      .send({ newPassword: 'BrandNewPass123!' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SUPER_ADMIN_REQUIRED');
+    expect(state.users[9005].password).toBe('ORIGINAL_HASH');
+    expect(state.users[9005].mustChangePassword).toBeUndefined();
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('(b) cannot DEACTIVATE/SUSPEND a protected Super Administrator → 403, no write', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .post(`${API}/admin/users/9005/deactivate`)
+      .set(NORMAL_ADMIN);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SUPER_ADMIN_REQUIRED');
+    expect(state.users[9005].accountStatus).toBe(AccountStatus.ACTIVE);
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('(c) cannot DELETE a protected Super Administrator → 403, no delete', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .delete(`${API}/admin/users/9005`)
+      .set(NORMAL_ADMIN);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SUPER_ADMIN_REQUIRED');
+    expect(state.users[9005]).toBeDefined();
+    expect(db.user.delete).not.toHaveBeenCalled();
+  });
+
+  it('(d) cannot DEMOTE / change the role of a protected Super Administrator → 403, no write', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .patch(`${API}/admin/users/9005`)
+      .set(NORMAL_ADMIN)
+      .send({ role: Role.BURSARY });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SUPER_ADMIN_REQUIRED');
+    expect(state.users[9005].role).toBe(Role.ADMIN);
+    expect(state.users[9005].isSuperAdmin).toBe(true);
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('(d.2) cannot change the ACCOUNT STATUS of a protected Super Administrator via PATCH → 403, no write', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .patch(`${API}/admin/users/9005`)
+      .set(NORMAL_ADMIN)
+      .send({ accountStatus: AccountStatus.SUSPENDED });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SUPER_ADMIN_REQUIRED');
+    expect(state.users[9005].accountStatus).toBe(AccountStatus.ACTIVE);
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('(e) cannot ALTER THE INDIVIDUAL ACCESS PROFILE of a protected Super Administrator → 403, no write', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .patch(`${API}/admin/users/9005/access`)
+      .set(NORMAL_ADMIN)
+      .send({ accessMode: AccessMode.CUSTOM, permissionKeys: [] });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SUPER_ADMIN_REQUIRED');
+    expect(state.profiles[9005]).toBeUndefined();
+    expect(db.userPermissionProfile.upsert).not.toHaveBeenCalled();
+  });
+
+  it('cannot REVOKE the protected flag of a protected Super Administrator → 403, no write', async () => {
+    setupProtectedTarget();
+    const res = await request(app)
+      .post(`${API}/admin/users/9005/super-admin`)
+      .set(NORMAL_ADMIN)
+      .send({ grant: false });
+    expect(res.status).toBe(403);
+    expect(state.users[9005].isSuperAdmin).toBe(true);
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('a normal ADMIN CAN still act on a NON-protected target (no over-blocking)', async () => {
+    setUser(9005, Role.BURSARY);
+    const res = await request(app).post(`${API}/admin/users/9005/deactivate`).set(NORMAL_ADMIN);
+    expect(res.status).toBe(200);
+    expect(state.users[9005].accountStatus).toBe(AccountStatus.SUSPENDED);
+  });
+});
+
+// ===========================================================================
+// REQUIREMENT 3/4 — a protected Super Administrator MAY act on other accounts
+// (including other protected Super Administrators), while the final-active-
+// Super-Admin invariant is STILL enforced.
+// ===========================================================================
+describe('REQUIREMENT 3/4 — a protected Super Admin may act, invariant still enforced', () => {
+  it('a protected Super Admin CAN reset another protected Super Admin password → 200', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    const res = await request(app)
+      .post(`${API}/admin/users/9005/reset-password`)
+      .set(SUPER)
+      .send({ newPassword: 'BrandNewPass123!' });
+    expect(res.status).toBe(200);
+    // The target is untouched in terms of role/flag.
+    expect(state.users[9005].role).toBe(Role.ADMIN);
+    expect(state.users[9005].isSuperAdmin).toBe(true);
+    expect(state.users[9005].password).not.toBe('ORIGINAL_HASH');
+  });
+
+  it('a protected Super Admin CAN deactivate ANOTHER protected Super Admin → 200', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    const res = await request(app).post(`${API}/admin/users/9005/deactivate`).set(SUPER);
+    expect(res.status).toBe(200);
+    expect(state.users[9005].accountStatus).toBe(AccountStatus.SUSPENDED);
+  });
+
+  it('the invariant still blocks deactivating the FINAL active Super Admin → 409', async () => {
+    const res = await request(app).post(`${API}/admin/users/9001/deactivate`).set(SUPER);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FINAL_SUPER_ADMIN');
+    expect(activeSuperAdmins()).toEqual([9001]);
+  });
+});
+
+// ===========================================================================
+// REQUIREMENT 4 — the final ACTIVE Super Administrator can never be removed:
+// deleted / suspended / demoted / have its protection revoked (409).
+// ===========================================================================
+describe('REQUIREMENT 4 — the final active Super Admin is fully protected (409)', () => {
+  it('cannot be demoted, suspended, deleted or have protection revoked', async () => {
+    // 9001 is the ONLY active Super Administrator.
+    expect(activeSuperAdmins()).toEqual([9001]);
+
+    const demote = await request(app).patch(`${API}/admin/users/9001`).set(SUPER).send({ role: Role.BURSARY });
+    const suspend = await request(app).post(`${API}/admin/users/9001/deactivate`).set(SUPER);
+    const del = await request(app).delete(`${API}/admin/users/9001`).set(SUPER);
+    const revoke = await request(app).post(`${API}/admin/users/9001/super-admin`).set(SUPER).send({ grant: false });
+
+    for (const r of [demote, suspend, del, revoke]) {
+      expect(r.status).toBe(409);
+      expect(r.body.code).toBe('FINAL_SUPER_ADMIN');
+    }
+    // No state was mutated by any of the rejected operations.
+    expect(state.users[9001].role).toBe(Role.ADMIN);
+    expect(state.users[9001].isSuperAdmin).toBe(true);
+    expect(state.users[9001].accountStatus).toBe(AccountStatus.ACTIVE);
+    expect(activeSuperAdmins()).toEqual([9001]);
+  });
+});
+
+// ===========================================================================
+// REQUIREMENT 4 — concurrency: no combination may leave zero ACTIVE Super
+// Admins, and `isSuperAdmin === true` must ALWAYS imply `role === ADMIN`.
+// ===========================================================================
+describe('REQUIREMENT 4 — concurrency leaves >= 1 active Super Admin, no orphaned flag', () => {
+  const assertNoOrphansAndOneActive = () => {
+    const orphaned = Object.values(state.users)
+      .filter((u) => u.isSuperAdmin === true && u.role !== Role.ADMIN)
+      .map((u) => u.id);
+    expect(orphaned).toEqual([]); // isSuperAdmin === true ⇒ role === ADMIN
+    expect(activeSuperAdmins().length).toBeGreaterThanOrEqual(1); // never zero
+  };
+
+  it('concurrent GRANT vs DEMOTION cannot drop ACTIVE Super Admins to zero', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: false }); // starts as a normal ADMIN
+    const [grantRes, roleRes] = await Promise.all([
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: true }),
+      request(app).patch(`${API}/admin/users/9005`).set(SUPER).send({ role: Role.BURSARY }),
+    ]);
+    expect([grantRes.status, roleRes.status]).toContain(200);
+    assertNoOrphansAndOneActive();
+    expect(activeSuperAdmins()).toContain(9001); // the actor is still protected
+  });
+
+  it('concurrent REVOKE vs DEACTIVATE on a second Super Admin cannot drop to zero', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true }); // a SECOND active super admin
+    const [revokeRes, deactRes] = await Promise.all([
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: false }),
+      request(app).post(`${API}/admin/users/9005/deactivate`).set(SUPER),
+    ]);
+    expect([revokeRes.status, deactRes.status]).toContain(200);
+    assertNoOrphansAndOneActive();
+    expect(activeSuperAdmins()).toContain(9001);
+  });
+});
+
+

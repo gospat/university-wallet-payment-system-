@@ -1,21 +1,14 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { signup, login, refresh, logout, logoutAll, me, changePassword, forgotPassword, resetPassword } from '../controllers/auth';
+import { login, refresh, logout, logoutAll, me, changePassword, forgotPassword, resetPassword } from '../controllers/auth';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
-import { protect } from '../middlewares/auth';
+import { protectSelfService } from '../middlewares/auth';
+import { csrfOriginGuard } from '../middlewares/csrfOrigin';
 import { reqIp } from '../utils/http';
 import { Role } from '@prisma/client';
 
 const router = express.Router();
-
-const signupSchema = z.object({
-  email: z.string().trim().max(255).email(),
-  password: z.string().min(8).max(128).trim(),
-  firstName: z.string().min(1).max(80).trim(),
-  lastName: z.string().min(1).max(80).trim(),
-  matricNumber: z.string().trim().min(3, 'Matric number must be at least 3 characters').max(50, 'Matric number must be 50 characters or fewer').regex(/^[A-Za-z0-9][A-Za-z0-9/\-. _]*$/, "Matric number must start with a letter or digit and contain only letters, digits, slash ( / ), hyphen ( - ), dot ( . ), underscore ( _ ), or space.").optional(),
-});
 
 const loginSchema = z.object({
   identifier: z.preprocess(
@@ -55,15 +48,35 @@ const forgotLimiterByIp = rateLimit({
   message: { status: 'fail', message: 'Too many password reset requests from this IP. Please try again in an hour.' },
 });
 
-router.post('/signup', validateBody(signupSchema), signup);
+// ---------------------------------------------------------------------------
+// PUBLIC SELF-SIGNUP — REMOVED (§ requirement 2)
+// ---------------------------------------------------------------------------
+// Anonymous account creation is not permitted. The endpoint is answered with a
+// plain 404 (never 403/410) so it reveals nothing about prior state and cannot
+// be used for account enumeration. Accounts are created only by authorised
+// administrators through the admin / student-import surface.
+router.post('/signup', (_req, res) => {
+  res.status(404).json({ status: 'fail', message: 'Not found.' });
+});
+
 router.post('/login', validateBody(loginSchema), login);
-router.post('/refresh', ...(refresh as any[]));
+// Cookie-based refresh → defence-in-depth CSRF origin check.
+router.post('/refresh', csrfOriginGuard, ...(refresh as any[]));
 router.post('/forgot-password', forgotLimiterByIp, forgotLimiterByEmail, validateBody(forgotPasswordSchema), forgotPassword);
 router.post('/reset-password', resetPassword as any[]);
 
-router.use(protect);
+// ---------------------------------------------------------------------------
+// SELF-SERVICE SURFACE — `protectSelfService`, NOT `protect`.
+// ---------------------------------------------------------------------------
+// A student still holding the predictable bootstrap credential is in a
+// restricted first-login state. `protect()` blocks that state with 403
+// PASSWORD_CHANGE_REQUIRED, so only this minimal surface (identity, password
+// change, logout) is mounted behind the authentication-only middleware. Every
+// other authenticated route in the application stays behind `protect()`.
+router.use(protectSelfService);
 router.get('/me', me);
-router.post('/logout', ...(logout as any[]));
+// Cookie-based logout → defence-in-depth CSRF origin check.
+router.post('/logout', csrfOriginGuard, ...(logout as any[]));
 router.post('/logout-all', logoutAll);
 router.patch('/change-password', ...(changePassword as any[]));
 

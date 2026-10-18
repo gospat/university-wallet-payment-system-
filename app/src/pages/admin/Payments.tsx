@@ -5,6 +5,7 @@ import Modal from '../../components/Modal';
 import Alert from '../../components/Alert';
 import api, { navCounters, NavCounters } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { getAccessToken } from '../../utils/tokenStore';
 import {
   cancelTransaction as cancelTransactionApi,
   CANCEL_TRANSACTION_REASONS,
@@ -541,11 +542,14 @@ const PaymentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const setPage = (p: number) => setQuery({ ...query, page: String(Math.max(1, Math.min(totalPages, p))) });
 
   const downloadReceipt = (receiptId: number) => {
-    const token = localStorage.getItem('token') || '';
+    const token = getAccessToken() || '';
     const downloadEndpoint = role === 'ADMIN'
       ? `${(api.defaults.baseURL || '/api/v1')}/admin/receipts/${receiptId}/download`
       : `${(api.defaults.baseURL || '/api/v1')}/bursary/receipts/${receiptId}/download`;
-    fetch(downloadEndpoint, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    fetch(downloadEndpoint, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    })
       .then(async (r) => {
         if (!r.ok) throw new Error('Download failed');
         const blob = await r.blob();

@@ -4,7 +4,7 @@ import PortalShell from '../../../components/PortalShell';
 import ConfirmAction from '../../../components/ConfirmAction';
 import Modal from '../../../components/Modal';
 import { useAuth } from '../../../context/AuthContext';
-import { facultiesApi, FacultyOut, CreateFacultyInput, UpdateFacultyInput, templateDownloadUrl, facultiesTemplateXlsxUrl, BulkImportResult } from '../../../services/academicApi';
+import { facultiesApi, FacultyOut, CreateFacultyInput, UpdateFacultyInput, downloadAcademicTemplate, BulkImportResult } from '../../../services/academicApi';
 import BulkImportModal from '../../../components/academic/BulkImportModal';
 import { navCounters, NavCounters } from '../../../services/api';
 import { i18n } from '../../../i18n/en';
@@ -103,23 +103,11 @@ const FacultiesPage: React.FC = () => {
   };
 
   const doDownloadTemplate = () => {
-    const directUrl = templateDownloadUrl('college');
-    const a = document.createElement('a');
-    a.href = directUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    void downloadAcademicTemplate('college', 'csv');
   };
 
   const doDownloadTemplateXlsx = () => {
-    const directUrl = facultiesTemplateXlsxUrl();
-    const a = document.createElement('a');
-    a.href = directUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    void downloadAcademicTemplate('college', 'xlsx');
   };
 
   const openCreate = () => {

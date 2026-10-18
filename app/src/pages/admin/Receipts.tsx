@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
 import PortalShell from '../../components/PortalShell';
-import api, { navCounters, NavCounters } from '../../services/api';
+import api, { navCounters, NavCounters, downloadBlob } from '../../services/api';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { getAccessToken } from '../../utils/tokenStore';
 
 const fmtNGN = (n: number | string | null | undefined) => {
   const num = Number(n ?? 0);
@@ -196,9 +197,12 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const setPage = (p: number) => setQuery({ ...query, page: String(Math.max(1, Math.min(totalPages, p))) });
 
   const downloadReceipt = (receiptId: number) => {
-    const token = localStorage.getItem('token') || '';
+    const token = getAccessToken() || '';
     const downloadEndpoint = `${api.defaults.baseURL || '/api/v1'}${baseEndpoint}/${receiptId}/download`;
-    fetch(downloadEndpoint, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    fetch(downloadEndpoint, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    })
       .then(async (r) => {
         if (!r.ok) throw new Error('Download failed');
         const blob = await r.blob();
@@ -216,18 +220,16 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
       .catch((err) => { if (isUserCancelError(err)) return; setErrorMsg(err.message || 'Download failed'); });
   };
 
-  const receiptsExportUrl = (): string => {
-    const base = (api.defaults.baseURL ?? '/api/v1') + `${baseEndpoint}/export.csv`;
+  const downloadReceiptsExport = useCallback(() => {
     const params = new URLSearchParams();
     Object.entries(query).forEach(([k, v]) => {
       if (v === null || v === undefined || v === '') return;
       params.append(k, String(v));
     });
-    const token = localStorage.getItem('token') ?? '';
-    if (token) params.set('access_token', token);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    return base + qs;
-  };
+    void downloadBlob(`${baseEndpoint}/export.csv${qs}`, 'receipts-export.csv')
+      .catch((err) => { if (isUserCancelError(err)) return; setErrorMsg(err?.message || 'Export failed'); });
+  }, [baseEndpoint, query]);
 
   // ---------- Verify Receipt panel state ----------
   const [verifyInput, setVerifyInput] = useState('');
@@ -290,13 +292,13 @@ const ReceiptsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
               )}
             </div>
             {!verifyMode && (
-              <a
-                href={receiptsExportUrl()}
-                download
+              <button
+                type="button"
+                onClick={downloadReceiptsExport}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-600 text-white font-bold shadow-sm"
               >
                 <Download className="h-4 w-4" /> CSV export
-              </a>
+              </button>
             )}
           </div>
         </div>

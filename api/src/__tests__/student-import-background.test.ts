@@ -73,7 +73,7 @@ describe('Student import runner — pure helpers', () => {
     expect(IMPORT_CHUNK_SIZE).toBeGreaterThanOrEqual(IMPORT_CONCURRENCY);
   });
 
-  it('P2. buildCredentialsCsv emits a header row and safely quotes values', () => {
+  it('P2. buildCredentialsCsv emits a header row, derives the password from the surname and safely quotes values', () => {
     const csv = buildCredentialsCsv([
       {
         rowNumber: 1,
@@ -81,14 +81,18 @@ describe('Student import runner — pure helpers', () => {
         lastName: 'Okafor Smith',
         email: 'ada@university.edu.ng',
         matricNumber: 'SCI/001',
-        temporaryPassword: 'okafor smith',
+        // A stored plaintext MUST be ignored — the password is derived from the
+        // surname at build time, never read back from a column.
+        temporaryPassword: 'SHOULD-NEVER-APPEAR',
         studentId: 10,
       },
     ]);
     const lines = csv.trim().split(/\r?\n/);
     expect(lines[0]).toBe('row_number,matric_number,first_name,last_name,email,password');
-    // Papa quotes the value containing a comma.
+    // `Okafor Smith` is quoted-safe (no comma) and the derived password is the
+    // mixed-case surname lower-cased.
     expect(lines[1]).toBe('1,SCI/001,Ada,Okafor Smith,ada@university.edu.ng,okafor smith');
+    expect(csv).not.toContain('SHOULD-NEVER-APPEAR');
     // Empty rows still produce just the header.
     expect(buildCredentialsCsv([]).trim()).toBe('row_number,matric_number,first_name,last_name,email,password');
   });
@@ -203,6 +207,8 @@ describe('Student import runner — background engine (DB)', () => {
       select: { status: true, studentId: true, temporaryPassword: true },
     });
     expect(successRows.every((r) => r.status === 'SUCCESS' && r.studentId !== null)).toBe(true);
+    // SECURITY: no plaintext initial password is ever persisted.
+    expect(successRows.every((r) => r.temporaryPassword === null)).toBe(true);
   }, TEST_TIMEOUT);
 
   dbIt('B2. works rows in IMPORT_CHUNK_SIZE slices and reports progress per slice', async () => {
@@ -441,7 +447,7 @@ describe('Student import runner — background engine (DB)', () => {
     expect(caught!.statusCode).toBe(404);
   }, TEST_TIMEOUT);
 
-  dbIt('B11. sendCredentialEmails=false leaves passwordSent=false but still captures the password', async () => {
+  dbIt('B11. sendCredentialEmails=false leaves passwordSent=false and stores NO plaintext password', async () => {
     const run = await mkRun([{ rowNumber: 1, payload: payloadFor(70, { lastName: 'Solo' }) }]);
 
     await runStudentImport({ importRunId: run.id, strategy: 'SKIP', actorId: adminId, sendCredentialEmails: false });
@@ -449,7 +455,8 @@ describe('Student import runner — background engine (DB)', () => {
     const row = await prisma.importRow.findFirst({ where: { importRunId: run.id, rowNumber: 1 } });
     expect(row!.status).toBe('SUCCESS');
     expect(row!.passwordSent).toBe(false);
-    expect(row!.temporaryPassword).toBe('solo');
+    // SECURITY: the plaintext initial password must never be persisted.
+    expect(row!.temporaryPassword).toBeNull();
 
     // The created student exists and is usable.
     const user = await prisma.user.findFirst({ where: { id: row!.studentId! }, select: { id: true, mustChangePassword: true } });

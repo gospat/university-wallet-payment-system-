@@ -16,6 +16,7 @@ import {
   renderStudentAccountCreatedConfigurable,
 } from '../services/email';
 import { sanitizeEmailPayload, getResolvedTemplateByKey } from '../services/emailTemplate';
+import { escapeHtml } from '../utils/security';
 import { EmailProviderType, EmailDeliveryStatus, EmailType } from '@prisma/client';
 import { selectEmailProvider, hasResendConfigured, hasSmtpConfigured } from '../services/emailProviders';
 
@@ -411,7 +412,7 @@ async function renderByEmailType(
   const url = p.url || '';
   const rendered = {
     subject,
-    html: `<p>${String(body).replace(/\n/g, '<br>')}</p>` + (url ? `<p><a href="${url}">${url}</a></p>` : ''),
+    html: `<p>${escapeHtml(String(body)).replace(/\n/g, '<br>')}</p>` + (url ? `<p><a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>` : ''),
     text: `${body}${url ? `\n\nLink: ${url}` : ''}`,
   };
   return { rendered };

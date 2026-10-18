@@ -31,6 +31,7 @@ import { Prisma, EmailType } from '@prisma/client';
 import { loadStudentCategoryIndex, resolveFromIndex } from './studentCategory';
 import { buildCredentialsCsv } from './studentImportRunner';
 import { enqueueStudentImport } from '../queues/studentImportQueue';
+import { csvLineSafe, assertUploadWithinBounds, MAX_UPLOAD_ROWS } from '../utils/security';
 const JSON_DB_NULL = Prisma.JsonNull;
 // -----------------------------------------------------------------------------
 // Types
@@ -180,18 +181,20 @@ function normalize(rawRow: Record<string, any>): Record<string, any> {
 // -----------------------------------------------------------------------------
 async function parseCsvOrXlsx(filePath: string, fileName: string): Promise<Record<string, any>[]> {
   const ext = path.extname(fileName).toLowerCase();
+  let rows: Record<string, any>[];
   if (ext === '.csv') {
-    return new Promise<Record<string, any>[]>((resolve, reject) => {
+    rows = await new Promise<Record<string, any>[]>((resolve, reject) => {
       const stream = fs.createReadStream(filePath, 'utf-8');
-      let rows: Record<string, any>[] = [];
       Papa.parse<Record<string, any>>(stream, {
         header: true,
         skipEmptyLines: true,
         worker: false,
+        // Bound memory: never materialize more than the row cap (+1 to detect
+        // an over-limit file) so a 1,000,000-row CSV cannot exhaust the process.
+        preview: MAX_UPLOAD_ROWS + 1,
         transformHeader: (h) => h,
         complete: (result) => {
-          rows = rows.concat(result.data as any[]);
-          resolve(rows);
+          resolve(result.data as any[]);
         },
         error: (err) => reject(err),
       });
@@ -200,9 +203,14 @@ async function parseCsvOrXlsx(filePath: string, fileName: string): Promise<Recor
     const buf = await fs.promises.readFile(filePath);
     const wb = await XLSX.read(buf, { type: 'buffer', cellDates: true });
     const sheet = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(sheet, { defval: '', raw: true }) as any[];
+    rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: true }) as any[];
+  } else {
+    throw new AppError(i18n.errors.upload.unsupportedFormat, 400);
   }
-  throw new AppError(i18n.errors.upload.unsupportedFormat, 400);
+  // Enforce the row/column ceiling before any validation/DB work begins.
+  const columnCount = rows.reduce((m, r) => Math.max(m, Object.keys(r ?? {}).length), 0);
+  assertUploadWithinBounds(rows.length, columnCount);
+  return rows;
 }
 
 // -----------------------------------------------------------------------------
@@ -452,7 +460,7 @@ async function validateRows(rawRows: Record<string, any>[]) {
 }
 
 function writeErrorCsv(_fileName: string, stage: UploadStage): string {
-  const rows = [['row', 'error_codes', 'error_messages', ...Object.keys(stage.problemRows[0]?.record ?? {})]];
+  const rows: unknown[][] = [['row', 'error_codes', 'error_messages', ...Object.keys(stage.problemRows[0]?.record ?? {})]];
   for (const pr of stage.problemRows) {
     rows.push([
       String(pr.row),
@@ -461,7 +469,10 @@ function writeErrorCsv(_fileName: string, stage: UploadStage): string {
       ...Object.values(pr.record).map((v) => (v === null || v === undefined ? '' : String(v))),
     ]);
   }
-  const csv = Papa.unparse(rows);
+  // SECURITY: route every cell through csvLineSafe so student-supplied values
+  // beginning with = + - @ (or a DDE() payload) are neutralized (OWASP CSV
+  // injection) instead of being exported as live formulas.
+  const csv = rows.map((r) => csvLineSafe(r)).join('');
   const outDir = path.join(process.cwd(), 'tmp', 'uploads');
   fs.mkdirSync(outDir, { recursive: true });
   const outPath = path.join(outDir, `${stage.uploadId}-errors.csv`);
@@ -786,7 +797,6 @@ export class BulkStudentUploadService {
         lastName: true,
         email: true,
         matricNumber: true,
-        temporaryPassword: true,
         studentId: true,
       },
     });

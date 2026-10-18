@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PortalShell from '../../components/PortalShell';
 import api, { navCounters, NavCounters } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { getAccessToken } from '../../utils/tokenStore';
 
 const fmtNGN = (n: number | string | null | undefined) => {
   const num = Number(n ?? 0);
@@ -124,9 +125,12 @@ const MyReceipts: React.FC<{ brand: string; userText: string; onLogout: () => vo
   const setPage = (p: number) => setQuery({ ...query, page: String(Math.max(1, Math.min(totalPages, p))) });
 
   const downloadReceipt = (receiptId: number) => {
-    const token = localStorage.getItem('token') || '';
+    const token = getAccessToken() || '';
     const downloadEndpoint = `${api.defaults.baseURL || '/api/v1'}/students/receipts/${receiptId}/download`;
-    fetch(downloadEndpoint, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    fetch(downloadEndpoint, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    })
       .then(async (r) => {
         if (!r.ok) throw new Error('Download failed');
         const blob = await r.blob();

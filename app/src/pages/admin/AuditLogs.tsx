@@ -151,13 +151,17 @@ const AdminAuditLogs: React.FC = () => {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <a
-              href={auditApi.exportUrl(filters)}
-              download
+            <button
+              type="button"
+              onClick={() => {
+                void auditApi
+                  .exportDownload(filters)
+                  .catch((err: any) => setError(err?.message || 'Failed to export audit logs'));
+              }}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 text-sm font-semibold hover:bg-emerald-100"
             >
               <Download className="w-4 h-4" /> CSV export
-            </a>
+            </button>
             <button onClick={() => setFiltersOpen((x) => !x)} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-sm hover:bg-slate-50">
               <Filter className="w-4 h-4" /> Filters
             </button>

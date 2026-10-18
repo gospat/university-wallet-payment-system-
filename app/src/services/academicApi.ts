@@ -1,4 +1,4 @@
-import api, { API_BASE_URL } from './api';
+import api, { downloadBlob } from './api';
 
 export type AcademicBulkKind = 'college' | 'department' | 'programme';
 
@@ -23,30 +23,18 @@ const pluralKind: Record<AcademicBulkKind, string> = {
   programme: 'programmes',
 };
 
-export const templateDownloadUrl = (kind: AcademicBulkKind): string => {
-  const token = localStorage.getItem('token') ?? '';
-  return `${API_BASE_URL}/academic/${pluralKind[kind]}/template.csv?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-};
-
-export const templateDownloadXlsxUrl = (kind: AcademicBulkKind): string => {
-  const token = localStorage.getItem('token') ?? '';
-  return `${API_BASE_URL}/academic/${pluralKind[kind]}/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-};
-
-export const facultiesTemplateXlsxUrl = (): string => {
-  const token = localStorage.getItem('token') ?? '';
-  return `${API_BASE_URL}/academic/faculties/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-};
-
-export const departmentsTemplateXlsxUrl = (): string => {
-  const token = localStorage.getItem('token') ?? '';
-  return `${API_BASE_URL}/academic/departments/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-};
-
-export const programmesTemplateXlsxUrl = (): string => {
-  const token = localStorage.getItem('token') ?? '';
-  return `${API_BASE_URL}/academic/programmes/template.xlsx?t=${Date.now()}&access_token=${encodeURIComponent(token)}`;
-};
+/**
+ * Downloads an academic bulk-import template using the authenticated API client
+ * (`Authorization: Bearer`), never a token embedded in the URL.
+ */
+export const downloadAcademicTemplate = (
+  kind: AcademicBulkKind,
+  format: 'csv' | 'xlsx' = 'csv',
+): Promise<void> =>
+  downloadBlob(
+    `/academic/${pluralKind[kind]}/template.${format}`,
+    `${pluralKind[kind]}-template.${format}`,
+  );
 
 export const bulkImport = async (
   kind: AcademicBulkKind,

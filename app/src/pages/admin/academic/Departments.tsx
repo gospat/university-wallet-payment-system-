@@ -4,7 +4,7 @@ import PortalShell from '../../../components/PortalShell';
 import ConfirmAction from '../../../components/ConfirmAction';
 import Modal from '../../../components/Modal';
 import { useAuth } from '../../../context/AuthContext';
-import { departmentsApi, DepartmentOut, CreateDepartmentInput, UpdateDepartmentInput, facultiesApi, FacultyOut, templateDownloadUrl, departmentsTemplateXlsxUrl, BulkImportResult } from '../../../services/academicApi';
+import { departmentsApi, DepartmentOut, CreateDepartmentInput, UpdateDepartmentInput, facultiesApi, FacultyOut, downloadAcademicTemplate, BulkImportResult } from '../../../services/academicApi';
 import BulkImportModal from '../../../components/academic/BulkImportModal';
 import { navCounters, NavCounters } from '../../../services/api';
 import { i18n } from '../../../i18n/en';
@@ -115,23 +115,11 @@ const DepartmentsPage: React.FC = () => {
   };
 
   const doDownloadTemplate = () => {
-    const directUrl = templateDownloadUrl('department');
-    const a = document.createElement('a');
-    a.href = directUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    void downloadAcademicTemplate('department', 'csv');
   };
 
   const doDownloadTemplateXlsx = () => {
-    const directUrl = departmentsTemplateXlsxUrl();
-    const a = document.createElement('a');
-    a.href = directUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    void downloadAcademicTemplate('department', 'xlsx');
   };
 
   const openCreate = () => {

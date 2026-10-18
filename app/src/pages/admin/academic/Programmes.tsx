@@ -4,7 +4,7 @@ import PortalShell from '../../../components/PortalShell';
 import ConfirmAction from '../../../components/ConfirmAction';
 import Modal from '../../../components/Modal';
 import { useAuth } from '../../../context/AuthContext';
-import { programmesApi, ProgrammeOut, CreateProgrammeInput, UpdateProgrammeInput, departmentsApi, DepartmentOut, templateDownloadUrl, programmesTemplateXlsxUrl, BulkImportResult } from '../../../services/academicApi';
+import { programmesApi, ProgrammeOut, CreateProgrammeInput, UpdateProgrammeInput, departmentsApi, DepartmentOut, downloadAcademicTemplate, BulkImportResult } from '../../../services/academicApi';
 import BulkImportModal from '../../../components/academic/BulkImportModal';
 import { navCounters, NavCounters } from '../../../services/api';
 import { i18n } from '../../../i18n/en';
@@ -115,23 +115,11 @@ const ProgrammesPage: React.FC = () => {
   };
 
   const doDownloadTemplate = () => {
-    const directUrl = templateDownloadUrl('programme');
-    const a = document.createElement('a');
-    a.href = directUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    void downloadAcademicTemplate('programme', 'csv');
   };
 
   const doDownloadTemplateXlsx = () => {
-    const directUrl = programmesTemplateXlsxUrl();
-    const a = document.createElement('a');
-    a.href = directUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    void downloadAcademicTemplate('programme', 'xlsx');
   };
 
   const openCreate = () => {

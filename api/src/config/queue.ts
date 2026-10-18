@@ -205,12 +205,23 @@ async function runWithRetries<P>(
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
+  // SECURITY (log hygiene): NEVER serialize the raw job payload. Payloads can
+  // carry secrets/PII — e.g. the `email.send` payload includes the rendered
+  // credential email (temporaryPassword) and password-reset URLs carrying
+  // one-time tokens. Log only the top-level KEY NAMES so operators still get a
+  // useful debugging signal without any value ever reaching the logs.
+  const payloadKeys =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? Object.keys(payload as Record<string, unknown>)
+      : Array.isArray(payload)
+        ? ['<array>']
+        : [typeof payload];
   // eslint-disable-next-line no-console
   console.error(
     `[queue:degraded] FAILED topic=${topic} jobId=${jobId ?? 'n/a'} attempts=${attempts} — final error:`,
     lastErr,
-    '\n  payload =',
-    JSON.stringify(payload).slice(0, 600),
+    '\n  payload keys =',
+    payloadKeys.join(',') || '(none)',
   );
   // Re-raise so callers can surface error for synchronous user-visible flows.
   throw lastErr;

@@ -1,5 +1,6 @@
 import { MAX_EXPORT_ROWS } from '../reports/aggregates';
 import { buildFiltersSummaryString } from './pdf';
+import { neutralizeSpreadsheetFormula } from '../../utils/security';
 
 type ReportExportFormat = 'XLSX' | 'PDF';
 type ReportType = string;
@@ -40,7 +41,10 @@ function sanitizeCellValue(raw: any): any {
     if (Number.isFinite(raw)) return raw;
     return Number(raw) || 0;
   }
-  return raw;
+  // SECURITY: a string cell beginning with = + - @ / tab / CR (or a DDE()
+  // payload) would be executed as a formula when opened in Excel. Prefix a
+  // literal apostrophe so exported report data is always inert text.
+  return neutralizeSpreadsheetFormula(raw);
 }
 
 function isMoneyKey(k: string): boolean {

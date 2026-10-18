@@ -5,7 +5,7 @@ import { AppError } from '../utils/AppError';
 import { generatePaymentReference, generateReceiptReference, generateVerificationToken, kobo } from '../utils/paystack';
 import { nextYearlyCounter, yearFromSession } from '../utils/yearlyCounter';
 import { getActiveAlatpaySecretKey, getAlatpayBaseUrl, normalizeAlatStatus, isAlatpayUuid } from '../utils/alatpay';
-import Papa from 'papaparse';
+import { csvLineSafe } from '../utils/security';
 
 export type Classification =
   | 'MATCHED'
@@ -1372,7 +1372,9 @@ export class ReconciliationService {
     ]);
     csvRows.push(['', '', '', '', '', '', '', '', 'Gateway Records', String(summary.gatewayRecords)]);
 
-    const csv = Papa.unparse(csvRows, { delimiter: ',' });
+    // SECURITY: neutralize CSV formula injection (OWASP) on every cell — this
+    // export includes student/gateway-sourced values (names, references).
+    const csv = csvRows.map((r: any[]) => csvLineSafe(Array.isArray(r) ? r : [])).join('');
     const filename = `recon-${ts(params.dateFrom)}-${ts(params.dateTo)}.csv`;
     return { format: 'csv', payload: '\uFEFF' + csv, filename };
   }
