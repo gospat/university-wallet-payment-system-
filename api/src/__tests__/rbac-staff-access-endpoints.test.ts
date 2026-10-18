@@ -191,6 +191,11 @@ const db: any = {
 // ---------------------------------------------------------------------------
 let txTail: Promise<void> = Promise.resolve();
 
+// Captured so a test that overrides `user.findUnique` can restore the default
+// implementation (jest.clearAllMocks preserves implementations, so a leaked
+// override would corrupt later tests).
+const defaultUserFindUnique = db.user.findUnique.getMockImplementation();
+
 const mockPrisma: any = {
   ...db,
   $transaction: jest.fn(async (fn: any) => {
@@ -681,5 +686,108 @@ describe('BLOCKER 3 — final-active-super-admin invariant across every mutation
     ]);
     expect([r1.status, r2.status]).toEqual([200, 200]);
     expect(activeSuperAdmins()).toEqual([9001]);
+  });
+});
+
+// ===========================================================================
+// FINAL RBAC CORRECTION — the DELETE invariant must be derived from the target
+// state read INSIDE the transaction, never from the pre-transaction read.
+// ===========================================================================
+describe('DELETE /admin/users/:id — invariant from the TRANSACTIONAL target read', () => {
+  // A NORMAL admin actor: not flagged itself, but (full-registry ADMIN baseline)
+  // holds MANAGE_USERS, so it may delete — while contributing NOTHING to the
+  // protected ACTIVE super-admin set.
+  const actor = NORMAL_ADMIN;
+
+  /** Override `user.findUnique` so the 9005 read returns different states per call. */
+  const withTargetStates = (states: Array<Record<string, any>>) => {
+    let reads = 0;
+    db.user.findUnique.mockImplementation((args: any) => {
+      const id = args?.where?.id;
+      if (id === 9005) {
+        const s = states[Math.min(reads, states.length - 1)];
+        reads += 1;
+        return Promise.resolve({ ...state.users[9005], ...s });
+      }
+      return Promise.resolve(state.users[id] ? { ...state.users[id] } : null);
+    });
+    return () => reads;
+  };
+
+  it('uses the IN-TRANSACTION state: an outer super-admin read that is demoted before the tx still deletes → 200', async () => {
+    setUser(9001, Role.ADMIN, { isSuperAdmin: false }); // remove the default flagged admin
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true }); // pre-tx: the FINAL active super admin
+    expect(activeSuperAdmins()).toEqual([9005]);
+
+    // 1st read (OUTSIDE tx): still the final active super admin — the OLD code
+    // captured `isActiveSuperAdmin=true` here and would have returned 409.
+    // 2nd read (INSIDE tx): demoted to BURSARY ⇒ the invariant no longer applies.
+    let reads = 0;
+    try {
+      const count = withTargetStates([
+        { role: Role.ADMIN, isSuperAdmin: true, accountStatus: AccountStatus.ACTIVE },
+        { role: Role.BURSARY, isSuperAdmin: false },
+      ]);
+      const res = await request(app).delete(`${API}/admin/users/9005`).set(actor);
+      reads = count();
+      expect(res.status).toBe(200);
+      expect(state.users[9005]).toBeUndefined(); // deleted
+    } finally {
+      db.user.findUnique.mockImplementation(defaultUserFindUnique);
+    }
+    expect(reads).toBeGreaterThanOrEqual(2); // the target was re-read inside the tx
+  });
+
+  it('a target that BECOMES the final ACTIVE super admin before the tx delete cannot bypass the invariant → 409', async () => {
+    setUser(9001, Role.ADMIN, { isSuperAdmin: false }); // remove the default flagged admin
+    setUser(9005, Role.BURSARY); // pre-tx: a plain BURSARY (student gate N/A)
+    expect(activeSuperAdmins()).toEqual([]);
+
+    // 1st read (OUTSIDE tx): plain BURSARY — the OLD code captured
+    // `isActiveSuperAdmin=false` here and skipped the invariant entirely.
+    // 2nd read (INSIDE tx): promoted to the SOLE ACTIVE super admin ⇒ deleting it
+    // would drop the ACTIVE super-admin count to zero ⇒ must be rejected.
+    let reads = 0;
+    try {
+      const count = withTargetStates([
+        { role: Role.BURSARY, isSuperAdmin: false },
+        { role: Role.ADMIN, isSuperAdmin: true, accountStatus: AccountStatus.ACTIVE },
+      ]);
+      const res = await request(app).delete(`${API}/admin/users/9005`).set(actor);
+      reads = count();
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('FINAL_SUPER_ADMIN');
+      expect(state.users[9005]).toBeDefined(); // NOT deleted
+    } finally {
+      db.user.findUnique.mockImplementation(defaultUserFindUnique);
+    }
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ===========================================================================
+// `isProtected` is derived from the COMPLETE Super Administrator definition
+// (role === ADMIN ∧ isSuperAdmin === true) via the centralised helper.
+// ===========================================================================
+describe('isProtected — complete Super Administrator definition', () => {
+  it('a non-ADMIN carrying an inconsistent isSuperAdmin=true flag is NOT protected', async () => {
+    setUser(9005, Role.BURSARY, { isSuperAdmin: true }); // inconsistent row
+    const res = await request(app).get(`${API}/admin/users/9005/access`).set(SUPER);
+    expect(res.status).toBe(200);
+    expect(res.body.data.user.role).toBe(Role.BURSARY);
+    expect(res.body.data.isProtected).toBe(false);
+  });
+
+  it('an ADMIN WITHOUT the flag is NOT protected', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: false });
+    const res = await request(app).get(`${API}/admin/users/9005/access`).set(SUPER);
+    expect(res.status).toBe(200);
+    expect(res.body.data.isProtected).toBe(false);
+  });
+
+  it('a true Super Administrator (ADMIN ∧ flag) IS protected', async () => {
+    const res = await request(app).get(`${API}/admin/users/9001/access`).set(SUPER);
+    expect(res.status).toBe(200);
+    expect(res.body.data.isProtected).toBe(true);
   });
 });

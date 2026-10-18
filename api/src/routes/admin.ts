@@ -1007,9 +1007,11 @@ function buildUserAccessOut(
     effectivePermissions,
     effectivePermissionCount: effectivePermissions.length,
     // Protection is derived from the database-backed hierarchy — a Super
-    // Administrator (role=ADMIN ∧ isSuperAdmin=true) — never from a hardcoded
-    // identity. There is no id/email/name allow-list anywhere in the system.
-    isProtected: user.isSuperAdmin === true,
+    // Administrator (role=ADMIN ∧ isSuperAdmin=true), evaluated through the
+    // CENTRALISED helper so a non-ADMIN carrying a stray isSuperAdmin=true flag
+    // is NOT reported as protected. Never from a hardcoded identity: there is no
+    // id/email/name allow-list anywhere in the system.
+    isProtected: isSuperAdmin({ id: user.id, role: user.role, isSuperAdmin: user.isSuperAdmin }),
   };
 }
 
@@ -1101,19 +1103,39 @@ router.delete(
       }
     }
 
-    const isActiveSuperAdmin =
-      existing.role === Role.ADMIN &&
-      existing.isSuperAdmin === true &&
-      existing.accountStatus === AccountStatus.ACTIVE;
-
-    // Gate 3 — the final-active-super-admin invariant + transactional cleanup +
-    // delete all run in ONE transaction so the invariant check is serialised
-    // against the delete (no count-then-delete race).
+    // Gate 3 — the final-active-super-admin invariant + session/audit cleanup +
+    // the user deletion all run in ONE transaction, and the target is RE-READ
+    // INSIDE it. The invariant decision is therefore derived from the CURRENT
+    // committed state — never from the pre-transaction read above, which can be
+    // stale (TOCTOU: the target's role / flag / status may change between the
+    // outer read and the delete, e.g. a non-super-admin promoted to an ACTIVE
+    // Super Administrator in that window must NOT slip past the invariant).
     const outcome = await prisma.$transaction(async (tx) => {
+      // Authoritative read — the ONLY source for the invariant decision below.
+      const target = await tx.user.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          firstName: true,
+          lastName: true,
+          isSuperAdmin: true,
+          accountStatus: true,
+        },
+      });
+      if (!target) return { kind: 'notFound' as const };
+
+      const isActiveSuperAdmin =
+        target.role === Role.ADMIN &&
+        target.isSuperAdmin === true &&
+        target.accountStatus === AccountStatus.ACTIVE;
+
       if (isActiveSuperAdmin) {
         const invariant = await assertSuperAdminInvariant(tx, id);
         if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
       }
+
       // Preserve audit history (don't DELETE audit rows) — just detach userId
       await tx.auditLog.updateMany({
         where: { userId: id },
@@ -1127,9 +1149,12 @@ router.delete(
       await tx.user.delete({
         where: { id },
       });
-      return { kind: 'deleted' as const };
+      return { kind: 'deleted' as const, target };
     });
 
+    if (outcome.kind === 'notFound') {
+      return res.status(404).json({ status: 'fail', error: 'User not found' });
+    }
     if (outcome.kind === 'finalSuperAdmin') {
       return res.status(409).json({
         status: 'fail',
@@ -1138,24 +1163,30 @@ router.delete(
       });
     }
 
-    // Gate 4 — audit trail of the deletion itself
+    // Gate 4 — audit trail of the deletion itself, from the transactional
+    // snapshot so the recorded role/flag reflect what was actually deleted.
+    const { target } = outcome;
     await writeAudit(req, {
       action: 'DELETE_USER',
       entityType: 'USER',
       entityId: id,
       details: {
-        email: existing.email,
-        role: existing.role,
-        name: `${existing.firstName ?? ''} ${existing.lastName ?? ''}`.trim(),
-        protectedAccount: existing.isSuperAdmin === true,
-        studentGatePassed: existing.role === Role.STUDENT,
+        email: target.email,
+        role: target.role,
+        name: `${target.firstName ?? ''} ${target.lastName ?? ''}`.trim(),
+        protectedAccount: isSuperAdmin({
+          id: target.id,
+          role: target.role,
+          isSuperAdmin: target.isSuperAdmin,
+        }),
+        studentGatePassed: target.role === Role.STUDENT,
       },
     });
 
     return res.status(200).json({
       status: 'success',
       data: {
-        message: `User ${existing.role} (${existing.email}) deleted successfully`,
+        message: `User ${target.role} (${target.email}) deleted successfully`,
         deletedUserId: id,
       },
     });
