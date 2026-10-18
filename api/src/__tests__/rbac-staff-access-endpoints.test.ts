@@ -893,3 +893,108 @@ describe('isProtected — complete Super Administrator definition', () => {
     expect(res.body.data.isProtected).toBe(true);
   });
 });
+
+// ===========================================================================
+// FINAL RBAC MUTATION LOCK UNIFICATION — every Super-Admin-affecting mutation
+// (PATCH role/status, deactivate/reactivate, grant/revoke, DELETE) uses the SAME
+// locking context: SET lock → TARGET-row lock → authoritative READ → VALIDATE →
+// WRITE, all inside one serialised transaction.
+//
+// Every final state must satisfy:
+//   (1) isSuperAdmin=true ⇒ role=ADMIN   (never an "orphaned" flag), and
+//   (2) at least one ACTIVE Super Admin remains.
+// ===========================================================================
+describe('REQUEST G — unified mutation lock across every Super-Admin path', () => {
+  /** Assert both global post-conditions on the resulting table state. */
+  const assertFinalInvariants = () => {
+    const orphaned = Object.values(state.users)
+      .filter((u) => u.isSuperAdmin === true && u.role !== Role.ADMIN)
+      .map((u) => u.id);
+    expect(orphaned).toEqual([]); // no row may be isSuperAdmin=true ∧ role!=ADMIN
+    expect(activeSuperAdmins().length).toBeGreaterThanOrEqual(1); // never zero
+  };
+
+  it('all four paths take the SET lock BEFORE the TARGET-row lock (identical ordering)', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: false });
+    const orders: Array<[number, number]> = [];
+    const capture = () => {
+      const sql = (db.$queryRaw as jest.Mock).mock.calls.map((c: any[]) => String(c[0]));
+      orders.push([sql.findIndex((s) => s.includes('role =')), sql.findIndex((s) => s.includes('WHERE id ='))]);
+      (db.$queryRaw as jest.Mock).mockClear();
+    };
+
+    await request(app).patch(`${API}/admin/users/9005`).set(SUPER).send({ firstName: 'Renamed' });
+    capture();
+    await request(app).post(`${API}/admin/users/9005/deactivate`).set(SUPER);
+    capture();
+    await request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: true });
+    capture();
+    await request(app).delete(`${API}/admin/users/9005`).set(SUPER);
+    capture();
+
+    expect(orders).toHaveLength(4);
+    for (const [setLock, rowLock] of orders) {
+      expect(setLock).toBeGreaterThanOrEqual(0);
+      expect(rowLock).toBeGreaterThanOrEqual(0);
+      expect(setLock).toBeLessThan(rowLock); // SET first, ROW second — no deadlock cycle
+    }
+  });
+
+  it('concurrent GRANT vs role→BURSARY: never bypasses the invariant, never orphans the flag', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: false }); // starts as a normal ADMIN
+    const [grantRes, roleRes] = await Promise.all([
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: true }),
+      request(app).patch(`${API}/admin/users/9005`).set(SUPER).send({ role: Role.BURSARY }),
+    ]);
+    // At least one operation must have taken effect (grant → 200, or demotion → 200).
+    expect([grantRes.status, roleRes.status]).toContain(200);
+    expect(state.users[9005].isSuperAdmin === true && state.users[9005].role !== Role.ADMIN).toBe(false);
+    assertFinalInvariants();
+  });
+
+  it('concurrent GRANT vs DEACTIVATE: never bypasses the invariant, never orphans the flag', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: false });
+    await Promise.all([
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: true }),
+      request(app).post(`${API}/admin/users/9005/deactivate`).set(SUPER),
+    ]);
+    expect(state.users[9005].isSuperAdmin === true && state.users[9005].role !== Role.ADMIN).toBe(false);
+    assertFinalInvariants();
+  });
+
+  it('concurrent REVOKE vs role/status change: never bypasses the invariant', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true }); // a SECOND active super admin
+    await Promise.all([
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: false }),
+      request(app).patch(`${API}/admin/users/9005`).set(SUPER).send({ role: Role.BURSARY }),
+    ]);
+    expect(state.users[9005].isSuperAdmin === true && state.users[9005].role !== Role.ADMIN).toBe(false);
+    assertFinalInvariants();
+    expect(activeSuperAdmins()).toContain(9001); // the actor is still an active super admin
+  });
+
+  it('concurrent DELETE vs GRANT: never bypasses the invariant', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: false });
+    await Promise.all([
+      request(app).delete(`${API}/admin/users/9005`).set(SUPER),
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: true }),
+    ]);
+    // Either the row is gone, or it survived as a valid (non-orphaned) row.
+    if (state.users[9005]) {
+      expect(state.users[9005].isSuperAdmin === true && state.users[9005].role !== Role.ADMIN).toBe(false);
+    }
+    assertFinalInvariants();
+  });
+
+  it('concurrent DEACTIVATE vs REVOKE on the SOLE active super admin: both rejected → never zero', async () => {
+    // 9001 is the ONLY active super admin; both operations would remove it.
+    const [deact, revoke] = await Promise.all([
+      request(app).post(`${API}/admin/users/9001/deactivate`).set(NORMAL_ADMIN),
+      request(app).post(`${API}/admin/users/9001/super-admin`).set(SUPER).send({ grant: false }),
+    ]);
+    expect(deact.status).toBe(409);
+    expect(revoke.status).toBe(409);
+    expect(activeSuperAdmins()).toEqual([9001]);
+    assertFinalInvariants();
+  });
+});

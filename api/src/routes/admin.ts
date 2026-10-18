@@ -721,12 +721,17 @@ router.patch(
     const { id } = req.params as z.infer<typeof UserIdParam>;
     const body = req.body as z.infer<typeof UpdateUserSchema>;
 
-    // D10 — the read → validate → write sequence runs in ONE transaction so a
-    // concurrent demotion cannot slip past the final-super-admin invariant.
+    // D10/D7 — ONE common locking context: lock the ACTIVE Super Admin SET,
+    // then the TARGET row (SELECT … FOR UPDATE), then read the AUTHORITATIVE
+    // target state while both locks are held. The resulting-state calculation,
+    // the invariant check and the write all run on that locked state, so a
+    // concurrent flag change / demotion / suspension cannot slip past.
     const outcome = await prisma.$transaction(async (tx) => {
-      const existing = await tx.user.findUnique({
-        where: { id },
-        select: { id: true, role: true, isSuperAdmin: true, accountStatus: true },
+      const existing = await lockSuperAdminMutationContext(tx, id, {
+        id: true,
+        role: true,
+        isSuperAdmin: true,
+        accountStatus: true,
       });
       if (!existing) return { kind: 'notFound' as const };
 
@@ -804,13 +809,15 @@ router.post(
   catchAsync(async (req: any, res) => {
     const { id } = req.params as z.infer<typeof UserIdParam>;
 
-    // D10/D7 — the read → invariant check → write sequence runs in ONE
-    // transaction so a concurrent demotion/suspension cannot slip past the
+    // D10/D7 — same common locking context (SET → TARGET → READ → VALIDATE →
+    // WRITE) so a concurrent demotion/suspension cannot slip past the
     // final-active-super-admin invariant.
     const outcome = await prisma.$transaction(async (tx) => {
-      const existing = await tx.user.findUnique({
-        where: { id },
-        select: { id: true, role: true, isSuperAdmin: true, accountStatus: true },
+      const existing = await lockSuperAdminMutationContext(tx, id, {
+        id: true,
+        role: true,
+        isSuperAdmin: true,
+        accountStatus: true,
       });
       if (!existing) return { kind: 'notFound' as const };
 
@@ -933,16 +940,21 @@ router.post(
  *
  * Every mutation that can REMOVE a user from that set — Super Admin flag
  * revocation, ADMIN → BURSARY/STUDENT role change, ACTIVE → non-ACTIVE status
- * change, deactivate/suspend and delete — MUST call this helper INSIDE the same
- * transaction as the mutation itself.
+ * change, deactivate/suspend and delete — MUST run INSIDE the same transaction
+ * as the mutation, and MUST first acquire the common locking context
+ * (lockSuperAdminMutationContext) so its gate decision is made on state that
+ * cannot change under it.
  *
  * Serialisation: a plain count followed by a separate write is NOT safe under
  * concurrency (two requests can each observe the same "1 remaining" and both
- * proceed). The helper therefore FIRST takes a pessimistic row/range lock on
- * the current ACTIVE Super Administrator set (SELECT ... FOR UPDATE, MySQL
- * InnoDB), which makes concurrent invariant-affecting transactions queue. The
- * subsequent count then observes the latest committed state, so the count and
- * the mutating write can never interleave down to zero.
+ * proceed). The SET lock below (SELECT … FOR UPDATE over the ACTIVE Super
+ * Administrator rows, MySQL InnoDB) makes concurrent invariant-affecting
+ * transactions queue; the later COUNT then observes the latest committed state,
+ * so the count and the mutating write can never interleave down to zero.
+ *
+ * The LOCK and the COUNT/CHECK are deliberately SEPARATE functions so the
+ * common mutation context can hold the SET lock ONCE and every invariant check
+ * on that path is a pure, lock-free count.
  */
 async function lockActiveSuperAdminSet(tx: any): Promise<void> {
   await tx.$queryRaw`
@@ -954,13 +966,51 @@ async function lockActiveSuperAdminSet(tx: any): Promise<void> {
   `;
 }
 
+/**
+ * ONE common locking context for EVERY mutation that can change Super Admin
+ * membership: PATCH role/status, deactivate/reactivate, Super Admin
+ * grant/revoke and DELETE.
+ *
+ * Identical ordering in every path — SET → TARGET → READ:
+ *   1. lock the ACTIVE Super Administrator SET  (the serialisation point);
+ *   2. lock the TARGET row with SELECT … FOR UPDATE;
+ *   3. read the target's AUTHORITATIVE state while both locks are held, so the
+ *      gate decisions and the final write cannot act on a stale value.
+ *
+ * Because every such mutation takes the SET lock BEFORE the TARGET-row lock, a
+ * concurrent pair can never build the row→set / set→row cycle that would
+ * deadlock InnoDB. Returns `null` when the target does not exist.
+ */
+async function lockSuperAdminMutationContext(
+  tx: any,
+  targetId: number,
+  select: Record<string, boolean>,
+): Promise<any | null> {
+  // 1. Lock the ACTIVE Super Administrator SET.
+  await lockActiveSuperAdminSet(tx);
+  // 2. Lock the TARGET row.
+  await tx.$queryRaw`
+    SELECT id FROM users WHERE id = ${targetId} FOR UPDATE
+  `;
+  // 3. Authoritative read — valid for the lifetime of this transaction.
+  return tx.user.findUnique({ where: { id: targetId }, select });
+}
+
+/**
+ * COUNT-ONLY final-active-Super-Admin check.
+ *
+ * PRECONDITION: the caller already holds the ACTIVE Super Administrator SET
+ * lock via lockSuperAdminMutationContext(); this therefore NEVER acquires it a
+ * second time (no redundant double-lock). Holding that SET lock serialises
+ * every other invariant-affecting transaction, so the count is authoritative.
+ *
+ * Returns 'finalSuperAdmin' when removing `targetId` would empty the ACTIVE
+ * Super Administrator set.
+ */
 async function assertSuperAdminInvariant(
   tx: any,
   targetId: number,
 ): Promise<'ok' | 'finalSuperAdmin'> {
-  // 1. Serialise on the ACTIVE Super Administrator set.
-  await lockActiveSuperAdminSet(tx);
-  // 2. Count the ACTIVE Super Admins that would REMAIN after the mutation.
   const remaining = await tx.user.count({
     where: {
       role: Role.ADMIN,
@@ -1140,37 +1190,24 @@ router.delete(
 
     // Gate 3 — the final-active-super-admin invariant, the authoritative student
     // financial gate, session/audit cleanup and the deletion all run in ONE
-    // transaction while the target row is held under a pessimistic MySQL/InnoDB
-    // row lock (SELECT … FOR UPDATE).
+    // transaction using the SAME common locking context as every other
+    // Super-Admin-affecting mutation (SET → TARGET → READ → VALIDATE → WRITE),
+    // so the locked target state is the single source of truth for the gates.
     //
-    // LOCK ORDERING (single consistent order across ALL invariant-affecting
-    // mutations): the ACTIVE Super Administrator SET is locked FIRST, then the
-    // TARGET row. Every other path (role change, deactivate, super-admin grant or
-    // revocation) likewise takes the set lock — via assertSuperAdminInvariant —
-    // BEFORE it takes the target row's write lock, so a delete can never form the
-    // row→set / set→row cycle that would deadlock InnoDB.
+    // LOCK ORDERING is identical everywhere: the ACTIVE Super Administrator SET
+    // is locked FIRST, then the TARGET row. Every other path (role change,
+    // deactivate, super-admin grant or revocation) uses this same context, so a
+    // delete can never form the row→set / set→row cycle that would deadlock
+    // InnoDB.
     const outcome = await prisma.$transaction(async (tx) => {
-      // 1. Lock the ACTIVE super-admin SET (consistent ordering, see above).
-      await lockActiveSuperAdminSet(tx);
-
-      // 2. Lock the TARGET row (SELECT … FOR UPDATE) and read its AUTHORITATIVE
-      //    state while that lock is held. A concurrent transaction that tries to
-      //    change this row's role / flag / status blocks here until we commit, so
-      //    the gates below and the delete act on state that cannot change under us.
-      await tx.$queryRaw`
-        SELECT id FROM users WHERE id = ${id} FOR UPDATE
-      `;
-      const target = await tx.user.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          firstName: true,
-          lastName: true,
-          isSuperAdmin: true,
-          accountStatus: true,
-        },
+      const target = await lockSuperAdminMutationContext(tx, id, {
+        id: true,
+        email: true,
+        role: true,
+        firstName: true,
+        lastName: true,
+        isSuperAdmin: true,
+        accountStatus: true,
       });
       if (!target) return { kind: 'notFound' as const };
 
@@ -1516,14 +1553,12 @@ router.post(
     const { grant } = req.body as z.infer<typeof SetSuperAdminSchema>;
     const actor = req.user as { id: number };
 
-    // D10/D7 — the read → invariant check → write sequence runs in ONE
-    // transaction so a concurrent revocation/demotion cannot slip past the
-    // final-active-super-admin invariant.
+    // D10/D7 — the SAME common locking context (SET → TARGET → READ → VALIDATE
+    // → WRITE) so a concurrent revocation/demotion cannot slip past the
+    // final-active-super-admin invariant, and a concurrent role change cannot
+    // leave role != ADMIN ∧ isSuperAdmin=true.
     const outcome = await prisma.$transaction(async (tx) => {
-      const target = await tx.user.findUnique({
-        where: { id },
-        select: USER_ACCESS_USER_SELECT as any,
-      });
+      const target = await lockSuperAdminMutationContext(tx, id, USER_ACCESS_USER_SELECT as any);
       if (!target) return { kind: 'notFound' as const };
       const t = target as any;
 
