@@ -80,6 +80,10 @@ const db: any = {
       }).length;
       return Promise.resolve(n);
     }),
+    delete: jest.fn((args: any) => {
+      delete state.users[args.where.id];
+      return Promise.resolve({ id: args.where.id });
+    }),
   },
   permission: {
     findMany: jest.fn((args: any) => {
@@ -101,6 +105,15 @@ const db: any = {
     deleteMany: jest.fn(() => Promise.resolve({ count: 0 })),
     createMany: jest.fn(() => Promise.resolve({ count: 0 })),
   },
+  // No RBAC_ADMIN_INIT_SENTINEL_ID marker ⇒ the ADMIN baseline is genuinely
+  // UNINITIALISED ⇒ the canonical full-registry floor applies. This models the
+  // intended production state where a normal ADMIN holds MANAGE_USERS but is
+  // still NOT a super administrator.
+  counter: {
+    findUnique: jest.fn(() => Promise.resolve(null)),
+  },
+  // No individual-access profile row ⇒ INHERIT the role baseline. (A GENUINE
+  // null means INHERIT; only a query FAILURE fails closed.)
   userPermissionProfile: {
     findUnique: jest.fn((args: any) => {
       const p = state.profiles[args?.where?.userId];
@@ -145,18 +158,53 @@ const db: any = {
       state.revoked.push(args.where);
       return Promise.resolve({ count: 1 });
     }),
+    deleteMany: jest.fn(() => Promise.resolve({ count: 1 })),
   },
   auditLog: {
     create: jest.fn((args: any) => {
       state.auditActions.push(String(args?.data?.action ?? ''));
       return Promise.resolve({ id: 1 });
     }),
+    updateMany: jest.fn(() => Promise.resolve({ count: 0 })),
   },
+  // `assertSuperAdminInvariant` acquires a pessimistic range lock with
+  // `SELECT … FOR UPDATE` inside the transaction. A mocked Prisma cannot express
+  // an InnoDB row lock, so the `$transaction` wrapper below SERIALISES
+  // transactions — the observable guarantee the lock provides (see the harness
+  // comment). The query itself resolves as a no-op.
+  $queryRaw: jest.fn(() => Promise.resolve([])),
 };
+
+// ---------------------------------------------------------------------------
+// Concurrency harness — models the `SELECT … FOR UPDATE` serialisation the
+// final-active-super-admin invariant depends on.
+// ---------------------------------------------------------------------------
+// InnoDB makes concurrent invariant-affecting transactions queue on the ACTIVE
+// super-admin row set, so the SECOND transaction observes the first one's
+// committed write instead of both reading the same pre-write count. A mocked
+// Prisma cannot hold a real row lock, so every `$transaction` runs inside a
+// global FIFO mutex here, which reproduces that observable behaviour. This is
+// deliberately STRICTER than a no-op: because the count and the mutating write
+// must run inside ONE transaction, the concurrency test below still fails if a
+// path counts OUTSIDE its transaction (both transactions would then read the
+// stale "1 remaining" and both would write).
+// ---------------------------------------------------------------------------
+let txTail: Promise<void> = Promise.resolve();
 
 const mockPrisma: any = {
   ...db,
-  $transaction: jest.fn(async (fn: any) => fn(db)),
+  $transaction: jest.fn(async (fn: any) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const wait = txTail;
+    txTail = txTail.then(() => gate);
+    await wait;
+    try {
+      return await fn(db);
+    } finally {
+      release();
+    }
+  }),
 };
 
 jest.mock('../config/database', () => ({
@@ -248,6 +296,7 @@ beforeEach(() => {
   state.profiles = {};
   state.revoked = [];
   state.nextProfileId = 5000;
+  txTail = Promise.resolve();
   jest.clearAllMocks();
   bumpRolePermsVersion();
   // Default actors.
@@ -524,5 +573,113 @@ describe('D1/D7/D10 — role transitions and the final-super-admin invariant (§
     const res = await request(app).delete(`${API}/admin/users/9001`).set(SUPER);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('FINAL_SUPER_ADMIN');
+  });
+});
+
+// ===========================================================================
+// BLOCKER 3 — the final-active-super-admin invariant is CENTRALISED and
+// concurrency-safe. Every mutation that can remove a user from the ACTIVE
+// super-admin set (role change, status change, deactivate/suspend, delete, flag
+// revocation) runs read → invariant → write inside ONE serialised transaction.
+// ===========================================================================
+const activeSuperAdmins = (): number[] =>
+  Object.values(state.users)
+    .filter(
+      (u) =>
+        u.role === Role.ADMIN &&
+        u.isSuperAdmin === true &&
+        u.accountStatus === AccountStatus.ACTIVE,
+    )
+    .map((u) => u.id)
+    .sort();
+
+describe('BLOCKER 3 — final-active-super-admin invariant across every mutation path', () => {
+  it('ADMIN → STUDENT role change on the FINAL active super admin → 409', async () => {
+    const res = await request(app)
+      .patch(`${API}/admin/users/9001`)
+      .set(SUPER)
+      .send({ role: Role.STUDENT });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FINAL_SUPER_ADMIN');
+    expect(state.users[9001].role).toBe(Role.ADMIN);
+  });
+
+  it('ACTIVE → SUSPENDED status change on the FINAL active super admin → 409', async () => {
+    const res = await request(app)
+      .patch(`${API}/admin/users/9001`)
+      .set(SUPER)
+      .send({ accountStatus: AccountStatus.SUSPENDED });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('FINAL_SUPER_ADMIN');
+    expect(state.users[9001].accountStatus).toBe(AccountStatus.ACTIVE);
+  });
+
+  it('role change is ALLOWED when ANOTHER active super admin remains → 200', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    const res = await request(app)
+      .patch(`${API}/admin/users/9005`)
+      .set(SUPER)
+      .send({ role: Role.BURSARY });
+    expect(res.status).toBe(200);
+    expect(activeSuperAdmins()).toEqual([9001]);
+  });
+
+  it('deactivate is ALLOWED when ANOTHER active super admin remains → 200', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    const res = await request(app).post(`${API}/admin/users/9005/deactivate`).set(SUPER);
+    expect(res.status).toBe(200);
+    expect(activeSuperAdmins()).toEqual([9001]);
+  });
+
+  it('delete is ALLOWED when ANOTHER active super admin remains → 200', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    const res = await request(app).delete(`${API}/admin/users/9005`).set(SUPER);
+    expect(res.status).toBe(200);
+    expect(activeSuperAdmins()).toEqual([9001]);
+  });
+
+  it('the invariant only protects ACTIVE super admins — a SUSPENDED one may be demoted → 200', async () => {
+    // 9007 is a super admin but SUSPENDED (already outside the ACTIVE set), so
+    // demoting it removes nobody from the protected set. 9001 stays the actor.
+    setUser(9007, Role.ADMIN, { isSuperAdmin: true, accountStatus: AccountStatus.SUSPENDED });
+    const res = await request(app)
+      .patch(`${API}/admin/users/9007`)
+      .set(SUPER)
+      .send({ role: Role.BURSARY });
+    expect(res.status).toBe(200);
+    expect(state.users[9007].role).toBe(Role.BURSARY);
+    expect(activeSuperAdmins()).toEqual([9001]);
+  });
+
+  it('CONCURRENCY — two simultaneous mutations can never drop ACTIVE super admins to zero', async () => {
+    // Exactly TWO active super administrators exist: 9001 (the actor) and 9005.
+    // Both flag revocations are fired concurrently. Without serialisation each
+    // would read "1 remaining" and both would succeed, leaving ZERO. With it,
+    // exactly one succeeds and the other is rejected → at least ONE remains.
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    expect(activeSuperAdmins()).toEqual([9001, 9005]);
+
+    const [r1, r2] = await Promise.all([
+      request(app).post(`${API}/admin/users/9005/super-admin`).set(SUPER).send({ grant: false }),
+      request(app).post(`${API}/admin/users/9001/super-admin`).set(SUPER).send({ grant: false }),
+    ]);
+
+    const successes = [r1, r2].filter((r) => r.status === 200).length;
+    expect(successes).toBe(1); // never 2
+    expect(activeSuperAdmins()).toHaveLength(1); // never 0
+  });
+
+  it('CONCURRENCY — concurrent role change + flag revocation cannot drop ACTIVE super admins to zero', async () => {
+    setUser(9005, Role.ADMIN, { isSuperAdmin: true });
+    setUser(9006, Role.ADMIN, { isSuperAdmin: true });
+    expect(activeSuperAdmins()).toEqual([9001, 9005, 9006]);
+
+    // Demote 9005 and revoke 9006's flag concurrently; 9001 (the actor) remains.
+    const [r1, r2] = await Promise.all([
+      request(app).patch(`${API}/admin/users/9005`).set(SUPER).send({ role: Role.BURSARY }),
+      request(app).post(`${API}/admin/users/9006/super-admin`).set(SUPER).send({ grant: false }),
+    ]);
+    expect([r1.status, r2.status]).toEqual([200, 200]);
+    expect(activeSuperAdmins()).toEqual([9001]);
   });
 });

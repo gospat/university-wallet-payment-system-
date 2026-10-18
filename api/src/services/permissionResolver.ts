@@ -65,26 +65,35 @@ function registryKeys(): string[] {
 }
 
 /**
- * True when the ADMIN role baseline has been initialised at least once, proven
- * by the explicit Counter sentinel written by seedPermissions().
+ * Tri-state result of the ADMIN-baseline sentinel lookup.
  *
- * Absence ⇒ the ADMIN baseline was NEVER initialised (fresh install / pre-seed)
- * so the canonical FULL-registry floor applies (prevents administrative
- * lockout). Presence ⇒ a stored zero-row ADMIN baseline is an explicit state and
- * MUST be honoured literally.
- *
- * On ANY read error we return `false` (treat as never-initialised) so a
- * transient DB fault can never lock the protected ADMIN role out of the system.
+ *   'initialized'   → the sentinel row is PRESENT: the ADMIN baseline HAS been
+ *                     seeded, so a stored zero-row baseline is an explicit,
+ *                     intentional state and MUST be honoured literally.
+ *   'uninitialized' → a GENUINE `null` result (the sentinel row is absent): the
+ *                     baseline was never seeded (fresh install / pre-seed), so
+ *                     the canonical FULL-registry floor applies to prevent
+ *                     administrative lockout.
+ *   'unknown'       → the sentinel could NOT be read (DB/query error). We must
+ *                     NOT assume "uninitialised": doing so would silently turn
+ *                     an intentionally-empty ADMIN baseline into full canonical
+ *                     registry access. The stored baseline is honoured as-is.
  */
-async function isAdminRoleInitialized(): Promise<boolean> {
+type AdminBaselineMarker = 'initialized' | 'uninitialized' | 'unknown';
+
+async function readAdminBaselineMarker(): Promise<AdminBaselineMarker> {
   try {
     const marker = await prisma.counter.findUnique({
       where: { id: RBAC_ADMIN_INIT_SENTINEL_ID },
       select: { id: true },
     });
-    return marker !== null;
-  } catch {
-    return false;
+    return marker !== null ? 'initialized' : 'uninitialized';
+  } catch (e) {
+    console.warn(
+      '[permissionResolver] ADMIN baseline sentinel lookup failed; honouring the stored ADMIN baseline literally (no full-registry escalation).',
+      (e as Error)?.message?.slice(0, 180),
+    );
+    return 'unknown';
   }
 }
 
@@ -124,11 +133,16 @@ export async function getRolePermissions(role: Role | null | undefined): Promise
     let perms = rows.map((r) => r.permission.key);
     // D4 — the ADMIN role MAXIMUM is the FULL canonical registry, applied ONLY
     // as the floor for a genuinely UNINITIALISED ADMIN baseline (proven absent
-    // by the explicit RBAC_ADMIN_INIT_SENTINEL_ID marker). Once the baseline has
-    // been initialised, a stored zero-row set is honoured literally: an
-    // intentionally zero-permission ADMIN baseline is NEVER silently converted
-    // into full access.
-    if (role === Role.ADMIN && perms.length === 0 && !(await isAdminRoleInitialized())) {
+    // by a GENUINE null from the explicit RBAC_ADMIN_INIT_SENTINEL_ID marker).
+    // Once the baseline has been initialised — OR when the marker cannot be
+    // read — a stored zero-row set is honoured literally: an intentionally
+    // zero-permission ADMIN baseline is NEVER silently converted into full
+    // access (e.g. by a transient Counter lookup error).
+    if (
+      role === Role.ADMIN &&
+      perms.length === 0 &&
+      (await readAdminBaselineMarker()) === 'uninitialized'
+    ) {
       perms = registryKeys();
     }
     rolePermsCache.set(role, { ts: now, perms });
@@ -142,29 +156,40 @@ export async function getRolePermissions(role: Role | null | undefined): Promise
   }
 }
 
+/** Outcome of an individual-access profile lookup. */
+type AccessProfileLookup =
+  | { status: 'absent' } // GENUINE `null` from findUnique ⇒ INHERIT
+  | { status: 'resolved'; accessMode: AccessMode; keys: string[] }
+  | { status: 'error' }; // query failure ⇒ callers MUST fail closed
+
 /**
- * Load a user's individual-access profile. Returns null when there is no
- * profile (⇒ INHERIT). Any lookup error is treated as "no profile" so the
- * SERVER-AUTHORITATIVE role baseline is used; a genuine DB outage makes the
- * role lookup fail too (⇒ empty set ⇒ fail closed).
+ * Load a user's individual-access profile.
+ *
+ * A GENUINE `null` result (the user simply has no profile row) is 'absent' ⇒
+ * the user INHERITS the role baseline. A QUERY FAILURE is 'error' and MUST be
+ * treated as fail-closed by every caller: we cannot prove the user's access
+ * mode, so a CUSTOM-restricted user must NEVER silently fall back to the
+ * (wider) role baseline.
  */
-async function loadUserAccessProfile(
-  userId: number
-): Promise<{ accessMode: AccessMode; keys: string[] } | null> {
+async function loadUserAccessProfile(userId: number): Promise<AccessProfileLookup> {
   try {
     const profile = await prisma.userPermissionProfile.findUnique({
       where: { userId },
       include: { permissions: { include: { permission: { select: { key: true } } } } },
     });
-    if (!profile) return null;
+    if (!profile) return { status: 'absent' };
     const accessMode =
       (profile as any).accessMode === AccessMode.CUSTOM ? AccessMode.CUSTOM : AccessMode.INHERIT;
     const keys = (((profile as any).permissions ?? []) as any[])
       .map((p) => p?.permission?.key)
       .filter((k): k is string => typeof k === 'string');
-    return { accessMode, keys };
-  } catch {
-    return null;
+    return { status: 'resolved', accessMode, keys };
+  } catch (e) {
+    console.warn(
+      '[permissionResolver] individual access profile lookup failed; failing closed (no permissions).',
+      (e as Error)?.message?.slice(0, 180),
+    );
+    return { status: 'error' };
   }
 }
 
@@ -177,15 +202,21 @@ export async function resolveEffectivePermissionsForUser(
 ): Promise<string[]> {
   if (isSuperAdmin(user)) return registryKeys();
 
-  const profile = await loadUserAccessProfile(user.id);
-  if (profile && profile.accessMode === AccessMode.CUSTOM) {
+  const lookup = await loadUserAccessProfile(user.id);
+
+  // FAIL CLOSED — if the individual-access profile cannot be read we MUST NOT
+  // fall back to the role baseline: that would silently widen a
+  // CUSTOM-restricted user's access. Zero capability is the only safe answer.
+  if (lookup.status === 'error') return [];
+
+  if (lookup.status === 'resolved' && lookup.accessMode === AccessMode.CUSTOM) {
     // §8 effective-permission formula:
     //   CUSTOM = ROLE_BASELINE ∩ USER_CUSTOM_PERMISSIONS
     // An EMPTY selected set is a valid explicit zero (CUSTOM + zero ⇒ zero) and
     // is NEVER conflated with INHERIT. Individual access can only RESTRICT the
     // role maximum — it can never expand beyond it.
     const baseline = new Set(await getRolePermissions(user.role ?? null));
-    return profile.keys.filter((k) => baseline.has(k));
+    return lookup.keys.filter((k) => baseline.has(k));
   }
   return getRolePermissions(user.role ?? null);
 }
@@ -202,10 +233,14 @@ export async function getUserAccess(userId: number): Promise<UserAccessDescripto
   if (!user) return null;
 
   const superAdmin = isSuperAdmin(user);
-  const [rolePermissionKeys, profile] = await Promise.all([
-    getRolePermissions((user as any).role),
-    loadUserAccessProfile(userId),
-  ]);
+  const rolePermissionKeys = await getRolePermissions((user as any).role);
+  const lookup = await loadUserAccessProfile(userId);
+  // FAIL CLOSED — never report an individual-access configuration we could not
+  // verify. Inventing INHERIT here would misrepresent a CUSTOM-restricted user.
+  if (lookup.status === 'error') {
+    throw new Error('Unable to resolve individual access profile');
+  }
+  const profile = lookup.status === 'resolved' ? lookup : null;
 
   const accessMode: AccessMode = superAdmin
     ? AccessMode.INHERIT

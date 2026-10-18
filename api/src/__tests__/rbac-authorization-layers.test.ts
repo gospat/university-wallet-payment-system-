@@ -22,6 +22,12 @@ const mockState: {
   users: Record<number, { id: number; role: Role; accountStatus: AccountStatus; isSuperAdmin?: boolean }>;
   rolePerms: Record<string, string[]>;
   adminInitialized: boolean;
+  /** Individual-access profile rows, keyed by userId (absent ⇒ no profile row). */
+  profiles: Record<number, { accessMode: 'INHERIT' | 'CUSTOM'; keys: string[] }>;
+  /** When true, userPermissionProfile.findUnique THROWS (simulated query failure). */
+  profileLookupError: boolean;
+  /** When true, counter.findUnique THROWS (simulated query failure). */
+  counterLookupError: boolean;
 } = {
   users: {
     9001: { id: 9001, role: Role.ADMIN, accountStatus: AccountStatus.ACTIVE, isSuperAdmin: true },
@@ -33,6 +39,9 @@ const mockState: {
   },
   rolePerms: {},
   adminInitialized: true,
+  profiles: {},
+  profileLookupError: false,
+  counterLookupError: false,
 };
 
 jest.mock('../config/database', () => ({
@@ -50,10 +59,29 @@ jest.mock('../config/database', () => ({
     },
     // The explicit RBAC_ADMIN_INIT_SENTINEL_ID marker written by seedPermissions().
     // Present ⇒ a stored zero-row ADMIN baseline is honoured literally.
+    // A QUERY FAILURE must NOT be treated as "absent" (that would escalate to the
+    // full registry); the resolver returns 'unknown' and honours the baseline.
     counter: {
-      findUnique: jest.fn(() =>
-        Promise.resolve(mockState.adminInitialized ? { id: 'rbac_admin_role_initialized_20261017' } : null),
-      ),
+      findUnique: jest.fn(() => {
+        if (mockState.counterLookupError) return Promise.reject(new Error('counter lookup failed'));
+        return Promise.resolve(
+          mockState.adminInitialized ? { id: 'rbac_admin_role_initialized_20261017' } : null,
+        );
+      }),
+    },
+    // No individual-access profile row ⇒ INHERIT the role baseline. (A GENUINE
+    // null result means INHERIT; only a QUERY FAILURE fails closed.)
+    userPermissionProfile: {
+      findUnique: jest.fn((args: any) => {
+        if (mockState.profileLookupError) return Promise.reject(new Error('profile lookup failed'));
+        const p = mockState.profiles[args?.where?.userId];
+        if (!p) return Promise.resolve(null);
+        return Promise.resolve({
+          id: 1,
+          accessMode: p.accessMode,
+          permissions: p.keys.map((key) => ({ permission: { key } })),
+        });
+      }),
     },
   },
 }));
@@ -154,6 +182,9 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 beforeEach(() => {
   mockState.rolePerms = {};
   mockState.adminInitialized = true;
+  mockState.profiles = {};
+  mockState.profileLookupError = false;
+  mockState.counterLookupError = false;
   bumpRolePermsVersion();
 });
 
@@ -405,5 +436,106 @@ describe('HARDENING — ADMIN baseline initialisation is deterministic (sentinel
     setRolePerms(Role.ADMIN, []);
     expect((await request(app).get(`${API}/admin/stats`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(200);
     mockState.adminInitialized = true; // restored by beforeEach on the next test
+  });
+});
+
+// ===========================================================================
+// BLOCKER 1 — INDIVIDUAL-ACCESS PROFILE LOOKUP MUST FAIL CLOSED
+//   · A GENUINE `null` findUnique() result ⇒ the user has NO profile ⇒ INHERIT.
+//   · A DB/QUERY EXCEPTION ⇒ we cannot prove the access mode ⇒ FAIL CLOSED
+//     (zero capability). A CUSTOM-restricted user must NEVER silently fall back
+//     to the (wider) role baseline when the profile query fails.
+//   · CUSTOM with zero keys remains a VALID explicit zero (never INHERIT).
+//   · A Counter lookup error must NOT turn an intentionally-empty ADMIN
+//     baseline into the full canonical registry.
+// ===========================================================================
+describe('BLOCKER 1 — individual-access profile resolution fails CLOSED', () => {
+  /** Probe that reports the LIVE effective permission set resolved by protect(). */
+  const probeEffective = async (tok: string): Promise<string[]> => {
+    let effective: string[] = [];
+    const probe = express();
+    probe.get('/probe', protect, (req: any, res) => {
+      effective = req.user.permissions;
+      res.status(200).json({ ok: 1 });
+    });
+    const res = await request(probe).get('/probe').set(auth(tok));
+    expect(res.status).toBe(200);
+    return effective;
+  };
+
+  it('a GENUINE null profile ⇒ INHERIT the role baseline (200 on a baseline capability)', async () => {
+    delete mockState.profiles[9002]; // no profile row ⇒ genuine null ⇒ INHERIT
+    setRolePerms(Role.BURSARY, ['VIEW_STUDENTS']);
+    const res = await request(app).get(`${API}/students`).set(auth(BURSARY_TOKEN));
+    expect(res.status).toBe(200);
+    expect((await probeEffective(BURSARY_TOKEN)).sort()).toEqual(['VIEW_STUDENTS']);
+  });
+
+  it('CUSTOM subset restricts to the intersection (baseline ∩ selected)', async () => {
+    setRolePerms(Role.BURSARY, ['VIEW_STUDENTS', 'VIEW_PAYMENTS']);
+    mockState.profiles[9002] = { accessMode: 'CUSTOM', keys: ['VIEW_STUDENTS'] };
+    expect((await request(app).get(`${API}/students`).set(auth(BURSARY_TOKEN))).status).toBe(200);
+    // The withheld capability is denied even though the ROLE baseline grants it.
+    expect((await request(app).get(`${API}/bursary/payments`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+  });
+
+  it('CUSTOM can never widen beyond the role baseline', async () => {
+    setRolePerms(Role.BURSARY, ['VIEW_STUDENTS']);
+    // Selected VIEW_PAYMENTS is outside the baseline ⇒ intersection drops it.
+    mockState.profiles[9002] = { accessMode: 'CUSTOM', keys: ['VIEW_PAYMENTS'] };
+    expect((await request(app).get(`${API}/bursary/payments`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+    expect(await probeEffective(BURSARY_TOKEN)).toEqual([]);
+  });
+
+  it('CUSTOM with ZERO keys is a VALID explicit zero (never conflated with INHERIT)', async () => {
+    setRolePerms(Role.BURSARY, ['VIEW_STUDENTS']);
+    mockState.profiles[9002] = { accessMode: 'CUSTOM', keys: [] };
+    expect((await request(app).get(`${API}/students`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+    expect(await probeEffective(BURSARY_TOKEN)).toEqual([]);
+  });
+
+  it('PROFILE LOOKUP THROWS ⇒ FAIL CLOSED: a CUSTOM user does NOT gain role permissions', async () => {
+    // The role baseline WOULD grant VIEW_STUDENTS; the individual profile lookup
+    // fails. The correct answer is ZERO capability — never the wider baseline.
+    setRolePerms(Role.BURSARY, ['VIEW_STUDENTS', 'VIEW_PAYMENTS']);
+    mockState.profiles[9002] = { accessMode: 'CUSTOM', keys: ['VIEW_STUDENTS'] };
+    mockState.profileLookupError = true;
+
+    expect(await probeEffective(BURSARY_TOKEN)).toEqual([]);
+    expect((await request(app).get(`${API}/students`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+    expect((await request(app).get(`${API}/bursary/payments`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+  });
+
+  it('PROFILE LOOKUP THROWS ⇒ an INHERIT user also fails closed (no baseline fallback)', async () => {
+    setRolePerms(Role.BURSARY, ['VIEW_STUDENTS']);
+    mockState.profileLookupError = true;
+    expect((await request(app).get(`${API}/students`).set(auth(BURSARY_TOKEN))).status).toBe(403);
+    expect(await probeEffective(BURSARY_TOKEN)).toEqual([]);
+  });
+
+  it('a Super Admin bypass is UNAFFECTED by a profile-lookup failure', async () => {
+    setRolePerms(Role.ADMIN, []);
+    mockState.profileLookupError = true;
+    // The flagged super admin short-circuits BEFORE the profile lookup.
+    expect((await request(app).get(`${API}/admin/roles`).set(auth(ADMIN_TOKEN))).status).toBe(200);
+  });
+
+  it('COUNTER LOOKUP THROWS ⇒ an intentionally-empty ADMIN baseline is NOT escalated', async () => {
+    // Baseline genuinely initialised with ZERO rows, but the sentinel read fails.
+    // 'unknown' must honour the stored baseline literally — never the registry.
+    mockState.adminInitialized = true;
+    mockState.counterLookupError = true;
+    setRolePerms(Role.ADMIN, []);
+    expect((await request(app).get(`${API}/admin/stats`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
+    expect(await probeEffective(NORMAL_ADMIN_TOKEN)).toEqual([]);
+  });
+
+  it('COUNTER LOOKUP THROWS with a NON-empty baseline ⇒ the stored baseline still applies', async () => {
+    mockState.adminInitialized = true;
+    mockState.counterLookupError = true;
+    setRolePerms(Role.ADMIN, ['VIEW_DASHBOARD']);
+    expect((await request(app).get(`${API}/admin/stats`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(200);
+    // ...but a capability it does not hold is still denied (no registry escalation).
+    expect((await request(app).get(`${API}/admin/email-delivery-logs`).set(auth(NORMAL_ADMIN_TOKEN))).status).toBe(403);
   });
 });

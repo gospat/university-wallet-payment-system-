@@ -95,6 +95,15 @@ const mockPrisma: any = {
   refreshToken: {
     updateMany: jest.fn(() => Promise.resolve({ count: 1 })),
   },
+  // No RBAC_ADMIN_INIT_SENTINEL_ID marker ⇒ genuinely UNINITIALISED ADMIN
+  // baseline ⇒ the canonical full-registry floor applies.
+  counter: {
+    findUnique: jest.fn(() => Promise.resolve(null)),
+  },
+  // No individual-access profile ⇒ INHERIT the role baseline.
+  userPermissionProfile: {
+    findUnique: jest.fn(() => Promise.resolve(null)),
+  },
   auditLog: {
     create: jest.fn((args: any) => {
       state.auditActions.push(String(args?.data?.action ?? ''));

@@ -760,8 +760,8 @@ router.patch(
         existing.isSuperAdmin === true &&
         resultingAccountStatus === AccountStatus.ACTIVE;
       if (wasActiveSuperAdmin && !stillActiveSuperAdmin) {
-        const others = await countActiveSuperAdmins(tx, id);
-        if (others === 0) return { kind: 'finalSuperAdmin' as const };
+        const invariant = await assertSuperAdminInvariant(tx, id);
+        if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
       }
 
       const updated = await tx.user.update({
@@ -803,43 +803,58 @@ router.post(
   validateParams(UserIdParam),
   catchAsync(async (req: any, res) => {
     const { id } = req.params as z.infer<typeof UserIdParam>;
-    const existing = await prisma.user.findUnique({
-      where: { id },
-      select: { id: true, role: true, isSuperAdmin: true, accountStatus: true },
+
+    // D10/D7 — the read → invariant check → write sequence runs in ONE
+    // transaction so a concurrent demotion/suspension cannot slip past the
+    // final-active-super-admin invariant.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, role: true, isSuperAdmin: true, accountStatus: true },
+      });
+      if (!existing) return { kind: 'notFound' as const };
+
+      const newStatus =
+        existing.accountStatus === AccountStatus.ACTIVE
+          ? AccountStatus.SUSPENDED
+          : AccountStatus.ACTIVE;
+
+      // The final ACTIVE super administrator must never be suspended.
+      const isActiveSuperAdmin =
+        existing.role === Role.ADMIN &&
+        existing.isSuperAdmin === true &&
+        existing.accountStatus === AccountStatus.ACTIVE;
+      if (isActiveSuperAdmin && newStatus !== AccountStatus.ACTIVE) {
+        const invariant = await assertSuperAdminInvariant(tx, id);
+        if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
+      }
+
+      const updated = await tx.user.update({
+        where: { id },
+        data: { accountStatus: newStatus },
+        select: USER_SELECT as any,
+      });
+      return { kind: 'updated' as const, updated, oldStatus: existing.accountStatus, newStatus };
     });
-    if (!existing) {
+
+    if (outcome.kind === 'notFound') {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
-    const newStatus = existing.accountStatus === AccountStatus.ACTIVE ? AccountStatus.SUSPENDED : AccountStatus.ACTIVE;
-
-    // D7 — the final ACTIVE super administrator must never be suspended.
-    const isActiveSuperAdmin =
-      existing.role === Role.ADMIN &&
-      existing.isSuperAdmin === true &&
-      existing.accountStatus === AccountStatus.ACTIVE;
-    if (isActiveSuperAdmin && newStatus !== AccountStatus.ACTIVE) {
-      const others = await countActiveSuperAdmins(prisma as any, id);
-      if (others === 0) {
-        return res.status(409).json({
-          status: 'fail',
-          code: 'FINAL_SUPER_ADMIN',
-          error: 'Cannot suspend the final active Super Administrator. Grant the flag to another active administrator first.',
-        });
-      }
+    if (outcome.kind === 'finalSuperAdmin') {
+      return res.status(409).json({
+        status: 'fail',
+        code: 'FINAL_SUPER_ADMIN',
+        error: 'Cannot suspend the final active Super Administrator. Grant the flag to another active administrator first.',
+      });
     }
 
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { accountStatus: newStatus },
-      select: USER_SELECT as any,
-    });
     await writeAudit(req, {
       action: 'ACCOUNT_STATUS_CHANGE',
       entityType: 'USER',
       entityId: id,
-      details: { oldStatus: existing.accountStatus, newStatus },
+      details: { oldStatus: outcome.oldStatus, newStatus: outcome.newStatus },
     });
-    res.status(200).json({ status: 'success', data: updated });
+    res.status(200).json({ status: 'success', data: outcome.updated });
   }),
 );
 
@@ -882,9 +897,11 @@ router.post(
 // ---------------------------------------------------------------------------
 // Gates (checked in this order, any failure returns non-200):
 //   1. 404 if user doesn't exist.
-//   2. 403 if user is one of the PROTECTED_SUPER_ADMIN_IDS (1=Super Admin,
-//      2=Chief Bursar, 48=Tolu Bursar) — these accounts can never be deleted
-//      because they are the bootstrap / root sign-in accounts.
+//   2. 409 (Conflict) if the user is the FINAL ACTIVE Super Administrator
+//      (role=ADMIN ∧ isSuperAdmin=true ∧ accountStatus=ACTIVE). Authority and
+//      protection are derived ENTIRELY from the database-backed hierarchy and
+//      the final-active-super-admin invariant — never from a hardcoded
+//      identity (id, email or name).
 //   3. 409 (Conflict) if user.role === STUDENT AND the student has ANY
 //      financial records. This preserves the audit trail & bank-reconciliation
 //      integrity of the university ledger:
@@ -893,8 +910,8 @@ router.post(
 //        - rows in `transactions` (Transaction.userId = user.id)
 //        - rows in `refunds` (Refund.requestedById = user.id OR a
 //          Refund.originalTransaction → Transaction.userId = student.id)
-//      Non-student accounts (ADMIN / BURSARY staff) can be deleted freely as
-//      long as they are not one of the 3 protected root ids.
+//      Non-student accounts (ADMIN / BURSARY staff) can be deleted freely unless
+//      doing so would violate the final-active-super-admin invariant.
 //   4. Cleanup: inside a Prisma transaction:
 //        - SET NULL audit_logs.userId → preserve audit history for deleted
 //          users (we never delete audit rows — data protection / compliance).
@@ -907,24 +924,48 @@ router.post(
 //   5. Write audit entry: action = DELETE_USER with role, email, wasProtected,
 //      studentFinancialGate.
 // ---------------------------------------------------------------------------
-const PROTECTED_SUPER_ADMIN_IDS = new Set<number>([1, 2, 48]);
 
 /**
- * D7 — the final-active-super-admin invariant. Counts users that are
- * simultaneously role=ADMIN, isSuperAdmin=true and ACTIVE, optionally excluding
- * one id. Callers pass their transaction client so the count and the mutating
- * write share ONE transaction and concurrent changes cannot both observe a safe
- * "2 remaining" result.
+ * D7 — FINAL ACTIVE SUPER ADMIN INVARIANT (centralised, concurrency-safe).
+ *
+ * The invariant: at least one user with (role=ADMIN ∧ isSuperAdmin=true ∧
+ * accountStatus=ACTIVE) must exist at all times.
+ *
+ * Every mutation that can REMOVE a user from that set — Super Admin flag
+ * revocation, ADMIN → BURSARY/STUDENT role change, ACTIVE → non-ACTIVE status
+ * change, deactivate/suspend and delete — MUST call this helper INSIDE the same
+ * transaction as the mutation itself.
+ *
+ * Serialisation: a plain count followed by a separate write is NOT safe under
+ * concurrency (two requests can each observe the same "1 remaining" and both
+ * proceed). The helper therefore FIRST takes a pessimistic row/range lock on
+ * the current ACTIVE Super Administrator set (SELECT ... FOR UPDATE, MySQL
+ * InnoDB), which makes concurrent invariant-affecting transactions queue. The
+ * subsequent count then observes the latest committed state, so the count and
+ * the mutating write can never interleave down to zero.
  */
-async function countActiveSuperAdmins(tx: any, excludeId?: number): Promise<number> {
-  return tx.user.count({
+async function assertSuperAdminInvariant(
+  tx: any,
+  targetId: number,
+): Promise<'ok' | 'finalSuperAdmin'> {
+  // 1. Serialise on the ACTIVE Super Administrator set.
+  await tx.$queryRaw`
+    SELECT id FROM users
+    WHERE role = ${Role.ADMIN}
+      AND isSuperAdmin = ${true}
+      AND accountStatus = ${AccountStatus.ACTIVE}
+    FOR UPDATE
+  `;
+  // 2. Count the ACTIVE Super Admins that would REMAIN after the mutation.
+  const remaining = await tx.user.count({
     where: {
       role: Role.ADMIN,
       isSuperAdmin: true,
       accountStatus: AccountStatus.ACTIVE,
-      ...(excludeId !== undefined ? { id: { not: excludeId } } : {}),
+      id: { not: targetId },
     },
   });
+  return remaining > 0 ? 'ok' : 'finalSuperAdmin';
 }
 
 /**
@@ -965,7 +1006,10 @@ function buildUserAccessOut(
     selectedPermissions,
     effectivePermissions,
     effectivePermissionCount: effectivePermissions.length,
-    isProtected: PROTECTED_SUPER_ADMIN_IDS.has(user.id),
+    // Protection is derived from the database-backed hierarchy — a Super
+    // Administrator (role=ADMIN ∧ isSuperAdmin=true) — never from a hardcoded
+    // identity. There is no id/email/name allow-list anywhere in the system.
+    isProtected: user.isSuperAdmin === true,
   };
 }
 
@@ -1035,32 +1079,7 @@ router.delete(
       return res.status(404).json({ status: 'fail', error: 'User not found' });
     }
 
-    // Gate 2 — protected root accounts
-    if (PROTECTED_SUPER_ADMIN_IDS.has(id)) {
-      return res.status(403).json({
-        status: 'fail',
-        error: 'Cannot delete protected system account (primary admin / bursary bootstrap accounts)',
-        code: 'PROTECTED_ACCOUNT',
-      });
-    }
-
-    // Gate 2b — D7: the FINAL active super administrator must never be deleted.
-    if (
-      existing.role === Role.ADMIN &&
-      existing.isSuperAdmin === true &&
-      existing.accountStatus === AccountStatus.ACTIVE
-    ) {
-      const others = await countActiveSuperAdmins(prisma as any, id);
-      if (others === 0) {
-        return res.status(409).json({
-          status: 'fail',
-          code: 'FINAL_SUPER_ADMIN',
-          error: 'Cannot delete the final active Super Administrator. Grant the flag to another active administrator first.',
-        });
-      }
-    }
-
-    // Gate 3 — student financial integrity
+    // Gate 2 — student financial integrity (read-only business gate)
     if (existing.role === Role.STUDENT) {
       const fin = await hasFinancialRecordsForStudent(id);
       if (fin.any) {
@@ -1082,8 +1101,19 @@ router.delete(
       }
     }
 
-    // Gate 4 — transactional cleanup + delete
-    await prisma.$transaction(async (tx) => {
+    const isActiveSuperAdmin =
+      existing.role === Role.ADMIN &&
+      existing.isSuperAdmin === true &&
+      existing.accountStatus === AccountStatus.ACTIVE;
+
+    // Gate 3 — the final-active-super-admin invariant + transactional cleanup +
+    // delete all run in ONE transaction so the invariant check is serialised
+    // against the delete (no count-then-delete race).
+    const outcome = await prisma.$transaction(async (tx) => {
+      if (isActiveSuperAdmin) {
+        const invariant = await assertSuperAdminInvariant(tx, id);
+        if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
+      }
       // Preserve audit history (don't DELETE audit rows) — just detach userId
       await tx.auditLog.updateMany({
         where: { userId: id },
@@ -1097,9 +1127,18 @@ router.delete(
       await tx.user.delete({
         where: { id },
       });
+      return { kind: 'deleted' as const };
     });
 
-    // Gate 5 — audit trail of the deletion itself
+    if (outcome.kind === 'finalSuperAdmin') {
+      return res.status(409).json({
+        status: 'fail',
+        code: 'FINAL_SUPER_ADMIN',
+        error: 'Cannot delete the final active Super Administrator. Grant the flag to another active administrator first.',
+      });
+    }
+
+    // Gate 4 — audit trail of the deletion itself
     await writeAudit(req, {
       action: 'DELETE_USER',
       entityType: 'USER',
@@ -1108,7 +1147,7 @@ router.delete(
         email: existing.email,
         role: existing.role,
         name: `${existing.firstName ?? ''} ${existing.lastName ?? ''}`.trim(),
-        protectedAccount: false,
+        protectedAccount: existing.isSuperAdmin === true,
         studentGatePassed: existing.role === Role.STUDENT,
       },
     });
@@ -1383,55 +1422,62 @@ router.post(
     const { grant } = req.body as z.infer<typeof SetSuperAdminSchema>;
     const actor = req.user as { id: number };
 
-    const target = await prisma.user.findUnique({
-      where: { id },
-      select: USER_ACCESS_USER_SELECT as any,
+    // D10/D7 — the read → invariant check → write sequence runs in ONE
+    // transaction so a concurrent revocation/demotion cannot slip past the
+    // final-active-super-admin invariant.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const target = await tx.user.findUnique({
+        where: { id },
+        select: USER_ACCESS_USER_SELECT as any,
+      });
+      if (!target) return { kind: 'notFound' as const };
+      const t = target as any;
+
+      if (grant && t.role !== Role.ADMIN) return { kind: 'targetNotAdmin' as const };
+
+      const currentFlag = t.isSuperAdmin === true;
+      if (currentFlag === grant) return { kind: 'unchanged' as const, target: t };
+
+      // The FINAL active super administrator must never lose the flag.
+      if (!grant && t.accountStatus === AccountStatus.ACTIVE) {
+        const invariant = await assertSuperAdminInvariant(tx, id);
+        if (invariant === 'finalSuperAdmin') return { kind: 'finalSuperAdmin' as const };
+      }
+
+      await tx.user.update({ where: { id }, data: { isSuperAdmin: grant } });
+      // Force the target to re-authenticate so its new capability set is
+      // resolved fresh from the database on the next request.
+      await tx.refreshToken.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      return { kind: 'changed' as const, target: t };
     });
-    if (!target) {
+
+    if (outcome.kind === 'notFound') {
       return res.status(404).json({ status: 'fail', message: 'User not found' });
     }
-    const t = target as any;
-
-    if (grant && t.role !== Role.ADMIN) {
+    if (outcome.kind === 'targetNotAdmin') {
       return res.status(400).json({
         status: 'fail',
         code: 'TARGET_NOT_ADMIN',
         error: 'Only a user whose role is ADMIN can be granted the Super Administrator flag.',
       });
     }
-
-    const currentFlag = t.isSuperAdmin === true;
-    if (currentFlag !== grant) {
-      // D7 — the FINAL active super administrator must never lose the flag.
-      if (
-        !grant &&
-        t.accountStatus === AccountStatus.ACTIVE
-      ) {
-        const others = await countActiveSuperAdmins(prisma as any, id);
-        if (others === 0) {
-          return res.status(409).json({
-            status: 'fail',
-            code: 'FINAL_SUPER_ADMIN',
-            error: 'Cannot revoke the Super Administrator flag from the final active Super Administrator.',
-          });
-        }
-      }
-
-      await prisma.$transaction(async (tx) => {
-        await tx.user.update({ where: { id }, data: { isSuperAdmin: grant } });
-        // Force the target to re-authenticate so its new capability set is
-        // resolved fresh from the database on the next request.
-        await tx.refreshToken.updateMany({
-          where: { userId: id, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
+    if (outcome.kind === 'finalSuperAdmin') {
+      return res.status(409).json({
+        status: 'fail',
+        code: 'FINAL_SUPER_ADMIN',
+        error: 'Cannot revoke the Super Administrator flag from the final active Super Administrator.',
       });
+    }
 
+    if (outcome.kind === 'changed') {
       await writeAudit(req, {
         action: grant ? 'SUPER_ADMIN_GRANTED' : 'SUPER_ADMIN_REVOKED',
         entityType: 'USER',
         entityId: id,
-        details: { email: t.email, role: t.role, changedBy: actor.id },
+        details: { email: outcome.target.email, role: outcome.target.role, changedBy: actor.id },
       });
     }
 

@@ -83,6 +83,18 @@ jest.mock('../config/database', () => {
           return Promise.resolve(list.map((key) => ({ permission: { key } })));
         }),
       },
+      // No RBAC_ADMIN_INIT_SENTINEL_ID marker in this mock ⇒ a genuinely
+      // UNINITIALISED ADMIN baseline (fresh install) ⇒ the canonical
+      // full-registry floor applies. NOTE: a GENUINE null returns
+      // 'uninitialized'; a query ERROR must NOT escalate.
+      counter: {
+        findUnique: jest.fn(() => Promise.resolve(null)),
+      },
+      // No individual-access profile ⇒ INHERIT the role baseline (a genuine
+      // null is INHERIT; only a query FAILURE fails closed).
+      userPermissionProfile: {
+        findUnique: jest.fn(() => Promise.resolve(null)),
+      },
       refreshToken: {
         findUnique: jest.fn(() => Promise.resolve(null)),
         update: jest.fn(() => Promise.resolve({ id: 1 })),
