@@ -307,12 +307,25 @@ router.use(protect);
 // Admission exceptions (still capability-checked per route):
 //   · GET /audit-logs*           → ADMIN or BURSARY
 //   · GET /email-delivery-logs*  → ADMIN or BURSARY (PII masked for non-ADMIN)
+//   · GET /students/imports*     → ADMIN or BURSARY, EXCEPT the credentials CSV
+//                                  (plaintext temporary passwords) which stays
+//                                  ADMIN-only. Every admitted route is still
+//                                  gated: VIEW_IMPORT_HISTORY for history reads,
+//                                  BULK_UPLOAD_STUDENTS(+CREATE_STUDENT) for
+//                                  actions — so a BURSARY caller without the
+//                                  capability is still denied.
 // ---------------------------------------------------------------------------
 router.use((req, res, next) => {
   const isAuditLogsRead = req.method === 'GET' && /^\/audit-logs(\/|$)/.test(req.path);
   const isEmailDeliveryLogRead =
     req.method === 'GET' && /^\/email-delivery-logs(\/|$)/.test(req.path);
-  if (isAuditLogsRead || isEmailDeliveryLogRead) {
+  // Import-history READS. The credentials-export route is excluded here: it
+  // hands out plaintext temporary passwords and must remain ADMIN-only.
+  const isImportHistoryRead =
+    req.method === 'GET' &&
+    /^\/students\/imports(\/|$)/.test(req.path) &&
+    !/^\/students\/imports\/[^/]+\/credentials\.csv$/.test(req.path);
+  if (isAuditLogsRead || isEmailDeliveryLogRead || isImportHistoryRead) {
     return restrictTo('ADMIN', 'BURSARY')(req, res, next);
   }
   return restrictTo('ADMIN')(req, res, next);
@@ -371,6 +384,16 @@ router.get('/students/upload/:id/errors.csv', requirePermission('BULK_UPLOAD_STU
 router.post('/students/upload/:id/confirm', requirePermission('BULK_UPLOAD_STUDENTS'), requirePermission('CREATE_STUDENT'), confirmStudentUpload);
 
 // --- Background student-import runs ---
+// CAPABILITY SPLIT (read history vs perform an action):
+//   · VIEW_IMPORT_HISTORY   → reading/listing historical import runs and their
+//                             history/detail data (list, run detail, row detail).
+//   · BULK_UPLOAD_STUDENTS  → staging/uploading/import EXECUTION, the
+//                             credentials CSV export (it hands out plaintext
+//                             temporary passwords) and resending credentials.
+//     + CREATE_STUDENT      → the two routes that actually create/mutate student
+//                             accounts (confirm + resend credentials).
+// An endpoint that performs an action therefore NEVER becomes authorized merely
+// because the caller holds VIEW_IMPORT_HISTORY.
 // ORDERING: the more specific `imports/rows/:id/...` route MUST be registered
 // before the generic `imports/:uuid` so it can never be shadowed by `:uuid`.
 router.post(
@@ -379,10 +402,10 @@ router.post(
   requirePermission('CREATE_STUDENT'),
   resendImportRowCredentials,
 );
-router.get('/students/imports', requirePermission('BULK_UPLOAD_STUDENTS'), listImportRuns);
-router.get('/students/imports/:uuid/rows', requirePermission('BULK_UPLOAD_STUDENTS'), listImportRunRows);
+router.get('/students/imports', requirePermission('VIEW_IMPORT_HISTORY'), listImportRuns);
+router.get('/students/imports/:uuid/rows', requirePermission('VIEW_IMPORT_HISTORY'), listImportRunRows);
 router.get('/students/imports/:uuid/credentials.csv', requirePermission('BULK_UPLOAD_STUDENTS'), downloadCredentialsCsv);
-router.get('/students/imports/:uuid', requirePermission('BULK_UPLOAD_STUDENTS'), getImportRun);
+router.get('/students/imports/:uuid', requirePermission('VIEW_IMPORT_HISTORY'), getImportRun);
 
 router.get('/refunds', requirePermission('PROCESS_REFUND'), adminListRefunds);
 const RefundIdParam = z.object({ id: z.coerce.number().int().positive() });

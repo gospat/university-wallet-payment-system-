@@ -998,3 +998,131 @@ describe('REQUEST G — unified mutation lock across every Super-Admin path', ()
     assertFinalInvariants();
   });
 });
+
+// ---------------------------------------------------------------------------
+// IMPORT HISTORY — capability split (VIEW_IMPORT_HISTORY vs BULK_UPLOAD_STUDENTS)
+// =============================================================================
+// Production defect: the Import History navigation item was correctly hidden by
+// VIEW_IMPORT_HISTORY, but the READS were gated on BULK_UPLOAD_STUDENTS and a
+// caller could still fetch the history by hitting the API / typing the URL.
+//
+// Contract proven here:
+//   · VIEW_IMPORT_HISTORY  → reading/listing import runs + run/row detail.
+//   · BULK_UPLOAD_STUDENTS → staging/uploading/import EXECUTION, the credentials
+//                            CSV export (plaintext temporary passwords) and
+//                            resending credentials.
+//   · An action endpoint NEVER becomes reachable merely by holding
+//     VIEW_IMPORT_HISTORY.
+// ---------------------------------------------------------------------------
+describe('Import history — VIEW_IMPORT_HISTORY gates READS; actions keep their own capability', () => {
+  beforeEach(() => {
+    // The mocked controllers must actually answer, else the request hangs.
+    const bulk = jest.requireMock('../controllers/bulkUpload') as any;
+    bulk.listImportRuns.mockImplementation((_req: any, res: any) =>
+      res.status(200).json({ status: 'success', data: { runs: [] } }),
+    );
+    bulk.getImportRun.mockImplementation((_req: any, res: any) =>
+      res.status(200).json({ status: 'success', data: { run: {} } }),
+    );
+    bulk.listImportRunRows.mockImplementation((_req: any, res: any) =>
+      res.status(200).json({ status: 'success', data: { rows: [] } }),
+    );
+    bulk.downloadCredentialsCsv.mockImplementation((_req: any, res: any) =>
+      res.status(200).send('reference,password'),
+    );
+    bulk.resendImportRowCredentials.mockImplementation((_req: any, res: any) =>
+      res.status(200).json({ status: 'success' }),
+    );
+  });
+
+  /** BURSARY baseline: [B1,B2,B3] plus (optionally) an explicit key set. */
+  function setBursaryRolePerms(keys: string[]) {
+    state.rolePerms[Role.BURSARY as any] = keys;
+    bumpRolePermsVersion();
+  }
+
+  /** A normal (non-super) ADMIN with EXACTLY the given baseline (no full floor). */
+  function setNormalAdminRolePerms(keys: string[]) {
+    state.rolePerms[Role.ADMIN as any] = keys;
+    bumpRolePermsVersion();
+  }
+
+  const IMPORTS = `${API}/admin/students/imports`;
+
+  it('BURSARY WITH VIEW_IMPORT_HISTORY can READ the run list, run detail and rows', async () => {
+    setBursaryRolePerms([B1, B2, B3, 'VIEW_IMPORT_HISTORY']);
+    const [list, detail, rows] = await Promise.all([
+      request(app).get(IMPORTS).set(BURSARY),
+      request(app).get(`${IMPORTS}/run-1`).set(BURSARY),
+      request(app).get(`${IMPORTS}/run-1/rows`).set(BURSARY),
+    ]);
+    expect(list.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(rows.status).toBe(200);
+  });
+
+  it('BURSARY WITHOUT VIEW_IMPORT_HISTORY is denied every history READ (403)', async () => {
+    setBursaryRolePerms([B1, B2, B3]); // no VIEW_IMPORT_HISTORY
+    const [list, detail, rows] = await Promise.all([
+      request(app).get(IMPORTS).set(BURSARY),
+      request(app).get(`${IMPORTS}/run-1`).set(BURSARY),
+      request(app).get(`${IMPORTS}/run-1/rows`).set(BURSARY),
+    ]);
+    expect(list.status).toBe(403);
+    expect(detail.status).toBe(403);
+    expect(rows.status).toBe(403);
+  });
+
+  it('a normal ADMIN WITHOUT VIEW_IMPORT_HISTORY is denied the history reads (403)', async () => {
+    setNormalAdminRolePerms(['VIEW_STUDENTS']);
+    const res = await request(app).get(IMPORTS).set(NORMAL_ADMIN);
+    expect(res.status).toBe(403);
+  });
+
+  it('a normal ADMIN WITH VIEW_IMPORT_HISTORY may read the history (200)', async () => {
+    setNormalAdminRolePerms(['VIEW_STUDENTS', 'VIEW_IMPORT_HISTORY']);
+    const res = await request(app).get(IMPORTS).set(NORMAL_ADMIN);
+    expect(res.status).toBe(200);
+  });
+
+  it('a Super Administrator always reads the history (200)', async () => {
+    // Even with a deliberately empty ADMIN baseline, the super-admin bypass holds.
+    setNormalAdminRolePerms([]);
+    const res = await request(app).get(IMPORTS).set(SUPER);
+    expect(res.status).toBe(200);
+  });
+
+  it('VIEW_IMPORT_HISTORY alone does NOT authorize the credentials CSV export (403)', async () => {
+    // The credentials export hands out plaintext temporary passwords. It stays
+    // ADMIN-only at the role boundary AND requires BULK_UPLOAD_STUDENTS.
+    setBursaryRolePerms([B1, B2, B3, 'VIEW_IMPORT_HISTORY', 'BULK_UPLOAD_STUDENTS']);
+    const res = await request(app).get(`${IMPORTS}/run-1/credentials.csv`).set(BURSARY);
+    expect(res.status).toBe(403);
+  });
+
+  it('VIEW_IMPORT_HISTORY alone does NOT authorize the resend-credentials ACTION (403)', async () => {
+    setBursaryRolePerms([B1, B2, B3, 'VIEW_IMPORT_HISTORY']);
+    const res = await request(app).post(`${IMPORTS}/rows/1/resend-credentials`).set(BURSARY);
+    expect(res.status).toBe(403);
+  });
+
+  it('a normal ADMIN without BULK_UPLOAD_STUDENTS cannot perform the resend ACTION (403)', async () => {
+    setNormalAdminRolePerms(['VIEW_STUDENTS', 'VIEW_IMPORT_HISTORY']);
+    const res = await request(app).post(`${IMPORTS}/rows/1/resend-credentials`).set(NORMAL_ADMIN);
+    expect(res.status).toBe(403);
+  });
+
+  it('BULK_UPLOAD_STUDENTS alone does NOT authorize the history READS (403)', async () => {
+    // Upload execution and history reading are genuinely separate capabilities.
+    setBursaryRolePerms([B1, B2, B3, 'BULK_UPLOAD_STUDENTS', 'CREATE_STUDENT']);
+    const [list, detail, rows] = await Promise.all([
+      request(app).get(IMPORTS).set(BURSARY),
+      request(app).get(`${IMPORTS}/run-1`).set(BURSARY),
+      request(app).get(`${IMPORTS}/run-1/rows`).set(BURSARY),
+    ]);
+    expect(list.status).toBe(403);
+    expect(detail.status).toBe(403);
+    expect(rows.status).toBe(403);
+  });
+});
+

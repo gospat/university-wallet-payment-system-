@@ -9,6 +9,7 @@ import { RefundService } from '../services/refund';
 import { Prisma } from '@prisma/client';
 import { buildBranding } from '../utils/branding';
 import { csvLineSafe, appendCsvIntegrityTrailer } from '../utils/security';
+import { dashboardDateWindow, dateOnly, lagosDayOf } from '../services/reports/aggregates';
 import {
   CancelTransactionBodySchema,
   TransactionCancellationService,
@@ -162,9 +163,14 @@ const DashboardSummarySchema = z.object({
 
 router.get('/dashboard/summary', requirePermission('VIEW_DASHBOARD'), validateQuery(DashboardSummarySchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo } = req.query as any;
+  // ONE canonical Lagos business-day window (gte inclusive / lt exclusive) for
+  // the whole dashboard. The receipts query below reuses this SAME window — it
+  // must never rebuild a range by concatenating a time suffix onto the
+  // already-coerced Date (that produced an Invalid Date → 500 → the UI fell
+  // back to legitimate-looking ₦0 KPIs while trend/category showed real money).
+  const window = dashboardDateWindow({ dateFrom, dateTo });
   const paidWhere: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
-  if (dateFrom) paidWhere.createdAt = { ...(paidWhere.createdAt || {}), gte: dateFrom };
-  if (dateTo) paidWhere.createdAt = { ...(paidWhere.createdAt || {}), lte: dateTo };
+  if (window) paidWhere.createdAt = window;
 
   const [
     totalPaidAgg,
@@ -178,10 +184,7 @@ router.get('/dashboard/summary', requirePermission('VIEW_DASHBOARD'), validateQu
       prisma.receipt.count({
         where: {
           isVoided: false,
-          paidAt: dateFrom || dateTo ? {
-            ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
-            ...(dateTo ? { lte: new Date(dateTo + 'T23:59:59.999Z') } : {}),
-          } as any : undefined,
+          ...(window ? { paidAt: window } : {}),
         },
       }),
       prisma.transaction.groupBy({
@@ -301,9 +304,10 @@ const DashboardByCategorySchema = z.object({
 
 router.get('/dashboard/by-category', requirePermission('VIEW_DASHBOARD'), validateQuery(DashboardByCategorySchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo } = req.query as any;
+  // SAME canonical window as /dashboard/summary and /dashboard/trend.
+  const window = dashboardDateWindow({ dateFrom, dateTo });
   const where: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
-  if (dateFrom) where.createdAt = { ...(where.createdAt || {}), gte: dateFrom };
-  if (dateTo) where.createdAt = { ...(where.createdAt || {}), lte: dateTo };
+  if (window) where.createdAt = window;
 
   const txs = await prisma.transaction.findMany({
     where,
@@ -340,36 +344,41 @@ router.get('/dashboard/trend', requirePermission('VIEW_DASHBOARD'), validateQuer
   const { dateFrom, dateTo, groupBy } = req.query as any;
   const unit: 'day' | 'week' | 'month' = groupBy || 'day';
 
-  const to = dateTo ? new Date(dateTo) : new Date();
-  const from = dateFrom
-    ? new Date(dateFrom)
-    : (() => {
-        const d = new Date(to);
-        if (unit === 'day') d.setDate(d.getDate() - 29);
-        else if (unit === 'week') d.setDate(d.getDate() - 13 * 7);
-        else d.setMonth(d.getMonth() - 11);
-        return d;
-      })();
+  // SAME canonical Lagos business-day window as /dashboard/summary and
+  // /dashboard/by-category: lower bound INCLUSIVE, upper bound EXCLUSIVE.
+  const window = dashboardDateWindow({ dateFrom, dateTo });
+  const rangeEnd = window?.lt ?? new Date();
+  const rangeStart = window?.gte
+    ?? (() => {
+      const d = new Date(rangeEnd);
+      if (unit === 'day') d.setDate(d.getDate() - 29);
+      else if (unit === 'week') d.setDate(d.getDate() - 13 * 7);
+      else d.setMonth(d.getMonth() - 11);
+      return d;
+    })();
 
+  // Buckets must tile [rangeStart, rangeEnd) CONTIGUOUSLY — the final bucket is
+  // clamped to rangeEnd — so every transaction inside the window falls into
+  // exactly one bucket and trend.total can never disagree with the summary.
   const points: Array<{ label: string; start: Date; end: Date }> = [];
-  let cur = new Date(from);
-  while (cur <= to) {
+  let cur = new Date(rangeStart);
+  while (cur < rangeEnd) {
     const start = new Date(cur);
     const end = new Date(cur);
     if (unit === 'day') end.setDate(end.getDate() + 1);
     else if (unit === 'week') end.setDate(end.getDate() + 7);
     else end.setMonth(end.getMonth() + 1);
-    const label = (() => {
-      if (unit === 'day') return start.toISOString().slice(0, 10);
-      if (unit === 'week') return `W/C ${start.toISOString().slice(0, 10)}`;
-      return start.toISOString().slice(0, 7);
-    })();
+    if (end > rangeEnd) end.setTime(rangeEnd.getTime());
+    // Bucket starts are Lagos midnights (23:00Z on the previous UTC day), so the
+    // label is derived from the Lagos calendar day, never the raw UTC date.
+    const lagosDay = dateOnly(lagosDayOf(start));
+    const label = unit === 'day' ? lagosDay : unit === 'week' ? `W/C ${lagosDay}` : lagosDay.slice(0, 7);
     points.push({ label, start, end });
-    cur = new Date(end);
+    cur = end;
   }
 
   const where: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
-  where.createdAt = { gte: from, lt: new Date(to) };
+  where.createdAt = { gte: rangeStart, lt: rangeEnd };
   const rows = await prisma.transaction.findMany({ where, select: { createdAt: true, amount: true } });
 
   const buckets: Array<{ label: string; value: number; count: number; date: string }> = points.map((p) => {
@@ -381,7 +390,7 @@ router.get('/dashboard/trend', requirePermission('VIEW_DASHBOARD'), validateQuer
         count += 1;
       }
     }
-    return { label: p.label, value, count, date: p.start.toISOString().slice(0, 10) };
+    return { label: p.label, value, count, date: dateOnly(lagosDayOf(p.start)) };
   });
 
   const total = buckets.reduce((s, b) => s + b.value, 0);
@@ -394,7 +403,7 @@ router.get('/dashboard/trend', requirePermission('VIEW_DASHBOARD'), validateQuer
       total,
       totalCount,
       unit,
-      filters: { dateFrom: from.toISOString(), dateTo: to.toISOString(), groupBy: unit },
+      filters: { dateFrom: rangeStart.toISOString(), dateTo: rangeEnd.toISOString(), groupBy: unit },
     },
   });
 }));
@@ -413,9 +422,11 @@ const CollectionsReportSchema = z.object({
 
 router.get('/reports/collections', requirePermission('VIEW_RECONCILIATION_REPORTS'), validateQuery(CollectionsReportSchema), catchAsync(async (req: any, res) => {
   const { dateFrom, dateTo, format, categoryId, college, level, studentId, page, pageSize } = req.query as any;
+  // SAME canonical Lagos business-day window as the dashboard endpoints — the
+  // dashboard's CSV/JSON export must never disagree with the on-screen totals.
+  const window = dashboardDateWindow({ dateFrom, dateTo });
   const where: any = { status: 'SUCCESS', type: 'FEE_PAYMENT' };
-  if (dateFrom) where.createdAt = { ...(where.createdAt || {}), gte: dateFrom };
-  if (dateTo) where.createdAt = { ...(where.createdAt || {}), lte: dateTo };
+  if (window) where.createdAt = window;
   if (studentId) where.userId = Number(studentId);
   if (categoryId || college || level) {
     where.AND = [];

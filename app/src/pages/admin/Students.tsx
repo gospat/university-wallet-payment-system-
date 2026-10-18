@@ -228,6 +228,10 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
   const bulkPerms = ((user as any)?.permissions as string[] | undefined) ?? [];
   const bulkIsSuper = user?.role === 'ADMIN' && (user as any)?.isSuperAdmin === true;
   const canBulk = role === 'ADMIN' && (bulkIsSuper || bulkPerms.includes('BULK_UPLOAD_STUDENTS'));
+  // Import-history READING is a SEPARATE capability (VIEW_IMPORT_HISTORY) from
+  // bulk upload/import EXECUTION (BULK_UPLOAD_STUDENTS). It is never implied by
+  // the upload capability, for either role.
+  const canViewHistory = bulkIsSuper || bulkPerms.includes('VIEW_IMPORT_HISTORY');
   const [navCounts, setNavCounts] = useState<NavCounters>({});
   void goBack;
   void dashboardTo;
@@ -767,7 +771,15 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
         }
       } catch (err: unknown) {
         stopBulkPolling();
-        setBulkRunError(apiErrorMessage(err, 'Lost connection while tracking the import. Open Import History to see the final result.'));
+        // Run-status reads are gated on VIEW_IMPORT_HISTORY. An operator who may
+        // execute an upload but not READ import history is denied here — report
+        // that accurately instead of claiming a lost connection.
+        const status = (err as any)?.response?.status;
+        if (status === 401 || status === 403) {
+          setBulkRunError('Live progress tracking is not available for your account. The import continues in the background.');
+        } else {
+          setBulkRunError(apiErrorMessage(err, 'Lost connection while tracking the import. Open Import History to see the final result.'));
+        }
       }
     }, 1500);
   };
@@ -915,7 +927,7 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
                   📦 {students.uploadButton}
                 </button>
               )}
-              {canBulk && (
+              {canViewHistory && (
                 <button
                   onClick={() => { setSearchParams({ view: 'history' }); }}
                   className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
@@ -934,8 +946,30 @@ const StudentsPage: React.FC<{ role: 'ADMIN' | 'BURSARY'; brand: string; userTex
           </div>
         </div>
 
-        {viewMode === 'history' && canBulk ? (
+        {viewMode === 'history' && canViewHistory ? (
           <ImportHistoryPage />
+        ) : viewMode === 'history' ? (
+          // Direct-URL denial: ?view=history without VIEW_IMPORT_HISTORY must
+          // never render import-history data — show an explicit Access Denied.
+          <div
+            role="alert"
+            data-testid="import-history-access-denied"
+            className="bg-white border border-red-200 rounded-2xl p-8 text-center max-w-xl mx-auto"
+          >
+            <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+              <XCircle className="h-7 w-7 text-red-600" />
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 mb-2">Access Denied</h2>
+            <p className="text-gray-500 mb-6">
+              Your account does not have the required permissions to view Import History.
+            </p>
+            <button
+              onClick={() => setSearchParams({})}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm shadow-sm"
+            >
+              Back to Students
+            </button>
+          </div>
         ) : (
           <>
         {/* Filters */}

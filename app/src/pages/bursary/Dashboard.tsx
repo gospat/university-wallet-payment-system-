@@ -19,6 +19,8 @@ import {
   CheckCircle2,
   Percent,
   ListChecks,
+  AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import api, { navCounters, NavCounters } from '../../services/api';
 import Modal from '../../components/Modal';
@@ -186,6 +188,12 @@ const BursaryDashboard: React.FC = () => {
   const [summary, setSummary] = useState<Summary>({});
   const [trend, setTrend] = useState<Trend>({});
   const [byCategory, setByCategory] = useState<ByCat>({});
+  // Explicit dashboard availability state. A failed summary/trend/category
+  // request must render an "unavailable" surface — never a legitimate-looking
+  // ₦0.00 / 0 transactions figure.
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [trendError, setTrendError] = useState<string | null>(null);
+  const [catError, setCatError] = useState<string | null>(null);
 
   const fullName = `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim();
 
@@ -222,21 +230,29 @@ const BursaryDashboard: React.FC = () => {
   const buildQs = () => {
     const p: any = {};
     if (filters.dateFrom) p.dateFrom = filters.dateFrom;
-    if (filters.dateTo) p.dateTo = filters.dateTo + 'T23:59:59';
+    // The date inputs are date-only Lagos business dates. Send them VERBATIM —
+    // the API owns the business-day window (inclusive Lagos midnight → exclusive
+    // next Lagos midnight). Appending 'T23:59:59' here used to conflict with the
+    // server's own range and could shift the window by a day.
+    if (filters.dateTo) p.dateTo = filters.dateTo;
     p.groupBy = filters.groupBy;
     return new URLSearchParams(p).toString();
   };
 
   const fetchSummary = async () => {
     setSummaryLoading(true);
+    setSummaryError(null);
     try {
       const qs = new URLSearchParams();
       if (filters.dateFrom) qs.set('dateFrom', filters.dateFrom);
-      if (filters.dateTo) qs.set('dateTo', filters.dateTo + 'T23:59:59');
+      if (filters.dateTo) qs.set('dateTo', filters.dateTo);
       const res = await api.get(`/bursary/dashboard/summary?${qs.toString()}`);
       setSummary(res.data.data || {});
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      // A failed summary request must NEVER be rendered as legitimate ₦0.00
+      // financial figures. Clear the stale payload and surface the failure.
+      setSummary({});
+      setSummaryError(e?.response?.data?.message || e?.message || 'Failed to load the collections summary.');
     } finally {
       setSummaryLoading(false);
     }
@@ -244,11 +260,13 @@ const BursaryDashboard: React.FC = () => {
 
   const fetchTrend = async () => {
     setTrendLoading(true);
+    setTrendError(null);
     try {
       const res = await api.get(`/bursary/dashboard/trend?${buildQs()}`);
       setTrend(res.data.data || {});
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setTrend({});
+      setTrendError(e?.response?.data?.message || e?.message || 'Failed to load the collections trend.');
     } finally {
       setTrendLoading(false);
     }
@@ -256,17 +274,25 @@ const BursaryDashboard: React.FC = () => {
 
   const fetchCategory = async () => {
     setCatLoading(true);
+    setCatError(null);
     try {
       const qs = new URLSearchParams();
       if (filters.dateFrom) qs.set('dateFrom', filters.dateFrom);
-      if (filters.dateTo) qs.set('dateTo', filters.dateTo + 'T23:59:59');
+      if (filters.dateTo) qs.set('dateTo', filters.dateTo);
       const res = await api.get(`/bursary/dashboard/by-category?${qs.toString()}`);
       setByCategory(res.data.data || {});
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setByCategory({});
+      setCatError(e?.response?.data?.message || e?.message || 'Failed to load the category breakdown.');
     } finally {
       setCatLoading(false);
     }
+  };
+
+  const reloadAll = () => {
+    fetchSummary();
+    fetchTrend();
+    fetchCategory();
   };
 
   const exportCollections = async (format: 'json' | 'csv') => {
@@ -274,7 +300,7 @@ const BursaryDashboard: React.FC = () => {
     try {
       const qs = new URLSearchParams();
       if (filters.dateFrom) qs.set('dateFrom', filters.dateFrom);
-      if (filters.dateTo) qs.set('dateTo', filters.dateTo + 'T23:59:59');
+      if (filters.dateTo) qs.set('dateTo', filters.dateTo);
       qs.set('format', format);
       const res = await api.get(`/bursary/reports/collections?${qs.toString()}`, {
         responseType: format === 'csv' ? ('blob' as any) : 'json',
@@ -421,7 +447,37 @@ const BursaryDashboard: React.FC = () => {
           </div>
         </div>
 
+        {/* Dashboard availability — an explicit error state. NEVER render a
+            failed summary request as legitimate ₦0.00 financial figures. */}
+        {summaryError && (
+          <div
+            role="alert"
+            data-testid="bursary-dashboard-error"
+            className="rounded-2xl border border-rose-200 bg-rose-50 p-5 flex flex-col sm:flex-row sm:items-center gap-4"
+          >
+            <div className="flex items-start gap-3 flex-1">
+              <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center ring-1 ring-rose-200 shrink-0">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="font-black text-rose-800">Dashboard unavailable</p>
+                <p className="text-sm text-rose-700 mt-0.5">
+                  The collections summary could not be loaded for the selected date range, so no
+                  figures are shown. {summaryError}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={reloadAll}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-2.5 shadow-sm shrink-0"
+            >
+              <RefreshCw className="h-4 w-4" /> Retry
+            </button>
+          </div>
+        )}
+
         {/* Collections-only KPI cards */}
+        {!summaryError && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 relative overflow-hidden">
             <div className="flex items-start justify-between">
@@ -543,6 +599,7 @@ const BursaryDashboard: React.FC = () => {
             </div>
           </div>
         </div>
+        )}
 
         {/* Trend chart + Category */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -559,13 +616,23 @@ const BursaryDashboard: React.FC = () => {
               </div>
               <div className="text-right">
                 <div className="text-xs text-slate-500 uppercase tracking-wider font-bold">Total</div>
-                <div className="text-2xl font-black text-slate-900">{naira(trend.total ?? 0)}</div>
-                <div className="text-xs text-slate-500 font-medium">{trend.totalCount ?? 0} transactions</div>
+                <div className="text-2xl font-black text-slate-900">
+                  {trendError ? '—' : naira(trend.total ?? 0)}
+                </div>
+                <div className="text-xs text-slate-500 font-medium">
+                  {trendError ? 'unavailable' : `${trend.totalCount ?? 0} transactions`}
+                </div>
               </div>
             </div>
             {trendLoading ? (
               <div className="h-[240px] flex items-center justify-center text-slate-400 text-sm font-medium">
                 Loading trend…
+              </div>
+            ) : trendError ? (
+              <div className="h-[240px] flex flex-col items-center justify-center gap-2 text-center px-4">
+                <AlertTriangle className="h-8 w-8 text-rose-400" />
+                <p className="text-sm font-semibold text-rose-700">Trend unavailable</p>
+                <p className="text-xs text-rose-600">{trendError}</p>
               </div>
             ) : (
               <BarChart data={chartBars} />
@@ -582,12 +649,20 @@ const BursaryDashboard: React.FC = () => {
               </div>
               <div className="text-right">
                 <div className="text-xs text-slate-500 uppercase tracking-wider font-bold">Grand</div>
-                <div className="text-xl font-black text-slate-900">{naira(byCategory.grandTotal ?? 0)}</div>
+                <div className="text-xl font-black text-slate-900">
+                  {catError ? '—' : naira(byCategory.grandTotal ?? 0)}
+                </div>
               </div>
             </div>
             {catLoading ? (
               <div className="h-[200px] flex items-center justify-center text-slate-400 text-sm font-medium">
                 Loading categories…
+              </div>
+            ) : catError ? (
+              <div className="h-[200px] flex flex-col items-center justify-center gap-2 text-center px-4">
+                <AlertTriangle className="h-8 w-8 text-rose-400" />
+                <p className="text-sm font-semibold text-rose-700">Breakdown unavailable</p>
+                <p className="text-xs text-rose-600">{catError}</p>
               </div>
             ) : (
               <CatChart data={byCategory.rows} />
@@ -631,7 +706,20 @@ const BursaryDashboard: React.FC = () => {
                     </td>
                   </tr>
                 )}
-                {!summaryLoading && (!summary.recentTransactions || summary.recentTransactions.length === 0) && (
+                {!summaryLoading && summaryError && (
+                  <tr>
+                    <td colSpan={5} className="py-12 text-center">
+                      <div className="flex flex-col items-center gap-2">
+                        <AlertTriangle className="h-9 w-9 text-rose-300" />
+                        <p className="text-sm font-semibold text-rose-700">Recent transactions unavailable</p>
+                        <p className="text-xs text-rose-600">
+                          The summary request failed, so an empty list here would be misleading.
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {!summaryLoading && !summaryError && (!summary.recentTransactions || summary.recentTransactions.length === 0) && (
                   <tr>
                     <td colSpan={5} className="py-12 text-center">
                       <div className="flex flex-col items-center gap-2">

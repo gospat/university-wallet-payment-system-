@@ -54,6 +54,33 @@ export function reportDateRange(f: { dateFrom?: Date; dateTo?: Date }): { fromIn
   return { fromInclusive: from, toExclusive: to };
 }
 
+/**
+ * The ONE canonical Prisma DateTime window used by EVERY Bursary DASHBOARD
+ * surface (summary cards, collections trend, collections by category, recent
+ * transactions, receipts issued, and the dashboard's collections export).
+ *
+ * It is the same Lagos business-day range as `reportDateRange` — lower bound
+ * INCLUSIVE (`gte`), upper bound EXCLUSIVE (`lt`) — expressed as a Prisma
+ * `DateTimeFilter`. Every dashboard query MUST build its `createdAt`/`paidAt`
+ * filter from this helper so the summary, trend and category totals are
+ * computed over an IDENTICAL transaction population for the same selection.
+ *
+ * `undefined` means "no date bound supplied" (no time filter at all).
+ * NEVER build a dashboard range by concatenating a time suffix onto an
+ * already-coerced Date (e.g. `dateTo + 'T23:59:59.999Z'`) — that yields an
+ * Invalid Date and silently fails the whole request.
+ */
+export function dashboardDateWindow(
+  f: { dateFrom?: Date; dateTo?: Date } = {},
+): { gte?: Date; lt?: Date } | undefined {
+  const { fromInclusive, toExclusive } = reportDateRange(f);
+  if (!fromInclusive && !toExclusive) return undefined;
+  const window: { gte?: Date; lt?: Date } = {};
+  if (fromInclusive) window.gte = fromInclusive;
+  if (toExclusive) window.lt = toExclusive;
+  return window;
+}
+
 // ---------------------------------------------------------------------------
 // Lagos calendar day helpers for fair-period comparative buckets.
 // ---------------------------------------------------------------------------
