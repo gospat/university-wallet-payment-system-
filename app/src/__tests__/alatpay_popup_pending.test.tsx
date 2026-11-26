@@ -663,3 +663,77 @@ it('E: network error then PENDING → no close, no false success/failure, pollin
   expect(alatpayCloseMock).not.toHaveBeenCalled();
   expect(navigateMock).not.toHaveBeenCalled();
 });
+
+// ---- F. Invoice PAID / receipt exists while transaction still PENDING ------
+// The webhook may post the payment (invoice → PAID, receipt generated) a beat
+// before the transaction row itself reads SUCCESS. Either signal is
+// authoritative for completion, so the processing state must close and hand
+// off to the success flow.
+
+it('F: invoice PAID (receipt present) while transaction still PENDING → closes popup + navigates', async () => {
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING', invoiceStatus: 'UNPAID' })
+    .mockResolvedValueOnce({ status: 'PENDING', invoiceStatus: 'PAID', receipt: { receiptNumber: 'RCPT/1' } });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  // Still pending → popup open, no navigation.
+  await tickPolls(2500);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // Invoice flipped to PAID → terminal, popup closed, navigated once.
+  await tickPolls(2500);
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledWith('/student/payments/callback/PAY-REF-001');
+});
+
+// ---- G. ALATPay browser SDK never emits its final success callback ---------
+// The SDK reports the transaction (onTransaction → UUID) but NEVER fires
+// onSuccess. Completion must still come solely from backend polling.
+
+it('G: SDK never emits onSuccess → backend polling alone completes the payment', async () => {
+  let onReportTx: ((r: any) => void) | null = null;
+  launchAlatpayMock.mockImplementation(async (_co: any, cb: any) => {
+    onReportTx = cb.onReportTransaction ?? null;
+    return { close: alatpayCloseMock };
+  });
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING' })
+    .mockResolvedValueOnce({ status: 'PENDING' })
+    .mockResolvedValueOnce({ status: 'SUCCESS', reference: 'PAY-REF-001' });
+
+  renderConfirm();
+  await flushLoad();
+  await proceed();
+
+  // SDK reports the transaction UUID but never fires onSuccess afterwards.
+  act(() => {
+    onReportTx?.({
+      bellsReference: 'PAY-REF-001',
+      orderReference: 'ORD-1',
+      initPaymentReference: 'INIT-1',
+      providerTx: { data: { id: '7162fb44-6d04-4590-ac65-a96061e272ab' } },
+      extractedFinalTxId: '7162fb44-6d04-4590-ac65-a96061e272ab',
+      source: 'transaction',
+    });
+  });
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // First and second polls → PENDING — popup stays open, no false success.
+  await tickPolls(2500);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  await tickPolls(2500);
+  expect(alatpayCloseMock).not.toHaveBeenCalled();
+  expect(navigateMock).not.toHaveBeenCalled();
+
+  // Webhook-driven SUCCESS observed by polling → complete without any SDK callback.
+  await tickPolls(2500);
+  expect(alatpayCloseMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock).toHaveBeenCalledWith('/student/payments/callback/PAY-REF-001');
+});

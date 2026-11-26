@@ -505,3 +505,65 @@ it('P: component unmount cancels timers and prevents stale state updates', async
 
   expect(getPaymentStatusMock.mock.calls.length).toBe(callsBefore);
 });
+
+// ---- Q. Authoritative sequence: PENDING → webhook charge.success → SUCCESS
+//        (invoice PAID) → receipt generated, driven ONLY by backend polling.
+// -----------------------------------------------------------------------------
+// The ALATPay browser SDK may never emit its final success callback. The
+// webhook is authoritative: it marks the transaction SUCCESS, generates the
+// receipt and flips the invoice to PAID. The callback page must observe that
+// persisted state through polling and show the success screen — never mark a
+// payment successful from elapsed time or a browser callback.
+
+it('Q: PENDING → webhook charge.success → SUCCESS/PAID with receipt → success screen (no SDK callback)', async () => {
+  getPaymentStatusMock
+    .mockResolvedValueOnce({ status: 'PENDING', reference: 'PAY-SEQ', invoiceStatus: 'UNPAID' })
+    .mockResolvedValueOnce({ status: 'PENDING', reference: 'PAY-SEQ', invoiceStatus: 'UNPAID' })
+    .mockResolvedValueOnce({
+      status: 'SUCCESS', reference: 'PAY-SEQ', amount: 45000, expectedAmount: 45000,
+      invoiceId: 21, invoiceStatus: 'PAID', gateway: 'ALATPAY',
+      receipt: { receiptNumber: 'RCPT/2026/SEQP01' }, updatedAt: '2026-11-26T09:00:00Z',
+    });
+
+  renderCallback('PAY-SEQ');
+  await act(async () => { await Promise.resolve(); });
+
+  // Webhook has not landed yet: non-destructive confirmation, never a failure.
+  expect(text()).toMatch(/confirming|pending|waiting/i);
+  expect(text()).not.toMatch(/failed/i);
+
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+  expect(text()).not.toMatch(/failed/i);
+
+  // Webhook confirmed → transaction SUCCESS, invoice PAID, receipt generated.
+  await act(async () => { vi.advanceTimersByTime(2500); await Promise.resolve(); });
+
+  expect(text()).toMatch(/successful|success/i);
+  expect(text()).toMatch(/RCPT\/2026\/SEQP01/);
+  expect(refreshCachesMock).toHaveBeenCalled();
+});
+
+// ---- R. Pending / long-wait copy matches the specified wording ------------
+// The processing screen must (a) show a non-destructive confirmation while the
+// payment is PENDING, and (b) after a reasonable period replace the indefinite
+// spinner with a message telling the student they may safely leave.
+
+it('R: pending and long-wait copy use the specified wording', async () => {
+  getPaymentStatusMock.mockResolvedValue({ status: 'PENDING', reference: 'PAY-TEST' });
+
+  renderCallback('PAY-TEST');
+  await act(async () => { await Promise.resolve(); });
+
+  // Past the brief initial state, still within the "reasonable period".
+  await act(async () => { vi.advanceTimersByTime(20000); await Promise.resolve(); });
+  expect(text()).toContain('We are confirming your payment');
+  expect(text()).toContain('Do not make another payment');
+  expect(text()).not.toMatch(/failed/i);
+
+  // Beyond a reasonable period (FAST_PHASE_MS = 60s) the spinner is replaced.
+  await act(async () => { vi.advanceTimersByTime(60000); await Promise.resolve(); });
+  expect(text()).toContain('Payment confirmation is taking longer than expected');
+  expect(text()).toContain('You may safely leave this page');
+  expect(text()).toContain('Your payment will update automatically once confirmation is received');
+  expect(text()).not.toMatch(/failed/i);
+});

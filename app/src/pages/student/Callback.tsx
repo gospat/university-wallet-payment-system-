@@ -256,18 +256,31 @@ const CallbackPage: React.FC = () => {
 
   const pendingMessage = useMemo(() => {
     if (stage !== 'pending' && stage !== 'loading') return null;
+    // 0–15s: brief initial confirmation while the very first status check runs.
     if (elapsedMs < 15_000) {
-      return { title: 'Confirming your payment…', detail: 'Please wait while we confirm your payment with the processor.' };
-    }
-    if (elapsedMs < FAST_PHASE_MS) {
       return {
-        title: 'Waiting for confirmation from ALATPay',
-        detail: 'We have received your payment request. Please do not make another payment while confirmation is in progress.',
+        title: 'Confirming your payment…',
+        detail: 'Please wait while we confirm your payment with the processor.',
+        long: false,
       };
     }
+    // 15s–60s: non-destructive confirmation. The backend webhook is
+    // authoritative, so we keep checking and explicitly warn the student NOT
+    // to pay again.
+    if (elapsedMs < FAST_PHASE_MS) {
+      return {
+        title: 'We are confirming your payment',
+        detail: 'Do not make another payment. This page is checking for confirmation automatically.',
+        long: false,
+      };
+    }
+    // Beyond a reasonable period we replace the indefinite spinner with a clear
+    // message: the student may safely leave — confirmation continues
+    // server-side and the page updates automatically when the webhook lands.
     return {
-      title: 'Confirmation is taking longer than usual',
-      detail: 'Your payment may already have been received. Please do not pay again. This page will continue checking automatically.',
+      title: 'Payment confirmation is taking longer than expected',
+      detail: 'You may safely leave this page. Your payment will update automatically once confirmation is received.',
+      long: true,
     };
   }, [stage, elapsedMs]);
 
@@ -295,7 +308,7 @@ const CallbackPage: React.FC = () => {
             <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
               <div className="px-6 py-6 sm:px-8 sm:py-7 flex items-center gap-4 sm:gap-5 bg-amber-50">
                 <div className="p-3 sm:p-3.5 rounded-full bg-amber-100 shrink-0">
-                  <Clock className="h-10 w-10 sm:h-12 sm:w-12 text-amber-600 animate-pulse" />
+                  <Clock className={`h-10 w-10 sm:h-12 sm:w-12 text-amber-600${pendingMessage.long ? '' : ' animate-pulse'}`} />
                 </div>
                 <div>
                   <p className="text-xs uppercase font-bold tracking-wider text-amber-700">Secure Checkout</p>
@@ -310,10 +323,12 @@ const CallbackPage: React.FC = () => {
                     <span className="font-mono font-semibold text-gray-900">{ref}</span>
                   </div>
                 )}
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                  <AlertCircle className="h-3.5 w-3.5" />
-                  <span>Please do not close this page or make another payment.</span>
-                </div>
+                {!pendingMessage.long && (
+                  <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    <span>Please do not close this page or make another payment.</span>
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-3 pt-2">
                   <button
                     type="button"

@@ -216,12 +216,17 @@ const PaymentConfirmation: React.FC = () => {
           try {
             const r: any = await studentFeeApi.getPaymentStatus(bellsRef);
             const status = String(r?.status ?? '').toUpperCase();
-            if (status === 'SUCCESS' || status === 'PAID') {
-              // Backend has authoritatively confirmed the payment via the webhook.
+            const invoiceStatus = String(r?.invoiceStatus ?? '').toUpperCase();
+            const hasReceipt = !!r?.receipt;
+            // The persisted backend state is authoritative. The payment is
+            // complete when the transaction is SUCCESS/PAID, OR the invoice has
+            // become PAID, OR a receipt already exists for it. We never infer
+            // success from the SDK callback or from elapsed time.
+            if (status === 'SUCCESS' || status === 'PAID' || invoiceStatus === 'PAID' || hasReceipt) {
               // Dismiss the ALATPay popup, then navigate by Bells reference alone.
               // We do NOT pass the provider UUID because the backend already has
-              // persisted SUCCESS; the callback page's polling will see it directly
-              // without needing a provider verification call.
+              // persisted the terminal state; the callback page's polling will see
+              // it directly without needing a provider verification call.
               closeAlatpayPopup();
               navigateToCallback(null);
               return;
