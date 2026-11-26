@@ -11,6 +11,11 @@ const jestDefaults: Record<string, string> = {
   ALATPAY_BUSINESS_ID: 'test-alat-business-id',
   ALATPAY_WEBHOOK_SECRET: 'wbhk_test_alat_dummy',
   PAYSTACK_WEBHOOK_SECRET: 'wbhk_test_paystack_dummy',
+  // AES-256-CBC key consumed by `utils/encryption.ts` (must be 32 bytes / 64
+  // hex). A deterministic TEST-ONLY value so suites that exercise encryption at
+  // import time (e.g. the MFA suite) run in CI, where no `api/.env` is present —
+  // exactly like the dummy JWT/payment secrets above.
+  ENCRYPTION_KEY: '3f8a1c9e5d2b7046af93e1c5b8d24076fa1c3e9072b4d6581e9f0a3c7b2d5146',
   REDIS_URL: '',
   REDIS_LAZY_CONNECT: 'true',
   // MFA ENROLMENT ENFORCEMENT is OFF for the existing suite so that the new
