@@ -412,7 +412,7 @@ const RefundIdParam = z.object({ id: z.coerce.number().int().positive() });
 router.post('/refunds/:id/approve', requirePermission('PROCESS_REFUND'), validateParams(RefundIdParam), adminApproveRefund as any);
 router.post('/refunds/:id/reject', requirePermission('PROCESS_REFUND'), validateParams(RefundIdParam), adminRejectRefund as any);
 
-const AdminTxUpdatePatchBody = z.record(z.any());
+const AdminTxUpdatePatchBody = z.record(z.string(), z.any());
 router.patch('/transactions/:id', requirePermission('VERIFY_PAYMENT'),
   validateParams(RefundIdParam),
   validateBody(AdminTxUpdatePatchBody),

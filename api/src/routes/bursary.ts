@@ -43,7 +43,7 @@ const withdrawalIdParams = z.object({ id: z.coerce.number().int().positive() });
 // transactions. Only metadata fields (description etc.) are allowed; any
 // attempt to modify protected fields → 403 (TR-16.3).
 // ---------------------------------------------------------------------------
-const TxUpdatePatchBody = z.record(z.any());
+const TxUpdatePatchBody = z.record(z.string(), z.any());
 router.patch('/transactions/:id',
   requirePermission('VERIFY_PAYMENT'),
   validateParams(withdrawalIdParams),

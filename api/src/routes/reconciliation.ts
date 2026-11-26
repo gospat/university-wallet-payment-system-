@@ -192,8 +192,8 @@ router.post(
 );
 
 const CreateInternalBody = z.object({
-  paystackData: z.record(z.any()).optional(),
-  alatpayData: z.record(z.any()).optional(),
+  paystackData: z.record(z.string(), z.any()).optional(),
+  alatpayData: z.record(z.string(), z.any()).optional(),
   gatewayData: z.object({ gateway: z.enum([PaymentGateway.PAYSTACK, PaymentGateway.ALATPAY]) }).passthrough().optional(),
 });
 

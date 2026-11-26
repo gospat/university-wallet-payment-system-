@@ -123,7 +123,9 @@ function currentAcademicSession() {
   return `${start}/${start + 1}`;
 }
 
-const _CreateFeeCategoryBase = z.object({
+// Base object kept refinement-free so the Update schema can be derived with
+// `.partial()` directly (zod v4 removed ZodEffects/`.innerType()`).
+const FeeCategoryBaseObject = z.object({
   name: z.string().min(2).max(120).trim(),
   code: z.preprocess(
     (v) => {
@@ -136,16 +138,16 @@ const _CreateFeeCategoryBase = z.object({
     (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
     z.string().min(3).max(500).trim().optional()
   ),
-}).superRefine((val, ctx) => {
+});
+
+export const CreateFeeCategorySchema = FeeCategoryBaseObject.superRefine((val) => {
   if (!val.code) {
     const slug = (val.name || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').slice(0, 28);
     const generated = slug.length >= 2 ? `CAT-${slug}` : `CAT-${Date.now().toString(36).toUpperCase()}`;
     (val as any).code = generated;
   }
 });
-
-export const CreateFeeCategorySchema = _CreateFeeCategoryBase;
-export const UpdateFeeCategorySchema = _CreateFeeCategoryBase.innerType().partial();
+export const UpdateFeeCategorySchema = FeeCategoryBaseObject.partial();
 export type CreateFeeCategoryInput = z.infer<typeof CreateFeeCategorySchema>;
 export type UpdateFeeCategoryInput = z.infer<typeof UpdateFeeCategorySchema>;
 

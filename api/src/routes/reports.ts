@@ -918,7 +918,7 @@ const R20BodyBase = z.object({
   description: z.string().max(1000).optional(),
   frequency: z.enum(['DAILY','WEEKLY','BIWEEKLY','MONTHLY','QUARTERLY','CUSTOM_CRON']),
   cronExpression: z.string().max(120).optional(),
-  filters: z.record(z.any()).default({}),
+  filters: z.record(z.string(), z.any()).default({}),
   format: z.enum(['XLSX','PDF']).default('XLSX'),
   recipients: z.array(z.string().email()).min(1).max(50, { message: 'Maximum 50 recipients allowed' }),
   subjectLine: z.string().max(300).optional(),

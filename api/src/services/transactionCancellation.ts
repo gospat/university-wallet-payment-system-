@@ -49,8 +49,8 @@ export const CANCEL_TRANSACTION_REASON_LABELS: Record<
 export const CancelTransactionBodySchema = z
   .object({
     reason: z.enum(CANCEL_TRANSACTION_REASONS, {
-      required_error: 'Cancellation reason is required',
-      invalid_type_error: 'Invalid cancellation reason',
+      error: (issue) =>
+        issue.input === undefined ? 'Cancellation reason is required' : 'Invalid cancellation reason',
     }),
     writtenExplanation: z.string().trim().max(2000).optional(),
     evidenceReference: z
