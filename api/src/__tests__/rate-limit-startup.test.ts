@@ -13,7 +13,7 @@
  *         from the documented union: wait | reconnecting | connecting | ready | close | end
  *
  *   [B] buildRateLimitStore / limiter prefix inventory:
- *       All 8 production rate limiters are registered at construction time
+ *       All 9 production rate limiters are registered at construction time
  *       with their well-known Redis key prefixes. We validate the full set of
  *       prefix strings by observing the [rate-limit] startup log lines that
  *       app.ts emits exactly once per limiter at module import time.
@@ -22,7 +22,7 @@
  *         - someone adding a new endpoint + limiter that uses a duplicate /
  *           misspelled prefix (which would silently merge counters)
  *         - someone accidentally removing a limiter registration from app.ts
- *         - buildRateLimitStore not called exactly 8 times (expected count)
+ *         - buildRateLimitStore not called exactly 9 times (expected count)
  *
  * NOTE: The ordering itself (connectRedis -> THEN import('./app')) is verified
  * in production via the [startup] Redis shared connection log line that
@@ -54,6 +54,7 @@ const IOREDIS_LEGAL_STATUSES = new Set([
 const EXPECTED_LIMITER_PREFIXES = new Set<string>([
   'rl:admin-mut:',
   'rl:auth-chpw:',
+  'rl:auth-reset:',
   'rl:auth:',
   'rl:general:',
   'rl:payment:',
@@ -266,9 +267,9 @@ describe('Redis-backed rate-limit startup contract (race-fix regression)', () =>
   });
 
   // -----------------------------------------------------------------
-  // Block B — Limiter prefix inventory (8 exactly, no colliding names)
+  // Block B — Limiter prefix inventory (9 exactly, no colliding names)
   // -----------------------------------------------------------------
-  describe('limiter prefix inventory (8 production limiters)', () => {
+  describe('limiter prefix inventory (9 production limiters)', () => {
     let capturedLogs: Array<{ level: 'warn' | 'info'; line: string }>;
     let origWarn: typeof console.warn;
     let origInfo: typeof console.info;
@@ -296,7 +297,7 @@ describe('Redis-backed rate-limit startup contract (race-fix regression)', () =>
       console.info = origInfo;
     });
 
-    it('buildRateLimitStore logged EXACTLY 8 [rate-limit] startup lines (one per limiter)', () => {
+    it('buildRateLimitStore logged EXACTLY 9 [rate-limit] startup lines (one per limiter)', () => {
       const startup = capturedLogs.filter((c) => c.line.includes('[rate-limit] limiter='));
       expect(startup.length).toBe(EXPECTED_LIMITER_PREFIXES.size);
     });

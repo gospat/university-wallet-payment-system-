@@ -225,8 +225,13 @@ export const generalLimiter = rateLimit({
   passOnStoreError: true,
 });
 
-// Auth: login/signup/forgot-password endpoints — strictest setting to stop credential stuffing.
+// Auth LOGIN ONLY — strictest setting to stop credential stuffing.
 // 12 attempts/15 mins/IP = ~48/hour = 1152/day. Combined with per-user 5-attempts lockout → safe.
+// SCOPE: this limiter is mounted on POST /api/v1/auth/login ONLY (see the mount
+// block below). It exists to defend the credential-verification surface, so
+// ordinary authenticated/self-service auth calls — /auth/me, /auth/refresh,
+// /auth/logout, /auth/logout-all, /auth/change-password, /auth/mfa/* — must
+// NEVER consume this budget.
 export const authLimiter = rateLimit({
   store: buildRateLimitStore('rl:auth:'),
   max: 12,
@@ -237,12 +242,29 @@ export const authLimiter = rateLimit({
   passOnStoreError: true,
 });
 
-// Password change / reset: short window strict limit to stop forced rotations.
+// Password change: short window strict limit to stop forced rotations.
 export const authChangePwLimiter = rateLimit({
   store: buildRateLimitStore('rl:auth-chpw:'),
   max: 5,
   windowMs: 60 * 60 * 1000,
   message: 'Too many password change attempts, please try again in an hour.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  passOnStoreError: true,
+});
+
+// Password reset redemption: the reset token is a signed, 128-bit, single-use,
+// 15-minute JWT — guessing one is infeasible — so this throttle exists only to
+// blunt replay/DoS floods against the redemption surface after the broad
+// /api/v1/auth limiter is no longer applied to it. 20/hour/IP mirrors the
+// dedicated per-IP reset control and sits far above legitimate use (a real user
+// resets at most a couple of times). Dedicated `rl:auth-reset:` prefix so it
+// never shares a counter with login or change-password.
+export const resetPasswordLimiter = rateLimit({
+  store: buildRateLimitStore('rl:auth-reset:'),
+  max: 20,
+  windowMs: 60 * 60 * 1000,
+  message: 'Too many password reset attempts, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
   passOnStoreError: true,
@@ -295,8 +317,12 @@ export const publicReceiptLimiter = rateLimit({
 });
 
 app.use('/api/v1', generalLimiter);
-app.use('/api/v1/auth', authLimiter);
+// LOGIN ONLY — the credential-verification surface. Ordinary authenticated /
+// self-service auth calls (/auth/me, /auth/refresh, /auth/logout,
+// /auth/logout-all) must NOT consume this brute-force budget.
+app.use('/api/v1/auth/login', authLimiter);
 app.use('/api/v1/auth/change-password', authChangePwLimiter);
+app.use('/api/v1/auth/reset-password', resetPasswordLimiter);
 app.use('/api/v1/students/payments/initiate', paymentLimiter);
 app.use('/api/v1/students/payments/verify', paymentLimiter);
 app.use('/api/v1/fee-assignments/bill-student', paymentLimiter);
