@@ -18,6 +18,7 @@ import {
   Info,
 } from 'lucide-react';
 import PasswordInput, { scorePassword } from '../../components/ui/PasswordInput';
+import MfaEnrollmentPanel from '../../components/security/MfaEnrollmentPanel';
 
 /**
  * Shared self-service "My Profile" page for the STAFF portals (ADMIN + BURSARY).
@@ -372,6 +373,9 @@ const StaffProfile: React.FC = () => {
                 )}
               </div>
             </section>
+
+            {/* --------------------- Two-Factor Authentication ------------------- */}
+            <MfaEnrollmentPanel />
           </div>
 
           {/* ------------------------------ Summary ------------------------------ */}

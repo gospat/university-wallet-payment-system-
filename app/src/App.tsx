@@ -2,6 +2,7 @@ import React, { Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import ForcePasswordChangeGate from './components/ForcePasswordChangeGate';
+import MfaEnrollmentGate from './components/security/MfaEnrollmentGate';
 import SessionInactivityModal from './components/SessionInactivityModal';
 import StudentLogin from './pages/auth/StudentLogin';
 import AdminLogin from './pages/auth/AdminLogin';
@@ -267,6 +268,7 @@ const App: React.FC = () => {
       <AuthProvider>
         <SessionGate>
           <ForcePasswordChangeGate>
+            <MfaEnrollmentGate>
             <Routes>
           <Route path="/" element={<PortalChooser />} />
 
@@ -546,6 +548,7 @@ const App: React.FC = () => {
 
           <Route path="*" element={<Navigate to="/404" replace />} />
           </Routes>
+            </MfaEnrollmentGate>
         </ForcePasswordChangeGate>
         </SessionGate>
       </AuthProvider>

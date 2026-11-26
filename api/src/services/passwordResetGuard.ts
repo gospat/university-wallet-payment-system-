@@ -14,15 +14,39 @@ function cleanInMem() {
   }
 }
 
-function jtiKey(jti: string): string {
-  return `pwd-reset:consumed:${jti}`;
-}
-
 export function randomHex(bytes = 16): string {
   return randomBytes(bytes).toString('hex');
 }
 
 export type ResetTokenClaim = 'claimed' | 'already-consumed' | 'store-unavailable';
+
+/**
+ * Generic ATOMIC single-use claim primitive (the SAME `SET key val EX ttl NX`
+ * operation used for password-reset tokens). Shared by every one-shot credential
+ * that must be redeemable at most once — password-reset tokens
+ * (`pwd-reset:consumed:*`) and MFA challenge tokens (`mfa-challenge:consumed:*`).
+ *
+ * Exactly one caller can ever be told 'claimed' for a given `namespace:jti`;
+ * every other caller gets 'already-consumed'.
+ *
+ * FAIL CLOSED: if the store is unreachable we return 'store-unavailable' and the
+ * CALLER MUST REFUSE the operation. We deliberately do NOT fall back to a
+ * process-local Map — that silently weakens the single-use guarantee across
+ * multiple instances and would allow a replay after a process restart.
+ */
+export async function claimOnce(namespace: string, jti: string, ttlSeconds = 960): Promise<ResetTokenClaim> {
+  cleanInMem();
+  const key = `${namespace}:${jti}`;
+  try {
+    const r = await getRedis();
+    const res = await r.set(key, 'CONSUMED', 'EX', Math.max(1, ttlSeconds), 'NX');
+    if (res === 'OK') return 'claimed';
+    if (res === null) return 'already-consumed';
+    return 'store-unavailable';
+  } catch {
+    return 'store-unavailable';
+  }
+}
 
 /**
  * ATOMIC single-use claim for a password-reset token.
@@ -43,17 +67,7 @@ export type ResetTokenClaim = 'claimed' | 'already-consumed' | 'store-unavailabl
  * multiple instances and would allow a replay after a process restart.
  */
 export async function claimResetToken(jti: string, ttlSeconds = 960): Promise<ResetTokenClaim> {
-  cleanInMem();
-  const key = jtiKey(jti);
-  try {
-    const r = await getRedis();
-    const res = await r.set(key, 'CONSUMED', 'EX', Math.max(1, ttlSeconds), 'NX');
-    if (res === 'OK') return 'claimed';
-    if (res === null) return 'already-consumed';
-    return 'store-unavailable';
-  } catch {
-    return 'store-unavailable';
-  }
+  return claimOnce('pwd-reset:consumed', jti, ttlSeconds);
 }
 
 export async function getSafe(name: string): Promise<string | null> {

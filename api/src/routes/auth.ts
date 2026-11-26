@@ -1,6 +1,21 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { login, refresh, logout, logoutAll, me, changePassword, forgotPassword, resetPassword } from '../controllers/auth';
+import {
+  login,
+  refresh,
+  logout,
+  logoutAll,
+  me,
+  changePassword,
+  forgotPassword,
+  resetPassword,
+  mfaChallenge,
+  mfaSetup,
+  mfaEnable,
+  mfaDisable,
+  mfaStatus,
+  mfaRegenerateRecoveryCodes,
+} from '../controllers/auth';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
 import { protectSelfService } from '../middlewares/auth';
@@ -48,6 +63,30 @@ const forgotLimiterByIp = rateLimit({
   message: { status: 'fail', message: 'Too many password reset requests from this IP. Please try again in an hour.' },
 });
 
+// The reset token is a signed, 15-minute, single-use JWT with a 128-bit random
+// id, so guessing one is infeasible — but an unlimited endpoint is still a free
+// oracle for replay/DoS attempts. Throttle the redemption surface per IP.
+const resetLimiterByIp = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `reset-by-ip:${reqIp(req as any) || 'anon'}`,
+  message: { status: 'fail', message: 'Too many password reset attempts from this IP. Please try again in an hour.' },
+});
+
+// Second-factor challenge redemption is a credential-verification surface: a
+// signed, single-use, 5-minute challenge token PLUS a short numeric / recovery
+// code. Throttle per IP to blunt code-guessing and replay floods.
+const mfaChallengeLimiterByIp = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `mfa-challenge-by-ip:${reqIp(req as any) || 'anon'}`,
+  message: { status: 'fail', message: 'Too many authentication attempts from this IP. Please try again later.' },
+});
+
 // ---------------------------------------------------------------------------
 // PUBLIC SELF-SIGNUP — REMOVED (§ requirement 2)
 // ---------------------------------------------------------------------------
@@ -63,7 +102,11 @@ router.post('/login', validateBody(loginSchema), login);
 // Cookie-based refresh → defence-in-depth CSRF origin check.
 router.post('/refresh', csrfOriginGuard, ...(refresh as any[]));
 router.post('/forgot-password', forgotLimiterByIp, forgotLimiterByEmail, validateBody(forgotPasswordSchema), forgotPassword);
-router.post('/reset-password', resetPassword as any[]);
+router.post('/reset-password', resetLimiterByIp, ...(resetPassword as any[]));
+// Complete a TOTP MFA challenge: PUBLIC, authorised solely by a short-lived,
+// single-use challenge token (never a session). No refresh cookie is set until
+// the second factor is verified.
+router.post('/mfa/challenge', mfaChallengeLimiterByIp, ...(mfaChallenge as any[]));
 
 // ---------------------------------------------------------------------------
 // SELF-SERVICE SURFACE — `protectSelfService`, NOT `protect`.
@@ -79,5 +122,13 @@ router.get('/me', me);
 router.post('/logout', csrfOriginGuard, ...(logout as any[]));
 router.post('/logout-all', logoutAll);
 router.patch('/change-password', ...(changePassword as any[]));
+
+// MFA self-service (authentication only) — reachable by a staff account that is
+// REQUIRED to enrol but has not yet done so (protect() would 403 it).
+router.get('/mfa/status', mfaStatus);
+router.post('/mfa/setup', mfaSetup);
+router.post('/mfa/enable', ...(mfaEnable as any[]));
+router.post('/mfa/disable', ...(mfaDisable as any[]));
+router.post('/mfa/recovery-codes/regenerate', ...(mfaRegenerateRecoveryCodes as any[]));
 
 export default router;

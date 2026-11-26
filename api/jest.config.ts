@@ -13,6 +13,12 @@ const jestDefaults: Record<string, string> = {
   PAYSTACK_WEBHOOK_SECRET: 'wbhk_test_paystack_dummy',
   REDIS_URL: '',
   REDIS_LAZY_CONNECT: 'true',
+  // MFA ENROLMENT ENFORCEMENT is OFF for the existing suite so that the new
+  // `protect()` MFA_ENROLLMENT_REQUIRED gate never alters the behaviour the
+  // pre-existing tests assert. The dedicated MFA suite
+  // (`src/__tests__/mfa-hardening.test.ts`) turns the policy ON per-test to
+  // exercise the gate explicitly. Production default remains `staff`.
+  MFA_ENFORCEMENT: 'off',
 };
 for (const [k, v] of Object.entries(jestDefaults)) {
   if (!process.env[k]) process.env[k] = v;

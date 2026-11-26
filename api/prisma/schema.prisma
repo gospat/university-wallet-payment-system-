@@ -235,6 +235,18 @@ model User {
   // invalidated immediately. Additive + backward compatible: existing rows
   // default to 0 and legacy tokens (no `ver`) are treated as 0.
   authVersion         Int            @default(0)
+  // -------------------------------------------------------------------------
+  // TOTP MULTI-FACTOR AUTHENTICATION (MFA)
+  // -------------------------------------------------------------------------
+  // Purely additive + backward compatible: existing rows default to
+  // mfaEnabled = false / mfaSecret = null and are immediately valid.
+  //   * mfaEnabled   — whether a confirmed TOTP second factor is active.
+  //   * mfaSecret    — the TOTP shared secret, stored AES-256-CBC ENCRYPTED at
+  //                    rest (utils/encryption.ts). NEVER the plaintext secret.
+  //   * mfaEnrolledAt— when the factor was confirmed (null until confirmed).
+  mfaEnabled          Boolean        @default(false)
+  mfaSecret           String?        @db.Text
+  mfaEnrolledAt       DateTime?
   studentImportId     Int?
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
@@ -266,6 +278,7 @@ model User {
   studentCategoriesCreated StudentCategory[] @relation("StudentCategoryCreator")
   permissionProfile   UserPermissionProfile? @relation("UserPermissionProfile")
   permissionProfileUpdates UserPermissionProfile[] @relation("UserPermissionProfileUpdatedBy")
+  mfaRecoveryCodes    MfaRecoveryCode[]
 
   @@index([accountStatus])
   @@index([college, department, program, level])
@@ -274,6 +287,24 @@ model User {
   @@index([role, isSuperAdmin])
   @@index([studentCategoryId])
   @@map("users")
+}
+
+// TOTP MFA recovery ("backup") codes. One row per single-use code. Only the
+// bcrypt HASH is ever stored — the plaintext codes are shown to the user once at
+// enrolment/regeneration time and never persisted. Consumption is atomic: a
+// conditional `updateMany({ where: { id, usedAt: null } })` claims the code so
+// two concurrent redemptions of the same code cannot both succeed.
+model MfaRecoveryCode {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  codeHash  String    @db.VarChar(255)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@map("mfa_recovery_codes")
 }
 
 model Transaction {

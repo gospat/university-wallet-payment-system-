@@ -356,6 +356,10 @@ function commonMockScope(extraMockRedis?: () => MockRedis) {
   jest.mock('../controllers/auth', () => ({
     signup: noop, login: noop, refresh: passArr, logout: passArr, logoutAll: noop, me: noop,
     changePassword: passArr, forgotPassword: noop, resetPassword: passArr,
+    // MFA surface added to the real module — routes/auth.ts spreads these, so the
+    // hand-rolled mock must mirror the current public exports.
+    mfaChallenge: passArr, mfaSetup: noop, mfaEnable: passArr, mfaDisable: passArr,
+    mfaStatus: noop, mfaRegenerateRecoveryCodes: passArr,
   }));
   jest.mock('../controllers/bulkUpload', () => ({
     bulkUploadStudents: noop, confirmFeeUpload: noop, previewStudentUpload: noop,
@@ -575,6 +579,9 @@ describe('8 limiters + webhook regression', () => {
     jest.mock('../controllers/auth', () => ({
       signup: noop, login: noop, refresh: passArr, logout: passArr, logoutAll: noop, me: noop,
       changePassword: passArr, forgotPassword: noop, resetPassword: passArr,
+      // MFA surface added to the real module — routes/auth.ts spreads these.
+      mfaChallenge: passArr, mfaSetup: noop, mfaEnable: passArr, mfaDisable: passArr,
+      mfaStatus: noop, mfaRegenerateRecoveryCodes: passArr,
     }));
     jest.mock('../controllers/bulkUpload', () => ({
       bulkUploadStudents: noop, confirmFeeUpload: noop, previewStudentUpload: noop,

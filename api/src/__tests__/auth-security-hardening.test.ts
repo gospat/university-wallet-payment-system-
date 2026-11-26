@@ -84,6 +84,25 @@ jest.mock('../config/database', () => {
     matricNumber: '2024/ACC/0045',
     mustChangePassword: true,
   });
+  // 3007 — dedicated target for the forgot-password → emailed-link → reset chain.
+  seed(3007, STUDENT, 'reset.link@university.edu.ng', 'initialLinkPass1', {
+    lastName: 'Link',
+    matricNumber: '2024/MTH/0077',
+    mustChangePassword: true,
+  });
+  // 3008 — inactive account: the request path must silently ignore it (generic
+  // 202, no email) so account status can never be enumerated.
+  seed(3008, STUDENT, 'suspended.link@university.edu.ng', 'whateverpass1', {
+    lastName: 'Suspended',
+    accountStatus: 'SUSPENDED',
+  });
+  // 3009 — dedicated target for the replay test. The request endpoint is
+  // rate-limited to 3 per email per 15 min, so the replay case needs its own
+  // account rather than sharing 3007's counter.
+  seed(3009, STUDENT, 'replay.link@university.edu.ng', 'initialReplayPass1', {
+    lastName: 'Replay',
+    mustChangePassword: true,
+  });
 
   rolePerms.STUDENT = [];
   rolePerms.BURSARY = ['VIEW_PAYMENTS', 'VIEW_STUDENTS', 'GENERATE_RECEIPT'];
@@ -144,6 +163,11 @@ jest.mock('../config/database', () => {
         const where = args?.where ?? {};
         if (typeof where.email === 'string') {
           const row = Object.values(users).find((u) => u.email === where.email) ?? null;
+          return pick(row, args?.select);
+        }
+        // Prisma `{ email: { equals } }` shape used by forgotPassword.
+        if (where.email && typeof where.email === 'object' && typeof where.email.equals === 'string') {
+          const row = Object.values(users).find((u) => u.email === where.email.equals) ?? null;
           return pick(row, args?.select);
         }
         if (Array.isArray(where.OR)) {
@@ -265,6 +289,7 @@ beforeEach(() => {
   (jest.requireMock('../config/redis') as any).__store.clear();
   (jest.requireMock('../config/database') as any).default.refreshToken.findUnique.mockReset();
   (jest.requireMock('../config/database') as any).default.refreshToken.findUnique.mockResolvedValue(null);
+  (jest.requireMock('../queues/emailQueue') as any).dispatchEmail.mockClear();
 });
 
 // =============================================================================
@@ -713,5 +738,123 @@ describe('R10 — refresh honours the HttpOnly cookie, the legacy body, and CSRF
       .send({ refreshToken: makeRefresh(3003, jti) });
 
     expect(res.status).toBe(200);
+  });
+});
+
+// =============================================================================
+// R5/R6 — forgot-password request side: non-enumerating, and the emailed link
+//         actually completes the reset end-to-end.
+// =============================================================================
+describe('R5 — forgot-password never leaks whether an account exists', () => {
+  const GENERIC = /if your email is registered/i;
+  const dispatchEmailMock = () => (jest.requireMock('../queues/emailQueue') as any).dispatchEmail;
+
+  it('answers 202 with the generic message for an UNKNOWN email and sends nothing', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/forgot-password')
+      .send({ email: 'nobody@nowhere.test' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.message).toMatch(GENERIC);
+    expect(dispatchEmailMock()).not.toHaveBeenCalled();
+  });
+
+  it('answers 202 with the SAME generic message for a registered, ACTIVE email and emails a single-use PASSWORD_RESET link (no enumeration)', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/forgot-password')
+      .send({ email: 'reset.link@university.edu.ng' });
+
+    // The response is byte-for-byte the same shape as the unknown-email case.
+    expect(res.status).toBe(202);
+    expect(res.body.message).toMatch(GENERIC);
+    expect(dispatchEmailMock()).toHaveBeenCalledTimes(1);
+
+    const args = dispatchEmailMock().mock.calls[0][0];
+    expect(args.emailType).toBe('PASSWORD_RESET');
+    expect(args.to).toBe('reset.link@university.edu.ng');
+    expect(args.recipientId).toBe(3007);
+    expect(args.payload.expiresMinutes).toBe(15);
+
+    const resetUrl = args.payload.resetUrl as string;
+    const token = new URL(resetUrl).searchParams.get('token') as string;
+    expect(token).toBeTruthy();
+
+    const decoded = jwt.verify(token, SECRET, {
+      algorithms: ['HS256'],
+      audience: 'urn:auth:pwd-reset',
+    }) as any;
+    expect(decoded.sub).toBe('3007');
+    expect(decoded.type).toBe('pwd-reset');
+    expect(typeof decoded.jti).toBe('string');
+    // 128-bit random id, not a guessable counter.
+    expect(decoded.jti).toHaveLength(32);
+  });
+
+  it('silently ignores a NON-ACTIVE account — same 202, no email sent', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/forgot-password')
+      .send({ email: 'suspended.link@university.edu.ng' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.message).toMatch(GENERIC);
+    expect(dispatchEmailMock()).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed email address with 400 before any lookup', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/forgot-password')
+      .send({ email: 'not-an-email' });
+
+    expect(res.status).toBe(400);
+    expect(dispatchEmailMock()).not.toHaveBeenCalled();
+  });
+
+});
+
+describe('R6 — the emailed reset link completes the full forgot-password flow', () => {
+  const dispatchEmailMock = () => (jest.requireMock('../queues/emailQueue') as any).dispatchEmail;
+
+  const requestResetToken = async (email: string) => {
+    await request(app).post('/api/v1/auth/forgot-password').send({ email });
+    const resetUrl = dispatchEmailMock().mock.calls[0][0].payload.resetUrl as string;
+    return new URL(resetUrl).searchParams.get('token') as string;
+  };
+
+  it('redeems the emailed token, clears the first-login flag and rotates the credential', async () => {
+    const token = await requestResetToken('reset.link@university.edu.ng');
+
+    const done = await request(app)
+      .post('/api/v1/auth/reset-password')
+      .send({ token, newPassword: 'LinkedReset#2026', confirmPassword: 'LinkedReset#2026' });
+
+    expect(done.status).toBe(200);
+    expect(usersOf()[3007].mustChangePassword).toBe(false);
+    expect(await bcrypt.compare('LinkedReset#2026', usersOf()[3007].password)).toBe(true);
+    // Every renewable session was revoked in the same transaction.
+    expect(txOf().refreshToken.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: 3007, revokedAt: null } }),
+    );
+
+    // The old credential no longer works; the new one does — end to end.
+    const oldPw = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ identifier: 'reset.link@university.edu.ng', password: 'initialLinkPass1' });
+    expect(oldPw.status).toBe(401);
+
+    const newPw = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ identifier: 'reset.link@university.edu.ng', password: 'LinkedReset#2026' });
+    expect(newPw.status).toBe(200);
+  });
+
+  it('refuses to redeem the same emailed link a second time', async () => {
+    const token = await requestResetToken('replay.link@university.edu.ng');
+    const body = { token, newPassword: 'LinkedReset#2026', confirmPassword: 'LinkedReset#2026' };
+
+    const first = await request(app).post('/api/v1/auth/reset-password').send(body);
+    const second = await request(app).post('/api/v1/auth/reset-password').send(body);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(409);
   });
 });

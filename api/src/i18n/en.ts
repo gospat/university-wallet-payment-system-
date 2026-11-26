@@ -33,6 +33,22 @@ export const errors = {
     userNotFound: 'User not found',
     notPermitted: 'You do not have permission to perform this action',
     rateLimited: 'Too many requests. Please try again later.',
+    // --- TOTP multi-factor authentication (MFA) ---------------------------------
+    mfaEnrollmentRequired:
+      'Multi-factor authentication is required for your account. Please set up an authenticator app to continue.',
+    mfaChallengeRequired: 'A second authentication factor is required to complete sign-in.',
+    mfaChallengeInvalid: 'Your sign-in session is invalid. Please log in again.',
+    mfaChallengeExpired: 'Your sign-in session has expired. Please log in again.',
+    mfaChallengeConsumed: 'This sign-in session has already been completed. Please log in again.',
+    mfaStoreUnavailable: 'Sign-in is temporarily unavailable. Please try again shortly.',
+    mfaCodeInvalid: 'The authentication code is incorrect. Please try again.',
+    mfaUnableToVerify: 'Unable to verify your authentication code. Please try again or use a recovery code.',
+    mfaNotEnabled: 'Two-factor authentication is not enabled on this account.',
+    mfaAlreadyEnabled: 'Two-factor authentication is already enabled. Disable it first to set it up again.',
+    mfaSetupNotStarted: 'No pending two-factor setup was found. Please start the setup again.',
+    mfaProofRequired: 'Please confirm your password (or a current authentication code) to continue.',
+    mfaWrongProof: 'The confirmation you provided is incorrect.',
+    mfaRecoveryCodeInvalid: 'This recovery code is invalid or has already been used.',
   },
   receipt: {
     statementFailed: 'Failed to generate statement',
@@ -197,6 +213,14 @@ export const auditActions = {
   studentCategoryUpdated: 'STUDENT_CATEGORY_UPDATED',
   studentCategoryDeactivated: 'STUDENT_CATEGORY_DEACTIVATED',
   studentCategoryDeleted: 'STUDENT_CATEGORY_DELETED',
+  mfaEnrollmentStarted: 'MFA_ENROLLMENT_STARTED',
+  mfaEnabled: 'MFA_ENABLED',
+  mfaDisabled: 'MFA_DISABLED',
+  mfaChallengeIssued: 'MFA_CHALLENGE_ISSUED',
+  mfaChallengeSucceeded: 'MFA_CHALLENGE_SUCCEEDED',
+  mfaChallengeFailed: 'MFA_CHALLENGE_FAILED',
+  mfaRecoveryCodesGenerated: 'MFA_RECOVERY_CODES_GENERATED',
+  mfaRecoveryCodeUsed: 'MFA_RECOVERY_CODE_USED',
 } as const;
 
 export const receipts = {

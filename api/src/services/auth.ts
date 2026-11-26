@@ -9,6 +9,28 @@ import { i18n } from '../i18n/en';
 
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
+export { MAX_FAILED_LOGIN_ATTEMPTS, LOCKOUT_MINUTES };
+
+/**
+ * Shared failed-attempt / lockout maths. Used by BOTH the password login path
+ * AND the MFA second-factor verification path so an attacker cannot sidestep the
+ * account lockout by driving one path rather than the other (the two paths share
+ * the same `failedLoginAttempts` / `lockedUntil` counters on `users`).
+ */
+export function computeLockoutState(
+  failedCount: number,
+  lockedUntil: Date | null,
+  now: Date,
+): { failedLoginAttempts: number; lockedUntil: Date | null } {
+  const newFailedCount = (failedCount ?? 0) + 1;
+  const lockUntil: Date | null =
+    newFailedCount >= MAX_FAILED_LOGIN_ATTEMPTS
+      ? new Date(now.getTime() + LOCKOUT_MINUTES * 60000)
+      : lockedUntil && lockedUntil > now
+      ? lockedUntil
+      : null;
+  return { failedLoginAttempts: newFailedCount, lockedUntil: lockUntil };
+}
 
 const ACCESS_EXPIRES_IN: string = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
 const REFRESH_EXPIRES_IN: string = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
@@ -81,6 +103,12 @@ interface AuthResult {
   accessToken: string;
   refreshToken: string;
   expiresInMs: number;
+  /**
+   * Set ONLY when the account has a confirmed TOTP second factor: the password
+   * was correct but NO session was minted. The client must complete the MFA
+   * challenge (POST /auth/mfa/challenge) to receive real tokens.
+   */
+  mfaRequired?: boolean;
 }
 
 export class AuthService {
@@ -402,17 +430,15 @@ export class AuthService {
     const passwordMatches = await bcrypt.compare(password, userWithPassword.password);
 
     if (!passwordMatches) {
-      const newFailedCount = (userWithPassword.failedLoginAttempts ?? 0) + 1;
-      const lockUntil: Date | null =
-        newFailedCount >= MAX_FAILED_LOGIN_ATTEMPTS
-          ? new Date(now.getTime() + LOCKOUT_MINUTES * 60000)
-          : userWithPassword.lockedUntil && userWithPassword.lockedUntil > now
-          ? userWithPassword.lockedUntil
-          : null;
+      const lockState = computeLockoutState(
+        userWithPassword.failedLoginAttempts ?? 0,
+        userWithPassword.lockedUntil ?? null,
+        now,
+      );
 
       await prisma.user.update({
         where: { id: userWithPassword.id },
-        data: { failedLoginAttempts: newFailedCount, lockedUntil: lockUntil },
+        data: lockState,
       });
 
       await prisma.auditLog
@@ -424,7 +450,7 @@ export class AuthService {
             entityId: String(userWithPassword.id),
             ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
             userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
-            details: { reason: 'BAD_PASSWORD', attempt: newFailedCount, locked: !!lockUntil },
+            details: { reason: 'BAD_PASSWORD', attempt: lockState.failedLoginAttempts, locked: !!lockState.lockedUntil },
           },
         })
         .catch(() => {});
@@ -449,6 +475,49 @@ export class AuthService {
       throw new AppError(GENERIC_LOGIN_ERROR, 401);
     }
 
+    // ---------------------------------------------------------------------
+    // TOTP MFA gate — a confirmed second factor MUST be presented before any
+    // session token is minted. The password was correct, so only the
+    // password-failure counter is cleared here; `lastLoginAt` and the real
+    // session are established once the second factor succeeds (services/mfa.ts).
+    // ---------------------------------------------------------------------
+    if ((userWithPassword as any).mfaEnabled === true) {
+      await prisma.user.update({
+        where: { id: userWithPassword.id },
+        data: { failedLoginAttempts: 0, lockedUntil: null },
+      });
+
+      await prisma.auditLog
+        .create({
+          data: {
+            userId: userWithPassword.id,
+            action: i18n.auditActions.mfaChallengeIssued,
+            entityType: 'USER',
+            entityId: String(userWithPassword.id),
+            ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
+            userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
+            details: { role: userWithPassword.role },
+          },
+        })
+        .catch(() => {});
+
+      return {
+        user: {
+          id: userWithPassword.id,
+          email: userWithPassword.email,
+          firstName: userWithPassword.firstName,
+          lastName: userWithPassword.lastName,
+          role: userWithPassword.role,
+          mfaEnabled: true,
+        },
+        token: '',
+        accessToken: '',
+        refreshToken: '',
+        expiresInMs: 0,
+        mfaRequired: true,
+      };
+    }
+
     await prisma.user.update({
       where: { id: userWithPassword.id },
       data: {
@@ -458,15 +527,32 @@ export class AuthService {
       },
     });
 
+    return AuthService.issueVerifiedSession(userWithPassword.id, ipAddress, userAgent, {
+      audience: audience ?? null,
+    });
+  }
+
+  /**
+   * Mint a full session for an ALREADY-VERIFIED user (a password-only login, or
+   * a completed MFA challenge) and record the LOGIN audit event. This is the
+   * single source of truth for the session payload so the MFA path cannot drift
+   * from the password path.
+   */
+  static async issueVerifiedSession(
+    userId: number,
+    ipAddress?: string,
+    userAgent?: string,
+    auditDetails: Record<string, unknown> = {},
+  ): Promise<AuthResult> {
     const user = await prisma.user.findUnique({
-      where: { id: userWithPassword.id },
+      where: { id: userId },
       // `authVersion` is needed to stamp the session generation onto the access
       // token; it is stripped from the response payload below.
       select: { ...safeUserSelect, authVersion: true },
     });
     if (!user) throw new AppError(i18n.errors.auth.userNotFound, 404);
 
-    const { authVersion: loginAuthVersion, ...publicUser } = user as any;
+    const { authVersion: sessionAuthVersion, ...publicUser } = user as any;
 
     const permissions: string[] = await resolveEffectivePermissionsForUser({
       id: publicUser.id,
@@ -483,7 +569,7 @@ export class AuthService {
           entityId: String(publicUser.id),
           ipAddress: ipAddress ? String(ipAddress).slice(0, 64) : null,
           userAgent: userAgent ? String(userAgent).slice(0, 512) : null,
-          details: { role: publicUser.role, audience: audience ?? null },
+          details: { role: publicUser.role, ...auditDetails },
         },
       })
       .catch(() => {});
@@ -491,7 +577,7 @@ export class AuthService {
     const tokens = await AuthService.buildTokensForUser(
       publicUser.id,
       publicUser.role,
-      Number(loginAuthVersion ?? 0),
+      Number(sessionAuthVersion ?? 0),
       ipAddress,
       userAgent,
     );

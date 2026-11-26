@@ -1,5 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services/auth';
+import {
+  signMfaChallengeToken,
+  verifyMfaChallengeToken,
+  completeSecondFactor,
+  startEnrollment,
+  confirmEnrollment,
+  disableMfa,
+  regenerateRecoveryCodes,
+  getMfaStatus,
+} from '../services/mfa';
 import { catchAsync } from '../utils/catchAsync';
 import { z } from 'zod';
 import { validateBody } from '../middlewares/validate';
@@ -20,12 +30,29 @@ import { REFRESH_COOKIE_NAME, setRefreshCookie, clearRefreshCookie } from '../ut
 // surface, so anonymous account creation is impossible.
 
 export const login = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
-  const { user, token, accessToken, refreshToken, expiresInMs } = await AuthService.login(
+  const result = await AuthService.login(
     req.body,
     reqIp(req),
     reqUa(req),
     req.body?.audience as Role | undefined,
   );
+
+  // Account has a confirmed TOTP second factor: the password was correct but NO
+  // session has been minted. Return ONLY a short-lived, single-use challenge
+  // token — no access token, no refresh cookie — and let the client complete the
+  // second factor via POST /auth/mfa/challenge.
+  if (result.mfaRequired) {
+    const challenge = signMfaChallengeToken(result.user.id);
+    return res.status(200).json({
+      status: 'success',
+      mfaRequired: true,
+      challengeToken: challenge.token,
+      expiresInMs: challenge.expiresInMs,
+      data: { user: result.user },
+    });
+  }
+
+  const { user, token, accessToken, refreshToken, expiresInMs } = result;
 
   // The refresh credential is delivered ONLY as an HttpOnly cookie so frontend
   // JavaScript can never read it; it is deliberately NOT returned in the body.
@@ -155,6 +182,134 @@ export const changePassword = [
     });
   }),
 ];
+
+// ----------------------------------------------------------------------------
+// TOTP multi-factor authentication (MFA)
+// ----------------------------------------------------------------------------
+// The MFA self-service surface (setup / enable / disable / status / recovery
+// codes) is intentionally mounted behind `protectSelfService` — AUTHENTICATION
+// ONLY — for the SAME reason as `/me` and `/change-password`: a staff account
+// that is FORCED to enrol must still be able to reach the enrolment endpoints,
+// and `protect()` would otherwise block it with 403 MFA_ENROLLMENT_REQUIRED.
+// Completion of the challenge (`/mfa/challenge`) is PUBLIC: the caller holds
+// only a short-lived, single-use challenge token, never a session.
+
+const mfaChallengeSchema = z.object({
+  challengeToken: z.string().min(1).max(4096),
+  code: z.string().min(1).max(64).trim(),
+});
+
+export const mfaChallenge = [
+  validateBody(mfaChallengeSchema),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    const { challengeToken, code } = req.body as { challengeToken: string; code: string };
+
+    const verified = await verifyMfaChallengeToken(challengeToken);
+    if (!verified.ok) {
+      if (verified.reason === 'store-unavailable') {
+        return next(new AppError(i18n.errors.auth.mfaStoreUnavailable, 503));
+      }
+      if (verified.reason === 'expired') {
+        return next(new AppError(i18n.errors.auth.mfaChallengeExpired, 401));
+      }
+      if (verified.reason === 'replayed') {
+        return next(new AppError(i18n.errors.auth.mfaChallengeConsumed, 401));
+      }
+      return next(new AppError(i18n.errors.auth.mfaChallengeInvalid, 401));
+    }
+
+    const result = await completeSecondFactor(
+      verified.userId,
+      code,
+      reqIp(req) ?? undefined,
+      reqUa(req) ?? undefined,
+    );
+
+    setRefreshCookie(res, result.refreshToken);
+    return res.status(200).json({
+      status: 'success',
+      token: result.accessToken,
+      accessToken: result.accessToken,
+      expiresInMs: result.expiresInMs,
+      data: { user: result.user },
+    });
+  }),
+];
+
+const mfaEnableSchema = z.object({
+  code: z.string().min(6).max(64).trim(),
+});
+
+export const mfaSetup = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user) return next(new AppError(i18n.errors.auth.unauthenticated, 401));
+  const result = await startEnrollment(req.user.id);
+  res.status(200).json({ status: 'success', data: result });
+});
+
+export const mfaEnable = [
+  validateBody(mfaEnableSchema),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.unauthenticated, 401));
+    const { recoveryCodes } = await confirmEnrollment(req.user.id, req.body.code);
+    res.status(200).json({
+      status: 'success',
+      message: 'Two-factor authentication is now enabled. Store your recovery codes somewhere safe.',
+      data: { recoveryCodes },
+    });
+  }),
+];
+
+// Proof of possession (password OR a current second factor) is required for the
+// destructive / credential-rotating MFA operations.
+const mfaProofSchema = z
+  .object({
+    password: z.string().min(1).max(128).optional(),
+    code: z.string().min(1).max(64).optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.password || v.code), {
+    message: i18n.errors.auth.mfaProofRequired,
+    path: ['password'],
+  });
+
+export const mfaDisable = [
+  validateBody(mfaProofSchema),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.unauthenticated, 401));
+    await disableMfa(
+      req.user.id,
+      { password: req.body.password, code: req.body.code },
+      { ipAddress: reqIp(req) ?? undefined, userAgent: reqUa(req) ?? undefined },
+    );
+    res.status(200).json({
+      status: 'success',
+      message: 'Two-factor authentication has been disabled.',
+    });
+  }),
+];
+
+export const mfaRegenerateRecoveryCodes = [
+  validateBody(mfaProofSchema),
+  catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) return next(new AppError(i18n.errors.auth.unauthenticated, 401));
+    const { recoveryCodes } = await regenerateRecoveryCodes(
+      req.user.id,
+      { password: req.body.password, code: req.body.code },
+      { ipAddress: reqIp(req) ?? undefined, userAgent: reqUa(req) ?? undefined },
+    );
+    res.status(200).json({
+      status: 'success',
+      message: 'New recovery codes have been generated. Your previous codes are now invalid.',
+      data: { recoveryCodes },
+    });
+  }),
+];
+
+export const mfaStatus = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user) return next(new AppError(i18n.errors.auth.unauthenticated, 401));
+  const status = await getMfaStatus(req.user.id);
+  res.status(200).json({ status: 'success', data: status });
+});
 
 // ----------------------------------------------------------------------------
 // Forgot / Reset password

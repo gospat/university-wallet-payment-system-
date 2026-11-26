@@ -10,6 +10,7 @@ import {
   isSuperAdmin,
   resolveEffectivePermissionsForUser,
 } from '../services/permissionResolver';
+import { isMfaRequiredForUser } from '../services/mfa';
 
 declare global {
   namespace Express {
@@ -24,6 +25,12 @@ declare global {
          * first-login state and every `protect()`-guarded route is blocked.
          */
         mustChangePassword?: boolean;
+        /**
+         * Authoritative DB value of whether a confirmed TOTP second factor is
+         * enabled. Used by `protect()` to force staff enrolment when the MFA
+         * policy requires it.
+         */
+        mfaEnabled?: boolean;
         permissions?: string[];
       };
       cookies?: {
@@ -103,6 +110,7 @@ async function authenticate(req: Request): Promise<AppError | null> {
       accountStatus: true,
       isSuperAdmin: true,
       mustChangePassword: true,
+      mfaEnabled: true,
       authVersion: true,
     },
   });
@@ -143,6 +151,7 @@ async function authenticate(req: Request): Promise<AppError | null> {
     role,
     isSuperAdmin: superAdmin,
     mustChangePassword: (currentUser as any).mustChangePassword === true,
+    mfaEnabled: (currentUser as any).mfaEnabled === true,
     permissions: effectivePermissions,
   };
   return null;
@@ -170,6 +179,23 @@ export const protect = catchAsync(
         status: 'fail',
         code: 'PASSWORD_CHANGE_REQUIRED',
         error: 'You must change your initial password before continuing.',
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // MFA ENROLMENT GATE
+    // -----------------------------------------------------------------------
+    // When the MFA policy requires this role to hold a second factor (default:
+    // ADMIN / BURSARY) and the account has NOT yet confirmed enrolment, every
+    // `protect()`-guarded route is blocked until enrolment completes. The
+    // self-service MFA surface (mounted behind `protectSelfService`) remains
+    // reachable so the user CAN enrol. Fully backward compatible: the policy is
+    // 'off' when MFA_ENFORCEMENT=off, and a user who has enrolled is unaffected.
+    if (isMfaRequiredForUser({ role: user.role, mfaEnabled: user.mfaEnabled }) && user.mfaEnabled !== true) {
+      return res.status(403).json({
+        status: 'fail',
+        code: 'MFA_ENROLLMENT_REQUIRED',
+        error: i18n.errors.auth.mfaEnrollmentRequired,
       });
     }
     next();
