@@ -410,7 +410,6 @@ const CheckoutPage: React.FC = () => {
           <h1 className="text-2xl font-black text-gray-900 tracking-tight flex items-center gap-2">
             <CreditCard className="h-6 w-6 text-blue-600" /> {t.title}
           </h1>
-          <p className="text-gray-500 mt-1">{t.subtitle}</p>
         </div>
 
         {loading ? (
@@ -531,7 +530,7 @@ const CheckoutPage: React.FC = () => {
                 <p className="text-sm text-amber-800 mt-1">
                   {continueOption?.canResume
                     ? 'You can continue this payment attempt or check its current status below.'
-                    : 'Your payment is still being processed by the provider. Safe continuation of this exact payment attempt is not available from this device. Use Check Payment Status to refresh the latest state, or contact Bursary/Support if it remains unresolved.'}
+                    : 'Your payment is still being processed. Use Check Payment Status to refresh, or contact the Bursary if it stays unresolved.'}
                 </p>
                 <div className="mt-4 text-xs font-mono text-amber-900/80 bg-amber-100/60 border border-amber-200 rounded-lg px-3 py-2">
                   Reference:&nbsp;
@@ -581,8 +580,7 @@ const CheckoutPage: React.FC = () => {
                 </div>
                 {!continueOption?.canResume && !continueOptionLoading && (
                   <p className="mt-4 text-xs text-amber-700 leading-relaxed">
-                    If the provider cannot resolve this payment after some time, please contact the Bursary or Support with the
-                    reference above for assistance. Do not start a new payment until this attempt is resolved.
+                    If this is not resolved soon, contact the Bursary with the reference above. Do not start a new payment.
                   </p>
                 )}
               </section>

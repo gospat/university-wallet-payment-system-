@@ -307,8 +307,7 @@ const StudentDashboard: React.FC = () => {
                 Browse Available Payments
               </h2>
               <p className="text-blue-100 text-sm md:text-base font-medium mt-1">
-                Select any fee you need to pay — tuition, hostel, departmental dues, and more.
-                No pre-billing required.
+                Pay any fee you need — no pre-billing required.
               </p>
             </div>
             <button
@@ -331,7 +330,6 @@ const StudentDashboard: React.FC = () => {
                 <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
                   {scheduleLoading ? '—' : naira(kpis.totalPaid)}
                 </div>
-                <div className="mt-1 text-sm text-slate-500 font-medium">Total settled fees to date</div>
               </div>
               <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center ring-1 ring-emerald-100">
                 <Banknote className="h-5 w-5" />
@@ -348,7 +346,6 @@ const StudentDashboard: React.FC = () => {
                 <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
                   {invLoading ? '—' : invTotal.toLocaleString()}
                 </div>
-                <div className="mt-1 text-sm text-slate-500 font-medium">Checkout sessions initiated</div>
               </div>
               <div className="w-11 h-11 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center ring-1 ring-blue-100">
                 <Clock className="h-5 w-5" />
@@ -379,7 +376,6 @@ const StudentDashboard: React.FC = () => {
                 <div className="mt-3 text-2xl font-black text-slate-900 tracking-tight">
                   {rcptLoading ? '—' : rcptTotal.toLocaleString()}
                 </div>
-                <div className="mt-1 text-sm text-slate-500 font-medium">Official payment receipts</div>
               </div>
               <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center ring-1 ring-indigo-100">
                 <CircleDollarSign className="h-5 w-5" />
@@ -553,8 +549,8 @@ const StudentDashboard: React.FC = () => {
                       <tr>
                         <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Invoice</th>
                         <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Fee / Purpose</th>
-                        <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Due</th>
-                        <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Due</th>
+                        <th className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Due Date</th>
+                        <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Amount Due</th>
                         <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Paid</th>
                         <th className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Remaining</th>
                         <th className="px-4 py-3 text-center text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>

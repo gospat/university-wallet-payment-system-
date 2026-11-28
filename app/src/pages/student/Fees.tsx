@@ -301,7 +301,7 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
                   )}
                 </div>
                 <p className="text-sm text-indigo-100 mt-1 leading-relaxed">
-                  <strong className="text-white font-semibold">Do these first.</strong> These are bills issued to <em>you personally</em> by the Bursary or Admin (fines, targeted levies, acceptance fees). Paying any other fee below does NOT count as these.
+                  <strong className="text-white font-semibold">Bills issued to you personally</strong> by the Bursary or Admin. Paying any other fee does not count as these.
                 </p>
               </div>
             </div>
@@ -343,7 +343,7 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
               No personal bills assigned right now
             </h3>
             <p className="text-sm text-slate-500 max-w-md mx-auto leading-relaxed">
-              Nothing urgent from the Bursary. If a fine or targeted levy is issued for your account, it will appear here <strong>above the fold</strong> with a bright banner, so you can't miss it.
+              You have no outstanding personal bills. New fines or targeted levies issued to your account will appear here.
             </p>
           </div>
         )}
@@ -441,13 +441,10 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
                         ) : (
                           <>
                             <Sparkles className="w-4 h-4" />
-                            PAY ASSIGNED BILL →
+                            Pay Assigned Bill
                           </>
                         )}
                       </button>
-                      <div className="mt-2 text-center text-[10px] text-indigo-500 font-bold uppercase tracking-wider">
-                        Settles the bill above only
-                      </div>
                     </div>
                   </div>
                 </article>
@@ -473,20 +470,16 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h2 className="text-base font-extrabold tracking-tight text-slate-900">
-                    General School Fees — Catalogue
+                    School Fees Catalogue
                   </h2>
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 ring-1 ring-slate-200 text-[10px] font-semibold uppercase tracking-wider">
-                    Optional · Pick what applies
-                  </span>
                   {!loading && resp && (
                     <span className="text-xs text-slate-500 tabular-nums">
-                      <b className="text-slate-700 font-bold">{catalogueFees.length}</b> general fees
-                      {resp.total > catalogueFees.length ? ` · ${resp.total - assignedFees.length} paginated` : ''}
+                      <b className="text-slate-700 font-bold">{catalogueFees.length}</b> fees
                     </span>
                   )}
                 </div>
                 <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                  These are standard school fees <strong>available to all students</strong>. Select the ones that apply to you — e.g., tuition, ID card, convocation, hostel.
+                  Standard fees available to all students.
                 </p>
               </div>
             </div>
@@ -563,11 +556,7 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
         </div>
 
         {/* Catalogue counter bar */}
-        <div className="px-6 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-slate-500 border-b border-slate-100">
-          <span>
-            {resp ? <b className="text-slate-700 font-bold">{catalogueFees.length}</b> : '—'} general fees loaded
-            {resp && catalogueFees.length > 0 ? ` · page ${(resp.page - 1) * resp.pageSize + 1}–${Math.min(resp.page * resp.pageSize, resp.total - assignedFees.length)}` : ''}
-          </span>
+        <div className="px-6 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2 text-xs text-slate-500 border-b border-slate-100">
           <div className="flex items-center gap-2">
             <span className="font-bold uppercase tracking-wide">Page size</span>
             <select
@@ -675,7 +664,7 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
                         ) : (
                           <>
                             <DollarSign className="w-3.5 h-3.5" />
-                            PAY THIS FEE →
+                            Pay This Fee
                           </>
                         )}
                       </button>
@@ -699,9 +688,6 @@ const BrowseCataloguePage: React.FC<BrowseCataloguePageProps> = ({ onNavigateHis
                 disabled={page <= 1}
                 className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold disabled:opacity-40 hover:bg-slate-50"
               >← Previous</button>
-              <div className="text-sm tabular-nums text-slate-600 min-w-[80px] text-center font-bold">
-                {page} / {totalPages}
-              </div>
               <button
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
@@ -964,18 +950,16 @@ const InvoiceDetailPage: React.FC = () => {
       : 'mt-3 w-full inline-flex items-center justify-center rounded-md text-white text-sm font-semibold px-4 py-3 bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2';
     let title = 'Payment Confirmation Pending';
     let body =
-      'There is already a payment attempt awaiting confirmation for this invoice. ' +
-      'Please check the status of that payment before starting a new one.';
+      'A payment for this invoice is awaiting confirmation. ' +
+      'Check its status before starting a new one.';
     if (blockingPendingDerived && blockingPendingDerived.override === true) {
       if (blockingPendingDerived.label === 'Awaiting Confirmation') {
         title = 'Awaiting Confirmation';
       } else if (blockingPendingDerived.label === 'Confirmation Required') {
         title = 'Confirmation Required';
         body =
-          'This payment has been waiting for confirmation for some time and we still need ' +
-          'additional information from the provider. If you completed the payment or were debited, ' +
-          'do not make another payment. Check the status again and, if unchanged, contact the ' +
-          'Bursary with your payment reference for reconciliation.';
+          'This payment has been pending confirmation for a while. If you were debited, ' +
+          'do not pay again — check the status, or contact the Bursary with your reference.';
       } else if (blockingPendingDerived.label === 'Pending Review') {
         title = 'Pending Review';
       }
@@ -1313,9 +1297,9 @@ const StudentFeesPage: React.FC<{ initialTab?: 'browse' | 'history' | 'schedule'
   }, [user]);
   const brand = i18n.portals.student.dashboardBrand;
 
-  const tabs: Array<{ key: 'browse' | 'history'; label: string; subtitle: string; to: string }> = [
-    { key: 'browse', label: 'Make Payment', subtitle: 'Browse all available fees and pick which to pay', to: '/student/payments' },
-    { key: 'history', label: 'Payment History', subtitle: 'Past invoices, payments and status', to: '/student/payment-history' },
+  const tabs: Array<{ key: 'browse' | 'history'; label: string; to: string }> = [
+    { key: 'browse', label: 'Make Payment', to: '/student/payments' },
+    { key: 'history', label: 'Payment History', to: '/student/payment-history' },
   ];
 
   return (
@@ -1336,11 +1320,6 @@ const StudentFeesPage: React.FC<{ initialTab?: 'browse' | 'history' | 'schedule'
             <h1 className="text-2xl font-bold text-slate-900">
               {active === 'browse' ? 'Make Payment' : 'Payment History'}
             </h1>
-            <p className="text-sm text-slate-500 mt-1">
-              {active === 'browse'
-                ? 'All school fees and charges set by the Bursary. Pick the one applicable to you.'
-                : 'Your invoice history: see status, amounts paid, and open payment records.'}
-            </p>
           </div>
           <div className="flex items-center bg-white rounded-xl border border-slate-200 p-1 shadow-sm">
             {tabs.map((t) => {

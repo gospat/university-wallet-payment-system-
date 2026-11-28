@@ -339,7 +339,7 @@ const PaymentConfirmation: React.FC = () => {
           to={invoiceId ? `/student/invoices/${invoiceId}` : '/student/invoices'}
           className="inline-flex items-center gap-1.5 text-sm text-blue-700 hover:text-blue-900 font-medium"
         >
-          <ArrowLeft className="h-4 w-4" /> {t.ctaCancel} / Back to Invoice
+          <ArrowLeft className="h-4 w-4" /> Back to Invoice
         </Link>
       </div>
 
@@ -347,7 +347,6 @@ const PaymentConfirmation: React.FC = () => {
         <h1 className="text-2xl sm:text-3xl font-black text-gray-900 tracking-tight flex items-center justify-center sm:justify-start gap-2">
           <CreditCard className="h-7 w-7 text-blue-600" /> {t.heroTitle}
         </h1>
-        <p className="text-gray-500 mt-2">{t.heroSubtitle}</p>
       </div>
 
       {loading ? (

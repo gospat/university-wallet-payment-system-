@@ -4,7 +4,7 @@ import PortalShell from '../../components/PortalShell';
 import { useAuth } from '../../context/AuthContext';
 import { i18n } from '../../i18n/en';
 import api from '../../services/api';
-import { KeyRound, User, Save, BookOpen, GraduationCap, Mail, Phone, MapPin, CheckCircle2, AlertTriangle, Loader2, XCircle } from 'lucide-react';
+import { KeyRound, User, Save, GraduationCap, Mail, Phone, MapPin, CheckCircle2, AlertTriangle, Loader2, XCircle } from 'lucide-react';
 import PasswordInput, { scorePassword } from '../../components/ui/PasswordInput';
 
 type StudentProfileResponse = {
@@ -132,7 +132,6 @@ const ProfilePage: React.FC = () => {
           <h1 className="text-2xl font-black text-gray-900 tracking-tight flex items-center gap-2">
             <User className="h-6 w-6 text-blue-600" /> {t.title}
           </h1>
-          <p className="text-gray-500 mt-1">{t.subtitle}</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -143,7 +142,6 @@ const ProfilePage: React.FC = () => {
                   <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                     <Mail className="h-5 w-5 text-blue-600" /> {t.contactTitle}
                   </h2>
-                  <p className="text-sm text-gray-500 mt-1">{t.contactHint}</p>
                 </div>
               </header>
 
@@ -209,7 +207,6 @@ const ProfilePage: React.FC = () => {
                 <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                   <KeyRound className="h-5 w-5 text-blue-600" /> {t.passwordTitle}
                 </h2>
-                <p className="text-sm text-gray-500 mt-1">{t.passwordHint}</p>
               </header>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <PasswordInput
@@ -272,7 +269,6 @@ const ProfilePage: React.FC = () => {
                 <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                   <GraduationCap className="h-5 w-5 text-amber-600" /> {t.academicTitle}
                 </h2>
-                <p className="text-xs text-gray-500 mt-1">{t.academicHint}</p>
               </header>
               <dl className="grid grid-cols-1 gap-3 text-sm">
                 {[
@@ -293,16 +289,6 @@ const ProfilePage: React.FC = () => {
                   </div>
                 ))}
               </dl>
-            </section>
-
-            <section className="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-5">
-              <div className="flex items-start gap-3">
-                <BookOpen className="h-5 w-5 text-blue-700 mt-0.5 shrink-0" />
-                <div className="text-sm text-blue-900">
-                  <p className="font-semibold">Need help?</p>
-                  <p className="opacity-80 mt-1">Contact admissions for any corrections to academic records. Password resets are also available via the login page forgot-password flow.</p>
-                </div>
-              </div>
             </section>
           </aside>
         </div>
